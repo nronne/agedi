@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-all = [
+full = [
     "schnetpack",
 ]
 test = [
