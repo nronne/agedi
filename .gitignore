@@ -2,3 +2,4 @@
 .coverage
 .coverage.xml
 .report.xml
+docs/_build
