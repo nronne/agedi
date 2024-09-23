@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from agedi.models.head import Head
 
 def build_gated_equivariant_mlp(
     s_in: int,
@@ -77,12 +78,11 @@ def build_gated_equivariant_mlp(
     return out_net
 
 
-class PositionsScore(nn.Module):
-    key = "positions"
+class PositionsScore(Head):
     def __init__(
             self, input_dim_scalar=66, input_dim_vector=64, gated_blocks=3, **kwargs
     ):
-        super().__init__(**kwargs)
+        super().__init__(key="positions", **kwargs)
         self.net = build_gated_equivariant_mlp(
             input_dim_scalar,
             input_dim_vector,
@@ -90,7 +90,7 @@ class PositionsScore(nn.Module):
             n_layers=gated_blocks,
         )
 
-    def forward(self, batch):
+    def _score(self, batch):
         scalar_representation = batch["scalar_representation"]
         vector_representation = batch["vector_representation"]
 

@@ -9,6 +9,9 @@ from .atoms_graph import AtomsGraph
 
 
 class Dataset(pl.LightningDataModule):
+    """
+    Defines a custom dataset for AtomsGraph data
+    """
     def __init__(
         self,
         batch_size: int = 32,
@@ -20,6 +23,34 @@ class Dataset(pl.LightningDataModule):
         cutoff: float = 6.0,
         **kwargs
     ) -> None:
+        """
+        Args:
+
+            batch_size: int
+                The batch size for the DataLoader
+
+            n_train: Union[float, int]
+                The number of training samples. If float, it is interpreted as a fraction of the dataset size
+
+            n_val: Union[float, int]
+                The number of validation samples. If float, it is interpreted as a fraction of the dataset size
+
+            n_test: Union[float, int]
+                The number of test samples. If float, it is interpreted as a fraction of the dataset size
+
+            shuffle: bool
+                Whether to shuffle the dataset
+
+            properties: List[str]
+                The properties to include in the dataset. Can be "energy", "forces", or both
+
+            cutoff: float
+                The cutoff radius for the neighbor list
+
+            kwargs: dict
+                Additional arguments to pass to the DataLoader
+        
+        """
         super().__init__(**kwargs)
 
         self.batch_size = batch_size
@@ -36,6 +67,19 @@ class Dataset(pl.LightningDataModule):
         self.test_idx = None
 
     def add_atoms_data(self, data: List[Atoms]) -> None:
+        """
+        Converts a list of ASE Atoms objects to AtomsGraph objects and adds them to the dataset
+
+        Args:
+
+            data: List[Atoms]
+                A list of ASE Atoms objects
+
+
+        Returns:
+
+            None
+        """
         dataset = []
         for d in data:
             ag = AtomsGraph.from_atoms(d, cutoff=self.cutoff)
@@ -45,10 +89,29 @@ class Dataset(pl.LightningDataModule):
                 ag.forces = torch.tensor(d.get_forces()).reshape(-1, 3)
             dataset.append(ag)
 
-        self.dataset = dataset
+        if self.dataset is None:
+            self.dataset = dataset
+        else:
+            self.dataset.extend(dataset)
 
     def add_graph_data(self, data: List[AtomsGraph]) -> None:
-        self.dataset = data
+        """
+        Adds a list of AtomsGraph objects to the dataset
+
+        Args:
+
+            data: List[AtomsGraph]
+                A list of AtomsGraph objects
+
+        Returns:
+
+            None
+        
+        """
+        if self.dataset is None:
+            self.dataset = data
+        else:
+            self.dataset.extend(data)
 
     def setup(self, stage: Optional[str] = None) -> None:
         if self.train_idx is None:
@@ -60,12 +123,34 @@ class Dataset(pl.LightningDataModule):
             self.test_idx = test_subset.indices
 
     def train_dataloader(self) -> DataLoader:
+        """
+        Returns a DataLoader for the training dataset
+
+        Returns:
+
+            DataLoader
+        
+        """
         return DataLoader(
             [self.dataset[i] for i in self.train_idx], batch_size=self.batch_size, shuffle=True
         )
 
     def val_dataloader(self) -> DataLoader:
+        """
+        Returns a DataLoader for the validation dataset
+
+        Returns:
+
+            DataLoader
+        """
         return DataLoader([self.dataset[i] for i in self.val_idx], batch_size=self.batch_size)
 
     def test_dataloader(self) -> DataLoader:
+        """
+        Returns a DataLoader for the test dataset
+
+        Returns:
+
+            DataLoader
+        """
         return DataLoader([self.dataset[i] for i in self.test_idx], batch_size=self.batch_size)

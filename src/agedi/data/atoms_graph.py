@@ -1,6 +1,6 @@
 import functools
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -12,9 +12,27 @@ from agedi.diffusion.noisers import Noiser
 
 
 def batched(update_keys: Optional[Sequence[str]] = None, return_batch: bool = False):
-    def decorator(func):
+    """
+    Decorator for functions that return Data objects, but can with this operator be
+    called with batched inputs. The function will be called for each element in the
+    batch, and the results will be concatenated into a single Data object.
+
+    If called with a Data-object as input, the function will be called with as if it
+    not decorated.
+    
+
+    Args:
+
+    update_keys: Optional[Sequence[str]]
+        The keys in the Batch object that should be updated. If None, no keys will be updated.
+
+    return_batch: bool
+        If True, the function will return a Batch object instead of None.
+    
+    """
+    def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
-        def wrapper(self, *args, **kwargs):
+        def wrapper(self, *args, **kwargs) -> Union[Data, Batch]:
             if isinstance(self, Batch):
                 data_list = self.to_data_list()
                 for d in data_list:
@@ -37,7 +55,20 @@ def batched(update_keys: Optional[Sequence[str]] = None, return_batch: bool = Fa
 
 
 class Representation:
+    """
+    Class defining a general representation. The representation is a dictionary of tensors, where each tensor
+    is a representation of a certain type of information. The tensors are stored in a dictionary, where the keys
+    are degree of the representation l (with dim = 2l+1), and the values are the tensors themselves.
+
+    The representation can be initialized with either a scalar or a vector representation, or both. The scalar
+    representation is a tensor of shape (n_nodes, n_features, 1), and the vector representation is a tensor of shape
+    (n_nodes, n_features, 3). The representation can be accessed with the properties scalar and vector, respectively.
+
+    """
     def __init__(self, **kwargs):
+        """
+        Initialize the representation with the given tensors.
+        """
 
         scalar = kwargs.pop("scalar", None)
         if scalar is not None:
@@ -52,22 +83,56 @@ class Representation:
             self._tensors[key] = value
 
     @property
-    def scalar(self):
+    def scalar(self) -> torch.Tensor:
+        """
+        Return the scalar representation tensor.
+        """
         return self._tensors["l0"]
 
     @scalar.setter
-    def scalar(self, value):
+    def scalar(self, value: torch.Tensor) -> None:
+        """
+        Set the scalar representation tensor.
+        """
         self._tensors["l0"] = value
     
     @property
-    def vector(self):
+    def vector(self) -> torch.Tensor:
+        """
+        Return the vector representation tensor.
+        """
         return self._tensors["l1"]
 
     @vector.setter
-    def vector(self, value):
+    def vector(self, value: torch.Tensor) -> None:
+        """
+        Set the vector representation tensor.
+        """
         self._tensors["l1"] = value
     
-    def to_tensor(self, n_graphs):
+    def to_tensor(self, n_graphs: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Convert the representation to a tensor. The representations are concatenated along the
+        1st dimension, and the resulting tensor is returned along with slices and names of the
+        representations.
+
+        Args:
+
+        n_graphs: int
+            The number of graphs in the batch.
+
+        Returns:
+
+        tensor: torch.Tensor
+            The tensor representation of the batch with shape (n_nodes, n_features).
+
+        slices: torch.Tensor
+            The slices of the tensor representation with shape (n_graphs, n_slices).
+
+        ls: torch.Tensor
+            The degrees of the tensor representation with shape (n_graphs, 1).
+        
+        """
         nodes = self.scalar.shape[0]
 
         tensor = []
@@ -86,7 +151,28 @@ class Representation:
         return tensor, slices, ls
 
     @classmethod
-    def from_tensor(cls, tensor, slices, ls):
+    def from_tensor(cls, tensor: torch.Tensor, slices: torch.Tensor, ls: torch.Tensor) -> "Representation":
+        """
+        Create a representation from a tensor. The tensor is split into the different representations
+        according to the slices and the degrees of the representations are given by ls.
+
+        Args:
+
+        tensor: torch.Tensor
+            The tensor representation of the batch with shape (n_nodes, n_features).
+
+        slices: torch.Tensor
+            The slices of the tensor representation with shape (n_graphs, n_slices).
+
+        ls: torch.Tensor
+            The degrees of the tensor representation with shape (n_graphs, 1).
+
+        Returns:
+
+        representation: Representation
+            The representation object.
+
+        """
         n_nodes = tensor.shape[0]
         slices = slices[0]
         ls = ls[0]
@@ -99,8 +185,33 @@ class Representation:
 
 
 class AtomsGraph(Data):
+    """
+    Class defining a graph with atoms as nodes and edges formed between all atoms
+    within a finite curoff.formed betw
+    
+    """
     @classmethod
-    def from_atoms(cls, atoms: Atoms, cutoff=6.0, dtype=torch.float):
+    def from_atoms(cls, atoms: Atoms, cutoff: int=6.0, dtype: torch.dtype=torch.float) -> "AtomsGraph":
+        """
+        Create a graph from an ASE Atoms object.
+
+        Args:
+
+        atoms: Atoms
+            The ASE Atoms object.
+
+        cutoff: float
+            The cutoff radius for the edges.
+
+        dtype: torch.dtype
+            The data type of the tensors.
+
+        Returns:
+
+        graph: AtomsGraph
+            The graph object.
+        
+        """
         # Nodes: The initial node features are just the atomic numbers.
         node_feat = torch.tensor(atoms.get_atomic_numbers(), dtype=torch.long).reshape(
             -1
@@ -130,14 +241,46 @@ class AtomsGraph(Data):
     @classmethod
     def from_prior(
         cls,
-        n_atoms,
-        atomic_numbers,
-        positions,
-        cell=None,
-        pbc=None,
-        template=None,
-        cutoff=6.0,
-    ):
+        n_atoms: Union[int, Noiser],
+        atomic_numbers: Union[torch.Tensor, Noiser],
+        positions: Union[torch.Tensor, Noiser],
+        cell: Union[torch.Tensor, Noiser]=None,
+        pbc: torch.Tensor=None,
+        template: Union["AtomsGraph", Atoms]=None,
+        cutoff: int=6.0,
+    ) -> "AtomsGraph":
+        """
+        Create a graph from a priori information.
+
+        Args:
+
+        n_atoms: int or Noiser
+            The number of atoms in the system.
+
+        atomic_numbers: torch.Tensor or Noiser
+            The atomic numbers of the atoms.
+
+        positions: torch.Tensor or Noiser
+            The positions of the atoms.
+
+        cell: torch.Tensor or Noiser
+            The cell of the system.
+
+        pbc: torch.Tensor
+            The periodic boundary conditions.
+
+        template: AtomsGraph or Atoms
+            The template graph or atoms object.
+
+        cutoff: float
+            The cutoff radius for the edges.
+
+        Returns:
+
+        graph: AtomsGraph
+            The graph object.
+
+        """
         if isinstance(n_atoms, Noiser):
             n_atoms = n_atoms.prior()
         else:
@@ -207,7 +350,26 @@ class AtomsGraph(Data):
             mask=mask,
         )
 
-    def add_batch_attr(self, key, value, type="node"):
+    def add_batch_attr(self, key: str, value: torch.Tensor, type: str="node") -> None:
+        """
+        Add a batch attribute to the graph.
+
+        Args:
+
+        key: str
+            The key of the attribute.
+
+        value: torch.Tensor
+            The value of the attribute.
+
+        type: str
+            The type of the attribute. Can be either "node" or "edge".
+
+
+        Returns:
+
+        None
+        """
         self._store[key] = value
 
         if hasattr(self, "_slice_dict"):
@@ -221,7 +383,13 @@ class AtomsGraph(Data):
             self._slice_dict[key] = self._slice_dict[k]
             self._inc_dict[key] = self._inc_dict[k]
 
-    def to_atoms(self, threshold=None):
+    def to_atoms(self) -> Atoms:
+        """
+        Convert the graph to an ASE Atoms object.
+
+        Only works on unbatched graphs.
+        
+        """
         numbers = self.x.detach().numpy()
         positions = self.pos.detach().numpy()
         return Atoms(
@@ -232,7 +400,42 @@ class AtomsGraph(Data):
         )
 
     @staticmethod
-    def make_graph(positions, cell, cutoff, pbc, dtype=None):
+    def make_graph(
+        positions: torch.Tensor,
+        cell: torch.Tensor,
+        cutoff: int,
+        pbc: torch.Tensor,
+        dtype: torch.dtype=None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        
+        """
+        Create the graph-edges from the positions and cell.
+
+        Args:
+
+        positions: torch.Tensor
+            The positions of the atoms.
+
+        cell: torch.Tensor
+            The cell of the system.
+
+        cutoff: float
+            The cutoff radius for the edges.
+
+        pbc: torch.Tensor
+            The periodic boundary conditions.
+
+        dtype: torch.dtype
+            The data type of the output.
+
+        Returns:
+
+        edge_index: torch.Tensor
+            The edge index tensor.
+
+        shift_vectors: torch.Tensor
+            The shift vectors tensor.
+        """
         if dtype is None:
             dtype = positions.dtype
 
@@ -255,12 +458,25 @@ class AtomsGraph(Data):
         return edge_index, shift_vectors
 
     @batched(update_keys=["edge_index", "shift_vectors"])
-    def update_graph(self):
+    def update_graph(self) -> None:
+        """
+        Update the graph with new edges
+        
+        This should be called after changing any of the positions or cell.
+        This should be calle
+
+        Returns:
+
+        None
+        """
+
+        cutoff = self.cutoff.item() if isinstance(self.cutoff, torch.Tensor) else self.cutoff
+        
         device = self.pos.device
         edge_index, shift_vectors = self.make_graph(
             self.pos.detach().cpu(),
             self.cell.detach().cpu(),
-            self.cutoff,
+            cutoff,
             self.pbc.detach().cpu(),
         )
         self.edge_index = edge_index.to(device)
@@ -271,17 +487,37 @@ class AtomsGraph(Data):
         #     atoms = self.get_atoms()
         #     atoms.wrap()
         #     positions = atoms.get_positions()
-        #     self.pos.data = torch.tensor(positions, dtype=self.pos.dtype)
+        #     self.pos.dat
 
-    def clear_graph(self):
+    def clear_graph(self) -> None:
+        """
+        Clear the graph removing all edges
+        """
         del self.edge_index
         del self.shift_vectors
 
-    def copy(self):
+    def copy(self) -> "AtomsGraph":
+        """
+        Create a copy of the graph with each tensor cloned.
+
+        Returns:
+
+        copy: Graph
+            The copied graph.
+        """    
         return self.__copy__()
 
     @batched(return_batch=True)
-    def __copy__(self):
+    def __copy__(self) -> "AtomsGraph":
+        """
+        Create a copy of the graph with each tensor cloned.
+
+        Returns:
+
+        copy: Graph
+            The copied graph.
+
+        """
         return AtomsGraph(
             x=self.x.clone(),
             edge_index=self.edge_index.clone(),
@@ -294,13 +530,26 @@ class AtomsGraph(Data):
             mask=self.mask.clone(),
         )
 
-    def __len__(self):
+    def __len__(self) -> int:
+        """
+        Return the number of atoms in the graph.
+        """
         return self.pos.shape[0]
 
-    # properties
-
     @Data.pos.setter
-    def pos(self, pos):
+    def pos(self, pos: torch.Tensor) -> None:
+        """
+        Set the positions of the atoms.
+
+        Args:
+
+        pos: torch.Tensor
+            The new positions of the atoms.
+
+        Returns:
+
+        None
+        """
         if "pos" in self._store:
             self.clear_graph()
         if "mask" in self._store:
@@ -312,7 +561,15 @@ class AtomsGraph(Data):
             self.add_batch_attr("frac", f, type="node")
 
     @property
-    def frac(self):
+    def frac(self) -> torch.Tensor:
+        """
+        Return the fractional coordinates of the atoms.
+
+        Returns:
+
+        frac: torch.Tensor
+            The fractional coordinates of the atoms.
+        """
         if "frac" in self._store:
             return self["frac"]
         else:
@@ -321,7 +578,19 @@ class AtomsGraph(Data):
             return f
         
     @frac.setter
-    def frac(self, frac):
+    def frac(self, frac: torch.Tensor) -> None:
+        """
+        Set fractional coordinates. All positions are also updated.
+
+        Args:
+
+        frac: torch.Tensor
+            The fractional coordinates of the atoms.
+
+        Returns:
+
+        None
+        """
         frac %= 1
         if "frac" in self._store:
             self.clear_graph()
@@ -333,7 +602,20 @@ class AtomsGraph(Data):
         r = self.frac_to_pos(frac)
         Data.pos.fset(self, r)
 
-    def frac_to_pos(self, f):
+    def frac_to_pos(self, f: torch.Tensor) -> torch.Tensor:
+        """
+        Convert fractional coordinates to cartesian coordinates.
+
+        Args:
+
+        f: torch.Tensor
+            The fractional coordinates.
+
+        Returns:
+
+        r: torch.Tensor
+            The cartesian coordinates.
+        """
         cells = self.cell
         if isinstance(self, Batch):
             cells = cells.view(-1, 3, 3)[self.batch]
@@ -343,7 +625,20 @@ class AtomsGraph(Data):
         r = (f.unsqueeze(1) @ cells).reshape(-1, 3)
         return r
 
-    def pos_to_frac(self, r):
+    def pos_to_frac(self, r: torch.Tensor) -> torch.Tensor:
+        """
+        Convert cartesian coordinates to fractional coordinates.
+
+        Args:
+
+        r: torch.Tensor
+            The cartesian coordinates.
+
+        Returns:
+
+        f: torch.Tensor
+            The fractional coordinates.
+        """
         cells = self.cell
         if isinstance(self, Batch):
             cells = cells.view(-1, 3, 3)[self.batch]
@@ -354,30 +649,80 @@ class AtomsGraph(Data):
         return f % 1
         
     @Data.x.setter
-    def x(self, x):
+    def x(self, x: torch.Tensor) -> None:
+        """
+        Set the atomic types of the graph
+
+        Args:
+
+        x: torch.Tensor
+            The atomic types of the graph
+
+        Returns:
+
+        None
+        """
         if "mask" in self._store:
             x[self.mask] = self.x[self.mask]
         Data.x.fset(self, x)
 
     @property
-    def positions_mask(self):
+    def positions_mask(self) -> torch.Tensor:
+        """
+        Return the mask of the positions that are fixed.
+        True for fixed atom-positions and else false.
+
+        Returns:
+
+        mask: torch.Tensor
+            The mask of the positions that are fixed.
+        """
         pos_mask = torch.zeros_like(self.pos, dtype=torch.bool)
         pos_mask[self.mask, :] = True
         return pos_mask
 
     @property
-    def time(self):
+    def time(self) -> torch.Tensor:
+        """
+        Return the time of the graph.
+
+        Returns:
+
+        time: torch.Tensor
+            The time of the graph.
+        """
         return self["time"] if "time" in self._store else None
 
     @time.setter
-    def time(self, t):
+    def time(self, t: torch.Tensor) -> None:
+        """
+        Set the time of the graph.
+
+        Args:
+
+        t: torch.Tensor
+            The time of the graph.
+
+        Returns:
+
+        None
+        """
         if "mask" in self._store:
             t = self.apply_mask(t.squeeze()).unsqueeze(1)
         # self._store.t = t
         self.add_batch_attr("time", t, type="node")
 
     @property
-    def representation(self):
+    def representation(self) -> Representation:
+        """
+        Return the representation of the graph.
+
+        Returns:
+
+        representation: Representation
+            The representation of the graph.
+        
+        """
         return (
             Representation.from_tensor(self.repr, self.repr_slices, self.repr_ls)
             if "repr" in self._store
@@ -385,7 +730,19 @@ class AtomsGraph(Data):
         )
 
     @representation.setter
-    def representation(self, representation):
+    def representation(self, representation: Representation) -> None:
+        """
+        Set the representation of the graph.
+
+        Args:
+
+        representation: Representation
+            The representation of the graph.
+
+        Returns:
+
+        None
+        """
         n_graphs = self.num_graphs if "num_graphs" in self._store else 1
         tensor, slices, ls = representation.to_tensor(n_graphs)
         self.add_batch_attr("repr", tensor, type="node")
@@ -397,13 +754,37 @@ class AtomsGraph(Data):
 
     # Utility functions:
     @batched(update_keys=["pos"])
-    def wrap_positions(self):
+    def wrap_positions(self) -> None:
+        """
+        Wrap the positions of the atoms to the unit cell.
+
+        Returns:
+
+        None
+        """
         atoms = self.to_atoms()
         atoms.wrap()
         positions = atoms.get_positions()
         self.pos.data = torch.tensor(positions, dtype=self.pos.dtype)
 
-    def apply_mask(self, x, val=0.0):
+    def apply_mask(self, x: torch.Tensor, val: float=0.0) -> torch.Tensor:
+        """
+        Apply the mask to the tensor x.
+
+        Args:
+
+        x: torch.Tensor
+            The tensor to apply the mask to.
+
+        val: float
+            The value to set the masked values to.
+
+        Returns:
+
+        x: torch.Tensor
+            The tensor with the mask applied.
+        """
+        
         if x.shape == self.mask.shape:
             x[self.mask] = val
         elif x.shape == self.positions_mask.shape:

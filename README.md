@@ -1,2 +1,5 @@
-# agedi
+# AGeDi
+
+
+
 Atomistic Generative Diffusion

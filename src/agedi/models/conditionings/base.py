@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 import torch
 
 
-class Conditioning(ABC):
+class Conditioning(ABC, torch.nn.Module):
     """
     Conditioning Base Class
 
