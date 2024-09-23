@@ -6,12 +6,20 @@
 AGeDI Documentation
 ===================
 
-Add your content using ``reStructuredText`` syntax. See the
-`reStructuredText <https://www.sphinx-doc.org/en/master/usage/restructuredtext/index.html>`_
-documentation for details.
+**AGeDI** pronounced "A Jedi" is a library for Atomistic Generative
+Diffusion build on PyG, Lightning and ASE and offers customizable
+diffusion models for periodic atomistic material generation.
 
+.. note::
+   
+   This project is under active development.
 
+   
 .. toctree::
+   installation
+   tutorial
    :maxdepth: 2
    :caption: Contents:
+
+	     
 
