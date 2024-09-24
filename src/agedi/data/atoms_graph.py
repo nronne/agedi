@@ -8,9 +8,6 @@ from ase import Atoms
 from matscipy.neighbours import neighbour_list
 from torch_geometric.data import Batch, Data
 
-from agedi.diffusion.noisers import Noiser
-
-
 def batched(update_keys: Optional[Sequence[str]] = None, return_batch: bool = False) -> Callable:
     """Batched decorator
     
@@ -55,7 +52,6 @@ def batched(update_keys: Optional[Sequence[str]] = None, return_batch: bool = Fa
         return wrapper
 
     return decorator
-
 
 class Representation:
     """Representation class
@@ -222,7 +218,6 @@ class Representation:
             
         return cls(**d)
 
-
 class AtomsGraph(Data):
     """Atomistic Graph Class
     
@@ -292,32 +287,14 @@ class AtomsGraph(Data):
         )
 
     @classmethod
-    def from_prior(
+    def empty(
         cls,
-        n_atoms: Union[int, Noiser],
-        atomic_numbers: Union[torch.Tensor, Noiser],
-        positions: Union[torch.Tensor, Noiser],
-        cell: Union[torch.Tensor, Noiser]=None,
-        pbc: torch.Tensor=None,
-        template: Union["AtomsGraph", Atoms]=None,
-        cutoff: int=6.0,
+        cutoff: int=6.0
     ) -> "AtomsGraph":
-        """Create a graph from a priori information.
+        """Create an empty graph.
 
         Parameters
         ----------
-        n_atoms: int or Noiser
-            The number of atoms in the system.
-        atomic_numbers: torch.Tensor or Noiser
-            The atomic numbers of the atoms.
-        positions: torch.Tensor or Noiser
-            The positions of the atoms.
-        cell: torch.Tensor or Noiser
-            The cell of the system.
-        pbc: torch.Tensor
-            The periodic boundary conditions.
-        template: AtomsGraph or Atoms
-            The template graph or atoms object.
         cutoff: float
             The cutoff radius for the edges.
 
@@ -327,75 +304,17 @@ class AtomsGraph(Data):
             The graph object.
 
         """
-        if isinstance(n_atoms, Noiser):
-            n_atoms = n_atoms.prior()
-        else:
-            n_atoms = torch.tensor(n_atoms).reshape(1, 1)
-
-        if isinstance(atomic_numbers, Noiser):
-            atomic_numbers = atomic_numbers.prior(n_atoms)
-        else:
-            atomic_numbers = torch.tensor(atomic_numbers).reshape(-1, 1)
-
-        if isinstance(cell, Noiser):
-            cell = cell.prior()
-        elif cell is not None:
-            cell = torch.tensor(cell).reshape(3, 3)
-        else:
-            assert template is not None
-
-        if template is not None:
-            if isinstance(template, AtomsGraph):
-                n_template = template.n_atoms.item()
-                atomic_numbers = torch.cat([template.x, atomic_numbers])
-                template_positions = template.pos
-                cell = template.cell
-                pbc = template.pbc
-            elif isinstance(template, Atoms):
-                n_template = len(template)
-                atomic_numbers = torch.cat(
-                    [torch.tensor(template.get_atomic_numbers()), atomic_numbers]
-                )
-                template_positions = torch.tensor(template.get_positions())
-                cell = torch.tensor(template.get_cell())
-                pbc = torch.tensor(template.get_pbc())
-            else:
-                raise ValueError("Invalid template type.")
-
-            n_atoms += n_template
-        else:
-            template_positions = torch.empty(0, 3)
-            n_template = 0
-
-        if isinstance(positions, Noiser):
-            positions = positions.prior(n_atoms, cell)
-        else:
-            positions = torch.tensor(positions).reshape(-1, 3)
-
-        positions = torch.cat([template_positions, positions])
-
-        if pbc is None:
-            pbc = torch.tensor([True, True, True], dtype=torch.bool).reshape(3)
-
-        mask = torch.zeros(n_atoms, dtype=torch.bool)
-        mask[:n_template] = True
-
-        edge_index, shift_vectors = cls.make_graph(
-            positions, cell, cutoff=cutoff, pbc=pbc
-        )
-
         return cls(
-            x=atomic_numbers,
-            edge_index=edge_index,
-            pos=positions,
-            n_atoms=n_atoms,
-            cell=cell,
-            pbc=pbc,
-            shift_vectors=shift_vectors,
+            x=torch.empty(0, dtype=torch.long),
+            pos=torch.empty(0, 3),
+            n_atoms=torch.tensor([0]),
+            cell=torch.empty(3, 3),
+            pbc=torch.tensor([True, True, True], dtype=torch.bool),
             cutoff=cutoff,
-            mask=mask,
+            mask=torch.empty(0, dtype=torch.bool),
         )
 
+    
     def add_batch_attr(self, key: str, value: torch.Tensor, type: str="node") -> None:
         """Add a batch attribute to the graph.
 

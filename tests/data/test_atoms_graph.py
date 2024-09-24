@@ -178,15 +178,11 @@ def test_apply_mask_error(graph: AtomsGraph) -> None:
     with pytest.raises(ValueError):
         graph.apply_mask(x, val=-1)
 
-def test_from_prior() -> None:
-    graph = AtomsGraph.from_prior(
-        n_atoms=3,
-        atomic_numbers=[1, 6, 8],
-        positions=torch.rand((3, 3)),
-        cell=torch.eye(3),
-    )
+def test_empty() -> None:
+    graph = AtomsGraph.empty()
     assert isinstance(graph, AtomsGraph)
-        
+
+
 def test_representation_to_tensor() -> None:
     N, d = 12, 64
     scalar = torch.randn((N, d, 1))

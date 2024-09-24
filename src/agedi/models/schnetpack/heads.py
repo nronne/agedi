@@ -101,10 +101,12 @@ class PositionsScore(Head):
     Head
     
     """
+    _key = "pos"
+    
     def __init__(
             self, input_dim_scalar=66, input_dim_vector=64, gated_blocks=3, **kwargs
     ):
-        super().__init__(key="positions", **kwargs)
+        super().__init__(**kwargs)
         self.net = build_gated_equivariant_mlp(
             input_dim_scalar,
             input_dim_vector,

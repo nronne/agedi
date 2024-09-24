@@ -2,8 +2,8 @@ from abc import ABC, abstractmethod
 from typing import Type, Dict
 
 from .sdes import SDE
-from .distributions import Distribution, Prior
-# from agedi.data import "AtomsGraph"
+from .distributions import Distribution
+from agedi.data import AtomsGraph
 
 import torch
 
@@ -21,7 +21,7 @@ class Noiser(ABC, torch.nn.Module):
         The keyword arguments to be passed to the SDE class.
     distribution: Distribution
         The distribution to be used for the noising.
-    prior: Prior
+    prior: Distribution
         The prior to be used for the denoising.
     key: str
         The key of the attribute to be noised and denoised.
@@ -31,13 +31,14 @@ class Noiser(ABC, torch.nn.Module):
     Noiser
 
     """
+    _key: str
+    
     def __init__(
         self,
         sde_class: Type[SDE],
         sde_kwargs: Dict,
         distribution: Distribution,
-        prior: Prior,
-        key: str,
+        prior: Distribution,
         **kwargs
     ):
         """Initializes the Noiser.
@@ -47,15 +48,22 @@ class Noiser(ABC, torch.nn.Module):
         self.sde = sde_class(**sde_kwargs)
         
         self.distribution = distribution
-        self.distribution.key = key
+        self.distribution.key = self.key
 
         self.prior = prior
-        self.prior.key = key
+        self.prior.key = self.key
         
-        self.key = key
 
+    @property
+    def key(self) -> str:
+        """The key of the attribute to be noised and denoised.
+
+        """
+        return self._key
+
+    
     @abstractmethod
-    def _noise(self, batch: "AtomsGraph") -> "AtomsGraph":
+    def _noise(self, batch: AtomsGraph) -> AtomsGraph:
         """Noises the attribute of the atomistic structure.
 
         Must be implemented by the subclass.
@@ -74,7 +82,7 @@ class Noiser(ABC, torch.nn.Module):
         pass
 
     @abstractmethod
-    def _denoise(self, batch: "AtomsGraph", delta_t: float) -> "AtomsGraph":
+    def _denoise(self, batch: AtomsGraph, delta_t: float) -> AtomsGraph:
         """Denoises the attribute of the atomistic structure.
 
         Must be implemented by the subclass.
@@ -96,7 +104,7 @@ class Noiser(ABC, torch.nn.Module):
         pass
 
     @abstractmethod
-    def _loss(self, batch: "AtomsGraph") -> float:
+    def _loss(self, batch: AtomsGraph) -> float:
         """Computes the training loss.
 
         Must be implemented by the subclass.
@@ -114,7 +122,7 @@ class Noiser(ABC, torch.nn.Module):
         """
         pass
 
-    def noise(self, batch: "AtomsGraph") -> "AtomsGraph":
+    def noise(self, batch: AtomsGraph) -> AtomsGraph:
         """Noises the attribute of the atomistic structure.
 
         Parameters
@@ -130,7 +138,7 @@ class Noiser(ABC, torch.nn.Module):
         """
         return self._noise(batch)
 
-    def denoise(self, batch: "AtomsGraph", delta_t: float) -> "AtomsGraph":
+    def denoise(self, batch: AtomsGraph, delta_t: float) -> AtomsGraph:
         """Denoises the attribute of the atomistic structure.
 
         Parameters
@@ -148,7 +156,7 @@ class Noiser(ABC, torch.nn.Module):
         """
         return self._denoise(batch, delta_t)
 
-    def loss(self, batch: "AtomsGraph") -> float:
+    def loss(self, batch: AtomsGraph) -> float:
         """Compute the training loss.
 
         Parameters

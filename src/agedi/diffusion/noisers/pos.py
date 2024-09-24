@@ -31,16 +31,19 @@ class PositionsNoiser(Noiser):
         The noiser for the atoms positions in Cartesian coordinates.
     
     """
+    _key = "pos"
+    
     def __init__(
         self,
         sde_class: SDE=VP,
         sde_kwargs: Dict={},
         distribution: Distribution=Normal(),
         prior: Distribution=UniformCell(),
-        key: str="positions",
         **kwargs
     ) -> None:
-        super().__init__(sde_class, sde_kwargs, distribution, prior, key, **kwargs)
+        print('key', self.key)
+        super().__init__(sde_class, sde_kwargs, distribution, prior, **kwargs)
+
 
     def _noise(self, batch: "AtomsGraph") -> "AtomsGraph":
         """Initializes the noise for the positions noiser.

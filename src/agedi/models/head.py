@@ -11,26 +11,26 @@ class Head(ABC,torch.nn.Module):
     The score tensor should have the same shape as the original tensor for the
     key of the head.
 
-    Parameters
-    ----------
-    key : str
-        The key of the head. Must be one of 'positions', 'types', 'cell'.
-
     Returns
     -------
     Head
     
     """
+    _key: str
     
-    def __init__(self, key: str, **kwargs) -> None:
+    def __init__(self, **kwargs) -> None:
         """Initializes the head with the key.
         """
         super(Head, self).__init__(**kwargs)
-        if key in ["positions", "types", "cell"]:
-            self.key = key
-        else:
-            raise ValueError(f"Invalid key: {key}. Must be one of 'positions', 'types', 'cell'.")
+        
 
+    @property
+    def key(self) -> str:
+        """The key of the attribute to be noised and denoised.
+
+        """
+        return self._key
+        
     def forward(self, translated_batch: Any) -> torch.Tensor:
         """Forward pass of the head using a translated batch
         

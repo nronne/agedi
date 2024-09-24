@@ -3,9 +3,9 @@ from typing import Callable
 
 import torch
 
+from agedi.data import AtomsGraph
 from agedi.utils import TruncatedNormal as TN
 
-# from agedi.data import AtomsGraph
 
 
 class Distribution(ABC):
@@ -29,7 +29,7 @@ class Distribution(ABC):
         self.key = None
 
     @abstractmethod
-    def sample(self, mu: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
+    def _sample(self, mu: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
         """Sample distribution
         
         Sample from the distribution and return tensor of shape self.key
@@ -48,7 +48,7 @@ class Distribution(ABC):
         """
         pass
 
-    def _setup(self, batch) -> None:
+    def _setup(self, batch: AtomsGraph) -> None:
         """Prepare distribution
         
         Prepare the distribution for sampling of the batch
@@ -65,7 +65,7 @@ class Distribution(ABC):
         """
         pass
 
-    def get_callable(self, batch) -> Callable:
+    def get_callable(self, batch: AtomsGraph) -> Callable:
         """Get callable function
         
         Return a callable function that samples from the distribution
@@ -83,18 +83,17 @@ class Distribution(ABC):
         """
         self._setup(batch)
 
-        def callable(mu, sigma):
-            return self.sample(mu, sigma)
+        def callable(mu, sigma, **kwargs):
+            return self._sample(mu, sigma, **kwargs)
 
         return callable
-
 
 class StandardNormal(Distribution):
     """Standard Normal Distribution
 
     """
 
-    def sample(self, mu, sigma) -> torch.Tensor:
+    def _sample(self, mu, sigma, **kwargs) -> torch.Tensor:
         """Sample from the standard normal distribution
 
         Parameters
@@ -113,13 +112,12 @@ class StandardNormal(Distribution):
         shape = mu.shape
         return torch.normal(0.0, 1.0, size=shape)
 
-
 class Normal(Distribution):
     """Normal Distribution
     
     """
 
-    def sample(self, mu, sigma) -> torch.Tensor:
+    def _sample(self, mu, sigma, **kwargs) -> torch.Tensor:
         """Sample from the normal distribution
 
         Parameters
@@ -135,7 +133,6 @@ class Normal(Distribution):
             Sampled tensor
         """
         return torch.normal(mu, sigma)
-
 
 class TruncatedNormal(Distribution):
     """Truncated Normal Distribution
@@ -154,7 +151,7 @@ class TruncatedNormal(Distribution):
         super().__init__(**kwargs)
         self.index = index
 
-    def _setup(self, batch) -> None:
+    def _setup(self, batch: AtomsGraph) -> None:
         """Setup the distribution
         
         Prepare the distribution for sampling of the batch
@@ -172,7 +169,7 @@ class TruncatedNormal(Distribution):
 
         self.confinement = batch.confinement[batch.batch]
 
-    def sample(self, mu, sigma) -> torch.Tensor:
+    def _sample(self, mu, sigma, **kwargs) -> torch.Tensor:
         """Sample from the truncated normal distribution
 
         Parameters
@@ -203,121 +200,92 @@ class TruncatedNormal(Distribution):
                 x.append(torch.normal(mu[:, i], sigma[:, i]))
         return torch.stack(x, dim=1)
 
-
 class WrappedNormal(Distribution):
     pass
 
+class Uniform(Distribution):
+    """Uniform Distribution
 
-"""
-Prior distributions
-"""
-
-
-class Prior(ABC):
-    """
-    Base Class for prior distributions
-
-    attrs:
-        key: str
-            The key to access property from batch
-    """
-
-    def __init__(self, **kwargs):
-        self.key = None
-
-    @abstractmethod
-    def sample(self, batch: "AtomsGraph") -> torch.Tensor:
-        """
-        Sample from the distribution and return tensor of shape self.key
-
-        args:
-            batch: AtomsGraph
-
-        returns:
-            torch.Tensor
-        """
-        pass
-
-
-class Uniform(Prior):
-    """
-    Uniform Prior Distribution
-
-    attrs:
-        low: float
-            The lower bound of the distribution
-        high: float
-            The upper bound of the distribution
+    Parameters
+    ----------
+    low : float
+        The lower bound of the distribution
+    high : float
+        The upper bound of the distribution
+    
     """
 
     def __init__(self, low: float = 0.0, high: float = 1.0) -> None:
-        """
-        Initialize the distribution
-
-        args:
-            low: float
-                The lower bound of the distribution
-            high: float
-                The upper bound of the distribution
+        """Initialize the distribution
 
         """
-
         self.low = low
         self.high = high
 
-    def sample(self, batch: "AtomsGraph") -> torch.Tensor:
+    def _sample(self, mu, sigma) -> torch.Tensor:
         """
         Sample from the uniform distribution
 
-        args:
-            batch: AtomsGraph
+        Parameters
+        ----------
+        mu : torch.Tensor
+            Mean of the distribution
+        sigma : torch.Tensor
+            Standard deviation of the distribution
 
-        returns:
-            torch.Tensor
+        Returns
+        -------
+        torch.Tensor
+            Sampled tensor
 
         """
-        shape = batch[self.key].shape
+        shape = mu.shape
         return torch.rand(shape) * (self.high - self.low) + self.low
-
 
 class UniformCell(Uniform):
     """
     Uniform Prior Distribution for cell parameters
     """
 
-    def __init__(self, **kwargs) -> None:
+    def _setup(self, batch: AtomsGraph) -> None:
         """
-        Initialize the distribution
+        Prepare the distribution for sampling of the batch
+
+        Parameters
+        ----------
+        batch : AtomsGraph
+            Batch of data
+
+        Returns
+        -------
+        None
+
         """
-        super().__init__()
+        self.cell = batch.cell.view(-1, 3, 3)[batch.batch]
+        self.corner = torch.zeros(self.cell.shape[0], 3)
+        
 
-    def sample(self, batch: "AtomsGraph") -> torch.Tensor:
+        
+    def _sample(self, mu, sigma) -> torch.Tensor:
+        """Sample from the uniform distribution
+
+        Parameters
+        ----------
+        mu : torch.Tensor
+            Mean of the distribution
+        sigma : torch.Tensor
+            Standard deviation of the distribution
+
+        Returns
+        -------
+        torch.Tensor
+            Sampled tensor
+        
         """
-        Sample from the uniform distribution
+        f = super()._sample(mu, sigma)  # (n_atoms, 3)
 
-        args:
-            batch: AtomsGraph
-
-        returns:
-            torch.Tensor
-        """
-        f = super().sample(batch)  # (n_atoms, 3)
-
-        cell = (
-            batch.cell if batch.confinement_cell is None else batch.confinement_cell
-        )  # (n_graphs * 3, 3)
-        cells = cell.view(-1, 3, 3)  # (n_graphs, 3, 3)
-        corner = (
-            torch.zeros((cell.shape[0], 3))
-            if batch.confinement_corner is None
-            else batch.confinement_corner
-        )
-        if batch.batch is not None:
-            cells = cells[batch.batch]  # (n_atoms, 3, 3)
-            corner = corner[batch.batch]  # (n_atoms, 3)
-        else:
-            cells = cells.unsqueeze(0)
-            corner = corner.unsqueeze(0)
-
-        r = torch.matmul(cells, f) + corner  # (n_atoms, 3)
+        r = torch.matmul(self.cell, f.unsqueeze(2)).squeeze(2) + self.corner  # (n_atoms, 3)
         return r
+
+
+

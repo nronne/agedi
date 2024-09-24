@@ -1,7 +1,8 @@
-from typing import Dict
+from typing import Dict, Union, List
 
 import pytorch_lightning as pl
 import torch
+from torch_geometric.data import Batch
 
 from agedi.models import ScoreModel
 from agedi.diffusion.noisers import Noiser
@@ -43,6 +44,21 @@ class Diffusion(pl.LightningModule):
         self.score_model = score_model
         self.noisers = noisers
 
+        self.noiser_keys = [noiser.key for noiser in noisers]
+        self.score_keys = [head.key for head in score_model.heads]
+
+        if not set(self.noiser_keys) == set(self.score_keys):
+            raise ValueError("Keys of noisers and score model heads do not match")
+
+        for key in self.noiser_keys:
+            if key not in ["x", "pos", "cell", "n_atoms"]:
+                raise ValueError(f"Key {key} is not supported")
+
+        for key in self.score_keys:
+            if key not in ["x", "pos", "cell", "n_atoms"]:
+                raise ValueError(f"Key {key} is not supported")
+        
+        
         self.optim_config = optim_config
         self.scheduler_config = scheduler_config
         
@@ -193,9 +209,94 @@ class Diffusion(pl.LightningModule):
         time = torch.rand(batch_size).to(self.device)[batch.batch].unsqueeze(1)
         batch.time = time
 
-    def sample(self, N, template, **kwargs):
-        pass
+    def initialize_graph(self, cutoff, **kwargs) -> AtomsGraph:
+        """Initializes a graph.
 
+        Initializes a graph with the provided keyword arguments and
+        from the noisers prior distributions.
+
+        Parameters
+        ----------
+        kwargs: dict
+            The keyword arguments.
+
+        Returns
+        -------
+        graph: AtomsGraph
+            The initialized graph.
+
+        """
+        graph = AtomsGraph.empty(cutoff=cutoff)
+        for k, v in kwargs.items():
+            setattr(graph, k, v)
+
+        for noiser in self.noisers[::-1]:
+            setattr(graph, noiser.key, noiser.prior.get_callable(graph)())
+
+        return graph
+        
+    def sample(
+        self,
+        N: int,
+        template: AtomsGraph=None,
+        batch_size: int=64,
+        steps: int=500,
+        cutoff: float=6.0,
+        eps: float =1e-4,
+        **kwargs
+    ) -> List[AtomsGraph]:
+        """Samples from the model.
+
+        Parameters
+        ----------
+        N: int
+            The number of samples to generate.
+        template: Union[AtomsGraph, Atoms]
+            The template to use for sampling.
+        batch_size: int
+            The batch size.
+        steps: int
+            The number of steps to take.
+        kwargs: dict
+            Additional keyword arguments. Which may include:
+            - `n_atoms`: torch.Tensor
+            - `pos`: torch.Tensor
+            - `cell`: torch.Tensor
+            - `x`: torch.Tensor
+        
+        """
+        # check that kwargs include 
+        # except if their in self.noiser_keys
+        for key in ["pos", "x", "cell", "n_atoms"]:
+            if key not in kwargs or key not in self.noiser_keys:
+                raise ValueError(f"Missing default values for key {key} in kwargs.")
+            
+        if N > batch_size:
+            out = []
+            for _ in range(N // batch_size):
+                out += self.sample(batch_size, template, steps, **kwargs)
+            out += self.sample(N % batch_size, template, steps, **kwargs)
+            return out
+
+        if template is not None:
+            raise NotImplementedError("Sampling from a template is not yet implemented.")
+
+        data = []
+        for _ in range(N):
+            data.append(self.initialize_graph(cutoff, **kwargs))
+
+        batch = Batch.from_data_list(data)
+        batch.update_graph()
+
+        ts = torch.linspace(1, eps, steps)
+        dt = ts[1] - ts[0]
+        for t in ts:
+            batch.time = t.repeat(batch.x.shape[0], 1).to(self.device)
+            batch = self.forward_step(batch, dt)
+
+        return batch.to_data_list()
+
+        
     def forward_step(self, batch: AtomsGraph) -> AtomsGraph:
         """Forward diffusion step
         
@@ -219,7 +320,7 @@ class Diffusion(pl.LightningModule):
         batch.update_graph()
         return batch
 
-    def reverse_step(self, batch: AtomsGraph) -> AtomsGraph:
+    def reverse_step(self, batch: AtomsGraph, delta_t: float) -> AtomsGraph:
         """Reverse diffusion step
         
         Performs a reverse step in the diffusion model.
@@ -230,6 +331,8 @@ class Diffusion(pl.LightningModule):
         ----------
         batch: AtomsGraph
             A batch of AtomsGraph data.
+        delta_t: float
+            The time step.
 
         Returns
         -------
@@ -239,7 +342,7 @@ class Diffusion(pl.LightningModule):
         """
         batch = self.score_model(batch)
         for noiser in self.noisers[::-1]:
-            batch = noiser.denoise(batch)
+            batch = noiser.denoise(batch, delta_t)
 
         batch.update_graph()
         return batch
