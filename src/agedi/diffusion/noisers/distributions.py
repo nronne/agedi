@@ -8,62 +8,77 @@ from agedi.utils import TruncatedNormal as TN
 # from agedi.data import AtomsGraph
 
 
-"""
-Noise distributions
-"""
-
-
 class Distribution(ABC):
-    """
-    Base Class for noise distributions
+    """Base Class for noise distributions
 
-    attrs:
-        key: str
-            The key to access property from batch
+    Parameters
+    ----------
+    key : str
+        Key to identify the property from the batch
+
+    Returns
+    -------
+    Distribution
+    
     """
 
     def __init__(self, **kwargs):
-        """
-        Initialize the distribution
+        """Initialize the distribution
 
         """
         self.key = None
 
     @abstractmethod
     def sample(self, mu: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
-        """
+        """Sample distribution
+        
         Sample from the distribution and return tensor of shape self.key
 
-        args:
-            mu: torch.Tensor
-                The mean of the distribution
+        Parameters
+        ----------
+        mu : torch.Tensor
+            Mean of the distribution
+        sigma : torch.Tensor
+            Standard deviation of the distribution
 
-            sigma: torch.Tensor
-                The standard deviation of the distribution
+        Returns
+        -------
+        torch.Tensor
+            Sampled tensor
         """
         pass
 
     def _setup(self, batch) -> None:
-        """
+        """Prepare distribution
+        
         Prepare the distribution for sampling of the batch
 
-        args:
-            batch: AtomsGraph
+        Parameters
+        ----------
+        batch : AtomsGraph
+            Batch of data
 
-        returns:
-            None
+        Returns
+        -------
+        None
+        
         """
         pass
 
     def get_callable(self, batch) -> Callable:
-        """
+        """Get callable function
+        
         Return a callable function that samples from the distribution
 
-        args:
-            batch: AtomsGraph
+        Parameters
+        ----------
+        batch : AtomsGraph
+            Batch of data
 
-        returns:
-            Callable
+        Returns
+        -------
+        Callable
+            Callable function that samples from the distribution
 
         """
         self._setup(batch)
@@ -75,93 +90,103 @@ class Distribution(ABC):
 
 
 class StandardNormal(Distribution):
-    """
-    Standard Normal Distribution
+    """Standard Normal Distribution
+
     """
 
     def sample(self, mu, sigma) -> torch.Tensor:
-        """
-        Sample from the standard normal distribution
+        """Sample from the standard normal distribution
 
-        args:
-            mu: torch.Tensor
-                The mean of the distribution
+        Parameters
+        ----------
+        mu : torch.Tensor
+            Mean of the distribution
+        sigma : torch.Tensor
+            Standard deviation of the distribution
 
-            sigma: torch.Tensor
-                The standard deviation of the distribution
-
-        returns:
-            torch.Tensor
+        Returns
+        -------
+        torch.Tensor
+            Sampled tensor
+        
         """
         shape = mu.shape
         return torch.normal(0.0, 1.0, size=shape)
 
 
 class Normal(Distribution):
-    """
-    Normal Distribution
+    """Normal Distribution
+    
     """
 
     def sample(self, mu, sigma) -> torch.Tensor:
-        """
-        Sample from the normal distribution
+        """Sample from the normal distribution
 
-        args:
-            mu: torch.Tensor
-                The mean of the distribution
+        Parameters
+        ----------
+        mu : torch.Tensor
+            Mean of the distribution
+        sigma : torch.Tensor
+            Standard deviation of the distribution
 
-            sigma: torch.Tensor
-                The standard deviation of the distribution
-
-        returns:
-            torch.Tensor
+        Returns
+        -------
+        torch.Tensor
+            Sampled tensor
         """
         return torch.normal(mu, sigma)
 
 
 class TruncatedNormal(Distribution):
-    """
-    Truncated Normal Distribution
+    """Truncated Normal Distribution
+
+    Parameters
+    ----------
+    index : int
+        The index of the property to truncate
+    
     """
 
     def __init__(self, index: int = 2, **kwargs) -> None:
-        """
-        Initialize the distribution
+        """Initialize the distribution
 
-        args:
-            index: int
-                The index to truncatethe batch
         """
         super().__init__(**kwargs)
         self.index = index
 
     def _setup(self, batch) -> None:
-        """
+        """Setup the distribution
+        
         Prepare the distribution for sampling of the batch
 
-        args:
-            batch: AtomsGraph
+        Parameters
+        ----------
+        batch : AtomsGraph
+            Batch of data
 
-        returns:
-            None
+        Returns
+        -------
+        None
 
         """
 
         self.confinement = batch.confinement[batch.batch]
 
     def sample(self, mu, sigma) -> torch.Tensor:
-        """
-        Sample from the truncated normal distribution
+        """Sample from the truncated normal distribution
 
-        args:
-            mu: torch.Tensor
-                The mean of the distribution
+        Parameters
+        ----------
+        mu : torch.Tensor
+            Mean of the distribution
+        sigma : torch.Tensor
+            Standard deviation of the distribution
 
-            sigma: torch.Tensor
-                The standard deviation of the distribution
+        Returns
+        -------
+        torch.Tensor
+            Sampled tensor
 
-        returns:
-            torch.Tensor
         """
         x = []
         for i in range(mu.shape[1]):

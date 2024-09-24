@@ -1,28 +1,64 @@
 import torch
 
-from agedi.diffusion.noisers import VP
+from typing import Dict
+from agedi.diffusion.noisers import SDE, VP
 from agedi.diffusion.noisers.base import Noiser
-from agedi.diffusion.noisers.distributions import Normal, UniformCell
+from agedi.diffusion.noisers.distributions import Distribution, Normal, UniformCell
 from agedi.utils import OFFSET_LIST
 
 
 class PositionsNoiser(Noiser):
-    """
-    Implements noising of atoms positions
+    """Implements noising of atoms positions in Cartesian coordinates.
+
+    Parameters
+    ----------
+    sde_class : SDE
+        The class of the SDE to be used for the noising.
+    sde_kwargs : Dict
+        The keyword arguments to be passed to the SDE class.
+    distribution : Distribution
+        The distribution to be used for the noise.
+    prior : Distribution
+        The prior distribution to be used for the noise.
+    key : str
+        The key to be used for the noising.
+    **kwargs
+        Additional keyword arguments to be passed to the Noiser class.
+
+    Returns
+    -------
+    Noiser
+        The noiser for the atoms positions in Cartesian coordinates.
     
     """
     def __init__(
         self,
-        sde_class=VP,
-        sde_kwargs={},
-        distribution=Normal(),
-        prior=UniformCell(),
-        key="positions",
+        sde_class: SDE=VP,
+        sde_kwargs: Dict={},
+        distribution: Distribution=Normal(),
+        prior: Distribution=UniformCell(),
+        key: str="positions",
         **kwargs
-    ):
+    ) -> None:
         super().__init__(sde_class, sde_kwargs, distribution, prior, key, **kwargs)
 
-    def noise(self, batch):
+    def _noise(self, batch: "AtomsGraph") -> "AtomsGraph":
+        """Initializes the noise for the positions noiser.
+
+        Added noise is stored in the self.key+"_noise", which by default is
+        "positions_noise".
+
+        Parameters
+        ----------
+        batch: AtomsGraph
+            The atomistic structure (or batch hereof) to be noised.
+
+        Returns
+        -------
+        AtomsGraph
+            The noised atomistic structure (or bach hereof).
+        
+        """        
         r = batch.pos
         t = batch.time
 
@@ -31,7 +67,29 @@ class PositionsNoiser(Noiser):
         batch[self.key + "_noise"] = batch.apply_mask(self.sde.noise(r, batch.pos, t))
         return batch
 
-    def denoise(self, batch, step_size):
+    def _denoise(self, batch: "AtomsGraph", delta_t: float) -> "AtomsGraph":
+        """Denoises the positions of the atomistic structure.
+
+        The denoising follows the Euler-Maruyama scheme.
+        ::math::
+        R_i+1 = R_i + \Delta t (f(R_i, t) + g(t)**2 * s(R_i, t)) + \sqrt{\Delta t} g(t) * w
+        
+        The used score is expected to be stored in the self.key+"_score", which by default is
+        "positions_score".
+
+        Parameters
+        ----------
+        batch: AtomsGraph
+            The atomistic structure (or batch hereof) to be denoised.
+        delta_t: float
+            The time step for the denoising.
+
+        Returns
+        -------
+        AtomsGraph
+            The denoised atomistic structure (or bach hereof).
+        
+        """
         r = batch.pos
         r_score = batch[self.key + "_score"]
         t = batch.time
@@ -41,11 +99,38 @@ class PositionsNoiser(Noiser):
 
         w = self.distribution.get_callable(batch)
         batch.pos = w(
-            step_size * (drift + diffusion**2 * r_score),
-            torch.sqrt(step_size) * diffusion
-        ) # r = r + step_size * (drift + diffusion**2 * r_score) + torch.sqrt(step_size) * diffusion * noise
+            delta_t * (drift + diffusion**2 * r_score),
+            torch.sqrt(delta_t) * diffusion
+        )
 
-    def loss(self, batch):
+        return batch
+
+    def _loss(self, batch: "AtomsGraph") -> torch.Tensor:
+        """Compute the noiser loss.
+        
+        Computes the loss of the diffusion model for the positions noiser
+
+        Expects the total added positions noise to be stored in the self.key+"_noise", which by default is
+        "positions_noise" and the predicted score to be stored in the self.key+"_score", which by default is
+        "positions_score".
+
+        The loss is computed as
+        ::math::
+        L = \sum_i ||w_i + \sigma_t s(R_i)||^2
+
+        With the noise taking into account periodic boundary conditions.
+        
+        Parameters
+        ----------
+        batch: AtomsGraph
+            The atomistic structure (or batch hereof) to be noised and denoised.
+
+        Returns
+        -------
+        float
+            The loss of the noised and denoised atomistic structure.
+
+        """
         t = batch.time
         r_score = batch[self.key + "_score"]
         r_noise = batch[self.key + "_noise"]
@@ -61,12 +146,13 @@ class PositionsNoiser(Noiser):
     def periodic_distance(
         self, X: torch.tensor, N: torch.tensor, cells: torch.tensor, idxs: torch.tensor
     ) -> torch.tensor:
-        """
+        """Periodic distance computation.
+        
         Takes X and N (noise) and computes the minimum distance between X and Y=X+N
         taking into account periodic boundary conditions.
 
-        Args
-        ______
+        Parameters
+        ----------
         X: torch.Tensor
             The positions (N, 3)
         N: torch.Tensor
@@ -77,9 +163,10 @@ class PositionsNoiser(Noiser):
             The indices of atoms in graphs (N,)
 
         Returns
-        _______
+        -------
         dist: torch.Tensor
             The distance between X and Y=X+N
+        
         """
         cells = cells.view(-1, 3, 3)
         cell_offsets = torch.matmul(torch.tensor(OFFSET_LIST, dtype=cells.dtype, device=cells.device), cells)  # m x 27 x 3

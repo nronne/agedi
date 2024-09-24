@@ -9,16 +9,15 @@ from agedi.models.translator import Translator
 
 
 class SchNetPackTranslator(Translator):
-    """
-    Translator for SchNetPack models.
-    """
+    """Translator for SchNetPack models.
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+    This class is used to translate the input data to the format required by the SchNetPack models.
+
+    """
 
     def _translate(self, batch: "AtomsGraph") -> Dict[str, torch.Tensor]:
-        """
-        Translate the input batch to the format required by the model.
+        """Translate the input batch to the format required by the model.
+        
         The schnetpack model uses a dictionary format for the input data.
 
         The keywords in the dictionary given in schnetpack.properties and describes:
@@ -34,13 +33,15 @@ class SchNetPackTranslator(Translator):
 
         Additionally energy and forces targets can be added to the dictionary.
 
-        Args:
-            batch: AtomsGraph
-                The input batch of data.
+        Parameters
+        ----------
+        batch: AtomsGraph
+            The input batch of data.
 
-        Returns:
-            Dict
-                The translated batch of data.
+        Returns
+        -------
+        Dict
+            The translated batch of data.
 
         """
 
@@ -66,22 +67,21 @@ class SchNetPackTranslator(Translator):
     def _translate_representation(
         self, representation: Representation, translated_batch: Dict[str, torch.Tensor]
     ) -> Dict[str, torch.Tensor]:
-        """
-        Translate the representation to the format required by the model.
+        """Translate the representation to the format required by the model.
 
         SchnetPack uses scalar_representation and vector_representation for the two types of representations.
 
-        Args:
+        Parameters
+        ----------
+        representation: Representation
+            The input representation.
+        translated_batch: Dict
+            The translated batch of data.
 
-            representation: Representation
-                The input representation.
-
-            translated_batch: Dict
-                The translated batch of data.
-
-        Returns:
-            Dict
-                The translated batch with representation keys.
+        Returns
+        -------
+        Dict
+            The translated batch with representation keys.
         
         """
         translated_batch["scalar_representation"] = representation.scalar.squeeze(2)
@@ -91,18 +91,20 @@ class SchNetPackTranslator(Translator):
         return translated_batch
 
     def _get_representation(self, batch, translated_batch):
-        """
-        Get the representation from the output of the model.
+        """Get the representation from the output of the model.
 
-        Args:
-            batch: AtomsGraph
+        Parameters
+        ----------
+        batch: AtomsGraph
+            The input batch of data.
+        translated_batch: Dict
+            The output of the model.
 
-            translated_batch: Dict
-                The output of the model.
-
-        Returns:
-            Representation
-                The representation output of the model.
+        Returns
+        -------
+        Representation
+            The representation output of the model.
+        
         """
         
         s, v = translated_batch["scalar_representation"], translated_batch["vector_representation"]

@@ -18,19 +18,25 @@ def build_gated_equivariant_mlp(
     """
     Build neural network analog to MLP with `GatedEquivariantBlock`s instead of dense layers.
 
-    Args:
-        n_in: number of input nodes.
-        n_out: number of output nodes.
-        n_hidden: number hidden layer nodes.
-            If an integer, same number of node is used for all hidden layers resulting
-            in a rectangular network.
-            If None, the number of neurons is divided by two after each layer starting
-            n_in resulting in a pyramidal network.
-        n_layers: number of layers.
-        activation: Activation function for gating function.
-        sactivation: Activation function for scalar outputs. All hidden layers would
-            the same activation function except the output layer that does not apply
-            any activation function.
+    Parameters
+    ----------
+    n_in: int
+        Number of input nodes.
+    n_out: int
+        Number of output nodes.
+    n_layers: int
+        Number of layers.
+    activation: Callable
+        Activation function.
+    sactivation: Callable
+        Activation function for the skip connection.
+    n_hidden: int
+        Number of hidden nodes.
+    
+    Returns
+    -------
+    nn.Module
+    
     """
     # get list of number of nodes in input, hidden & output layers
     s_neuron = s_in
@@ -79,6 +85,22 @@ def build_gated_equivariant_mlp(
 
 
 class PositionsScore(Head):
+    """Predict the positions score of the atoms in the molecule.
+
+    Parameters
+    ----------
+    input_dim_scalar: int
+        The dimension of the scalar input.
+    input_dim_vector: int
+        The dimension of the vector input.
+    gated_blocks: int
+        The number of gated blocks in the network.
+
+    Returns
+    -------
+    Head
+    
+    """
     def __init__(
             self, input_dim_scalar=66, input_dim_vector=64, gated_blocks=3, **kwargs
     ):
@@ -91,6 +113,19 @@ class PositionsScore(Head):
         )
 
     def _score(self, batch):
+        """Predict the positions score of the atoms in the molecule.
+
+        Parameters
+        ----------
+        batch: dict
+            The input batch.
+
+        Returns
+        -------
+        torch.Tensor
+            The predicted positions score.
+        
+        """
         scalar_representation = batch["scalar_representation"]
         vector_representation = batch["vector_representation"]
 

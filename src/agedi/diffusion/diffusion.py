@@ -3,15 +3,42 @@ from typing import Dict
 import pytorch_lightning as pl
 import torch
 
+from agedi.models import ScoreModel
+from agedi.diffusion.noisers import Noiser
+from agedi.data import AtomsGraph
+
 
 class Diffusion(pl.LightningModule):
+    """Class defining the full diffusion model.
+
+    This class brings together the score model and the noisers and allow
+    training and sampling
+
+    Parameters
+    ----------
+    score_model: torch.nn.Module
+        The score model.
+    noisers: List[Noiser]
+        A list of noisers.
+    optim_config: Dict
+        The optimizer configuration.
+    scheduler_config: Dict
+        The scheduler configuration.
+
+    Returns
+    -------
+    Diffusion
+    """
     def __init__(
         self,
-        score_model,
-        noisers,
-        optim_config={"lr": 1e-4},
-        scheduler_config={"factor": 0.5, "patience": 10},
-    ):
+        score_model: ScoreModel,
+        noisers: list[Noiser],
+        optim_config: Dict={"lr": 1e-4},
+        scheduler_config: Dict={"factor": 0.5, "patience": 10},
+    ) -> None:
+        """Initializes the model.
+        
+        """
         super().__init__()
         self.score_model = score_model
         self.noisers = noisers
@@ -20,36 +47,34 @@ class Diffusion(pl.LightningModule):
         self.scheduler_config = scheduler_config
         
 
-    def forward(self, batch):
-        """
-        Forward pass.
+    def forward(self, batch: AtomsGraph) -> AtomsGraph:
+        """Forward pass.
 
-        Args
-        ______
-        batch: dict
-            A batch of data.
+        Parameters
+        ----------
+        batch: AtomsGraph
+            A batch of AtomsGraph data.
 
         Returns
-        _______
-        output: dict
+        -------
+        output: AtomsGraph
             The output of the forward pass.
 
         """
         return self.score_model(batch)
 
-    def loss(self, batch, batch_idx):
-        """
-        Computes the loss.
+    def loss(self, batch: AtomsGraph, batch_idx: torch.Tensor) -> Dict:
+        """Computes the loss.
 
-        Args
-        ______
-        batch: dict
-            A batch of data.
+        Parameters
+        ----------
+        batch: AtomsGraph
+            A batch of AtomsGraph data.
         batch_idx: torch.Tensor
             The index of the batch.
 
         Returns
-        _______
+        -------
         losses: dict
             A dictionary of losses.
 
@@ -57,11 +82,10 @@ class Diffusion(pl.LightningModule):
         noised_batch = batch.clone()
 
         self.sample_time(noised_batch)
-        for noiser in self.noisers:
-            noised_batch = noiser.noise(noised_batch)
-
-        noised_batch.update_graph()
-        noised_batch = self.forward(noised_batch)
+        
+        noised_batch = self.forward_step(noised_batch)
+        
+        noised_batch = self.score_model(noised_batch)
 
         loss = 0
         for noiser in self.noisers:
@@ -70,32 +94,34 @@ class Diffusion(pl.LightningModule):
         return {"loss": loss}
 
     def setup(self, stage: str = None) -> None:
-        """
-        Sets up the model.
+        """Sets up the model.
 
-        Args
-        ______
+        Parameters
+        ----------
         stage: str
             The stage of training.
+
+        Returns
+        -------
+        None
 
         """
 
         # self.offsets = torch.tensor(OFFSET_LIST).float().to(self.device)
         pass
 
-    def training_step(self, batch, batch_idx: torch.Tensor) -> torch.Tensor:
-        """
-        Performs a training step.
+    def training_step(self, batch: AtomsGraph, batch_idx: torch.Tensor) -> torch.Tensor:
+        """Performs a training step.
 
-        Args
-        ______
-        batch: dict
-            A batch of data.
+        Parameters
+        ----------
+        batch: AtomsGraph
+            A batch of AtomsGraph data.
         batch_idx: torch.Tensor
             The index of the batch.
 
         Returns
-        _______
+        -------
         loss: torch.Tensor
             The loss of the training step.
 
@@ -105,19 +131,18 @@ class Diffusion(pl.LightningModule):
             self.log("train_" + k, v)
         return losses["loss"]
 
-    def validation_step(self, batch, batch_idx: torch.Tensor) -> torch.Tensor:
-        """
-        Performs a validation step.
+    def validation_step(self, batch: AtomsGraph, batch_idx: torch.Tensor) -> torch.Tensor:
+        """Performs a validation step.
 
-        Args
-        ______
-        batch: dict
-            A batch of data.
+        Parameters
+        ----------
+        batch: AtomsGraph
+            A batch of AtomsGraph data.
         batch_idx: torch.Tensor
             The index of the batch.
 
         Returns
-        _______
+        -------
         loss: torch.Tensor
             The loss of the validation step.
 
@@ -131,15 +156,15 @@ class Diffusion(pl.LightningModule):
         return losses["loss"]
 
     def configure_optimizers(self) -> Dict:
-        """
+        """Configures the optimizers.
+        
         Configures the optimizer and learning rate scheduler.
 
         Returns
-        _______
-        optimizers: dict
+        -------
+        optimizers: Dict
             A dictionary of optimizers and learning rate schedulers.
-
-
+        
         """
         optimizer = torch.optim.Adam(self.score_model.parameters(), **self.optim_config)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -151,19 +176,17 @@ class Diffusion(pl.LightningModule):
             "monitor": "val_loss",
         }
 
-    def sample_time(self, batch):
-        """
-        Samples the time.
+    def sample_time(self, batch: AtomsGraph) -> None:
+        """Samples the time.
 
-        Args
-        ______
-        batch: dict
-            A batch of data.
+        Parameters
+        ----------
+        batch: AtomsGraph
+            A batch of AtomsGraph data.
 
         Returns
-        _______
-        time: torch.Tensor
-            The sampled time.
+        -------
+        None
 
         """
         batch_size = batch.batch_size
@@ -173,8 +196,50 @@ class Diffusion(pl.LightningModule):
     def sample(self, N, template, **kwargs):
         pass
 
-    def forward_step(self, batch):
-        pass
+    def forward_step(self, batch: AtomsGraph) -> AtomsGraph:
+        """Forward diffusion step
+        
+        Performs a forward step in the diffusion model.
+        This corresponds to the forward pass of the noisers and
+        thus corrupts the data. 
 
-    def reverse_step(self, batch):
-        pass
+        Parameters
+        ----------
+        batch: AtomsGraph
+            A batch of AtomsGraph data.
+
+        Returns
+        -------
+        batch: AtomsGraph
+            The output of the forward step.
+        """
+        for noiser in self.noisers:
+            batch = noiser.noise(batch)
+
+        batch.update_graph()
+        return batch
+
+    def reverse_step(self, batch: AtomsGraph) -> AtomsGraph:
+        """Reverse diffusion step
+        
+        Performs a reverse step in the diffusion model.
+        This corresponds to the calculating the score and performing a reverse
+        sampling step in the noisers.
+
+        Parameters
+        ----------
+        batch: AtomsGraph
+            A batch of AtomsGraph data.
+
+        Returns
+        -------
+        batch: AtomsGraph
+            The output of the reverse step.
+        
+        """
+        batch = self.score_model(batch)
+        for noiser in self.noisers[::-1]:
+            batch = noiser.denoise(batch)
+
+        batch.update_graph()
+        return batch

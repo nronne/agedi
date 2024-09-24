@@ -9,11 +9,12 @@ import torch
 
 
 class Noiser(ABC, torch.nn.Module):
-    """
+    """Noiser Base class
+
     Impments a noiser that can noise and denoise a atomistic structure attribute.
 
-    Args:
-
+    Parameters
+    ----------
     sde_class: Type[SDE]
         The class of the SDE to be used for the noising and denoising.
     sde_kwargs: dict
@@ -25,6 +26,10 @@ class Noiser(ABC, torch.nn.Module):
     key: str
         The key of the attribute to be noised and denoised.
 
+    Returns
+    -------
+    Noiser
+
     """
     def __init__(
         self,
@@ -35,8 +40,7 @@ class Noiser(ABC, torch.nn.Module):
         key: str,
         **kwargs
     ):
-        """
-        Initializes the Noiser.
+        """Initializes the Noiser.
         
         """
         super().__init__(**kwargs)
@@ -50,57 +54,113 @@ class Noiser(ABC, torch.nn.Module):
         
         self.key = key
 
-        
     @abstractmethod
-    def noise(self, batch: "AtomsGraph") -> "AtomsGraph":
-        """
-        Noises the attribute of the atomistic structure.
+    def _noise(self, batch: "AtomsGraph") -> "AtomsGraph":
+        """Noises the attribute of the atomistic structure.
 
-        Args:
-
-        batch: "AtomsGraph"
+        Must be implemented by the subclass.
+        
+        Parameters
+        ----------
+        batch: AtomsGraph
             The atomistic structure (or batch hereof) to be noised.
 
-        Returns:
-
-        "AtomsGraph"
+        Returns
+        -------
+        AtomsGraph
             The noised atomistic structure (or bach hereof).
         
         """
         pass
 
     @abstractmethod
-    def denoise(self, batch: "AtomsGraph") -> "AtomsGraph":
-        """
-        Denoises the attribute of the atomistic structure.
+    def _denoise(self, batch: "AtomsGraph", delta_t: float) -> "AtomsGraph":
+        """Denoises the attribute of the atomistic structure.
 
-        Args:
-
-        batch: "AtomsGraph"
+        Must be implemented by the subclass.
+        
+        Parameters
+        ----------
+        batch: AtomsGraph
             The atomistic structure (or batch hereof) to be denoised.
 
-        Returns:
+        delta_t: float
+            The time step to be used for the denoising.
 
-        "AtomsGraph"
+        Returns
+        -------
+        AtomsGraph
             The denoised atomistic structure (or bach hereof).
         
         """
         pass
 
     @abstractmethod
-    def loss(self, batch: "AtomsGraph") -> float:
-        """
-        Computes the loss of the noised and denoised atomistic structure.
+    def _loss(self, batch: "AtomsGraph") -> float:
+        """Computes the training loss.
 
-        Args:
+        Must be implemented by the subclass.
 
-        batch: "AtomsGraph"
+        Parameters
+        ----------
+        batch: AtomsGraph
             The atomistic structure (or batch hereof) to be noised and denoised.
 
-        Returns:
-
+        Returns
+        -------
         float
             The loss of the noised and denoised atomistic structure.
 
         """
         pass
+
+    def noise(self, batch: "AtomsGraph") -> "AtomsGraph":
+        """Noises the attribute of the atomistic structure.
+
+        Parameters
+        ----------
+        batch: AtomsGraph
+            The atomistic structure (or batch hereof) to be noised.
+
+        Returns
+        -------
+        AtomsGraph
+            The noised atomistic structure (or bach hereof).
+        
+        """
+        return self._noise(batch)
+
+    def denoise(self, batch: "AtomsGraph", delta_t: float) -> "AtomsGraph":
+        """Denoises the attribute of the atomistic structure.
+
+        Parameters
+        ----------
+        batch: AtomsGraph
+            The atomistic structure (or batch hereof) to be denoised.
+        delta_t: float
+            The time step to be used for the denoising.
+
+        Returns
+        -------
+        AtomsGraph
+            The denoised atomistic structure (or bach hereof).
+        
+        """
+        return self._denoise(batch, delta_t)
+
+    def loss(self, batch: "AtomsGraph") -> float:
+        """Compute the training loss.
+
+        Parameters
+        ----------
+        batch: AtomsGraph
+            The atomistic structure (or batch hereof) to be noised and denoised.
+
+        Returns
+        -------
+        float
+            The loss of the noised and denoised atomistic structure.
+
+        """
+        return self._loss(batch)
+    

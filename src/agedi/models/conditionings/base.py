@@ -4,11 +4,10 @@ import torch
 
 
 class Conditioning(ABC, torch.nn.Module):
-    """
-    Conditioning Base Class
+    """Conditioning Base Class
 
-    Args:
-
+    Parameters
+    ----------
     property: str
         The property of the batch to condition on
     input_dim: int
@@ -18,7 +17,10 @@ class Conditioning(ABC, torch.nn.Module):
     concatenation_type: str
         The type of concatenation to use. Default is "scalar"
 
-
+    Returns
+    -------
+    Conditioning
+    
     """
 
     def __init__(
@@ -29,9 +31,7 @@ class Conditioning(ABC, torch.nn.Module):
         concatenation_type: str = "scalar",
         **kwargs,
     ) -> None:
-        """
-        Constructor for the Conditioning class
-
+        """Constructor for the Conditioning class
         """
         super().__init__(**kwargs)
         self.property = property
@@ -42,28 +42,33 @@ class Conditioning(ABC, torch.nn.Module):
 
     @abstractmethod
     def get_conditioning(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Abstract method to get the conditioning from the input
+        """Abstract method to get the conditioning from the input
 
-        Args:
+        Must be implemented by the subclass
+
+        Parameters
+        ----------
         x: torch.Tensor
             The input tensor
 
-        Returns:
+        Returns
+        -------
         torch.Tensor
             The conditioning tensor
+        
         """
         pass
 
     def forward(self, batch: "AtomsGraph") -> "AtomsGraph":
-        """
-        Forward method to get the conditioning from the input
+        """Forward method to get the conditioning from the input
 
-        Args:
+        Parameters
+        ----------
         batch: AtomsGraph
             The input batch
 
-        Returns:
+        Returns
+        -------
         AtomsGraph
             The batch with the conditioning added to the representation
         
@@ -75,17 +80,19 @@ class Conditioning(ABC, torch.nn.Module):
         return batch
 
     def concatenate(self, batch: "AtomsGraph", c: torch.Tensor) -> None:
-        """
-        Concatenate the conditioning to the batch
+        """Concatenate the conditioning to the batch
 
-        Args:
+        Parameters
+        ----------
         batch: AtomsGraph
             The input batch
         c: torch.Tensor
             The conditioning tensor
 
-        Returns:
+        Returns
+        -------
         None
+        
         """
         if self.concatenation_type == "scalar":
             rep = batch.representation

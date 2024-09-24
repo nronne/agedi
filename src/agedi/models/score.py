@@ -9,19 +9,21 @@ from agedi.data import Representation
 from agedi.models.head import Head
 
 class ScoreModel(torch.nn.Module):
-    """
-    Class that defines a the score model, which is a combination of a translator,
-    a representation, a list of conditionings and a list of heads.
-
-    Args:
-        translator: Translator
-            The translator that will be used to translate the input batch.
-        representation: Representation
-            The representation that will be used to represent the translated batch.
-        conditionings: List[Conditioning]
-            The list of conditionings that will be applied to the representation.
-        heads: List[Head]
-            The list of heads that will be used to compute scores.
+    """Class that defines a the score model.
+    
+    It is a combination of a translator, a representation, a list of conditionings
+    and a list of heads.
+    
+    Parameters
+    ----------
+    translator: Translator
+        The translator that will be used to translate the input batch.
+    representation: Representation
+        The representation that will be used to represent the translated batch.
+    conditionings: List[Conditioning]
+        The list of conditionings that will be applied to the representation.
+    heads: List[Head]
+        The list of heads that will be used to compute scores.
     
     """
     def __init__(
@@ -34,8 +36,7 @@ class ScoreModel(torch.nn.Module):
         heads: List[Head]=[],
         **kwargs
     ):
-        """
-        Constructor for the ScoreModel class.
+        """Constructor for the ScoreModel class.
         
         """
         super().__init__(**kwargs)
@@ -45,16 +46,17 @@ class ScoreModel(torch.nn.Module):
         self.heads = heads
 
     def forward(self, batch: Batch) -> Batch:
-        """
-        Forward pass of the model.
+        """Forward pass of the model.
 
-        Args: 
-            batch: Batch
-                The input batch that will be used to compute the scores.
+        Parameters
+        ----------
+        batch: Batch
+            The input batch that will be used to compute the scores.
 
-        Returns:
-            Batch
-                The output batch containing the scores.
+        Returns
+        -------
+        Batch
+            The output batch containing the scores.
     
         """
         translated_batch = self.translator(batch)

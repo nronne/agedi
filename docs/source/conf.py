@@ -14,7 +14,10 @@ release = '0.0.0'
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
-extensions = ['autoapi.extension']
+extensions = [
+    'autoapi.extension',
+    'sphinx.ext.napoleon'
+]
 autoapi_template_dir = '_autoapi_templates'
 
 templates_path = ['_templates']
