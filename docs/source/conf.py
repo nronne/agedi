@@ -18,6 +18,9 @@ extensions = [
     'autoapi.extension',
     'sphinx.ext.napoleon'
 ]
+
+html_logo = ('https://raw.githubusercontent.com/nronne/agedi/refs/heads/main/docs/pure-logo.svg')
+
 autoapi_template_dir = '_autoapi_templates'
 
 templates_path = ['_templates']

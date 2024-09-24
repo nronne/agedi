@@ -1,4 +1,8 @@
 ![Logo](docs/agedi.svg)
+<p align="center">
+  <img height="150" src="https://raw.githubusercontent.com/nronne/agedi/refs/heads/main/docs/agedi.svg?sanitize=true" />
+</p>
+
 ______________________________________________________________________
 
 
