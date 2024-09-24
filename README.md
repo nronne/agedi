@@ -1,6 +1,5 @@
-![Logo](docs/agedi.svg)
 <p align="center">
-  <img height="150" src="https://raw.githubusercontent.com/nronne/agedi/refs/heads/main/docs/agedi.svg?sanitize=true" />
+  <img height="250" src="https://raw.githubusercontent.com/nronne/agedi/refs/heads/main/docs/agedi.svg?sanitize=true" />
 </p>
 
 ______________________________________________________________________
@@ -22,5 +21,20 @@ diffusion models for periodic atomistic material generation.
 > [!CAUTION]
 > This project is under active development.
 
+## Interfaced Equivariant Models
+At the moment only PaiNN is possible to use as a score model
+architecture.
 
+We expect to implement interfaces to GemNet-dQ and Nequip or Mace. 
+
+## Implemented Noisers and Scorers
+Below is an overview of the different available noisers and for which
+models there is an score-model implementation.
+
+
+ | Cartesian Coordinates | Fractional Coordinates | Atomic Types | Cell 
+:------------| :-------------| :-------------| :-------------| :-------------
+PaiNN | :white_check_mark: |  :white_large_square: | :white_large_square: | :white_large_square: 
+GemNet-dQ | :white_large_square: |  :white_large_square: | :white_large_square: | :white_large_square: 
+Nequip | :white_large_square: |  :white_large_square: | :white_large_square: | :white_large_square: 
 
