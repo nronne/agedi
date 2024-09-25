@@ -239,7 +239,7 @@ class Uniform(Distribution):
             Sampled tensor
 
         """
-        shape = mu.shape
+        shape = self.shape if hasattr(self, "shape") else mu.shape
         return torch.rand(shape) * (self.high - self.low) + self.low
 
 class UniformCell(Uniform):
@@ -261,9 +261,14 @@ class UniformCell(Uniform):
         None
 
         """
-        self.cell = batch.cell.view(-1, 3, 3)[batch.batch]
+        self.cell = batch.cell
+        if batch.batch is not None:
+            self.cell = self.cell.view(-1, 3, 3)[batch.batch]
+            self.shape = (batch.x.shape[0], 3, 1)
+        else:
+            self.shape = (batch.x.shape[0], 3)
+            
         self.corner = torch.zeros(self.cell.shape[0], 3)
-        
 
         
     def _sample(self, mu, sigma) -> torch.Tensor:
@@ -283,8 +288,7 @@ class UniformCell(Uniform):
         
         """
         f = super()._sample(mu, sigma)  # (n_atoms, 3)
-
-        r = torch.matmul(self.cell, f.unsqueeze(2)).squeeze(2) + self.corner  # (n_atoms, 3)
+        r = torch.matmul(self.cell, f).view(self.corner.shape) + self.corner  # (n_atoms, 3)
         return r
 
 

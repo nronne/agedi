@@ -311,10 +311,9 @@ class AtomsGraph(Data):
             cell=torch.empty(3, 3),
             pbc=torch.tensor([True, True, True], dtype=torch.bool),
             cutoff=cutoff,
-            mask=torch.empty(0, dtype=torch.bool),
+            # mask=torch.empty(0, dtype=torch.bool),
         )
 
-    
     def add_batch_attr(self, key: str, value: torch.Tensor, type: str="node") -> None:
         """Add a batch attribute to the graph.
 
@@ -719,14 +718,11 @@ class AtomsGraph(Data):
         """
         n_graphs = self.num_graphs if "num_graphs" in self._store else 1
         tensor, slices, ls = representation.to_tensor(n_graphs)
-        self.add_batch_attr("repr", tensor, type="node")
-        self.add_batch_attr("repr_slices", slices, type="graph")
-        self.add_batch_attr("repr_ls", ls, type="graph")
         
-        # self._store.repr_splits = slice
-
-
-    # Utility functions:
+        self.add_batch_attr("repr", tensor, type="node")
+        self.add_batch_attr("repr_slices", slices.repeat(self.n_atoms.shape[0], 1), type="graph")
+        self.add_batch_attr("repr_ls", ls.repeat(self.n_atoms.shape[0], 1), type="graph")
+        
     @batched(update_keys=["pos"])
     def wrap_positions(self) -> None:
         """Wrap the positions of the atoms to the unit cell.

@@ -1,6 +1,7 @@
 import torch
 
 from typing import Dict
+from agedi.data import AtomsGraph
 from agedi.diffusion.noisers import SDE, VP
 from agedi.diffusion.noisers.base import Noiser
 from agedi.diffusion.noisers.distributions import Distribution, Normal, UniformCell
@@ -45,7 +46,7 @@ class PositionsNoiser(Noiser):
         super().__init__(sde_class, sde_kwargs, distribution, prior, **kwargs)
 
 
-    def _noise(self, batch: "AtomsGraph") -> "AtomsGraph":
+    def _noise(self, batch: AtomsGraph) -> AtomsGraph:
         """Initializes the noise for the positions noiser.
 
         Added noise is stored in the self.key+"_noise", which by default is
@@ -70,7 +71,7 @@ class PositionsNoiser(Noiser):
         batch[self.key + "_noise"] = batch.apply_mask(self.sde.noise(r, batch.pos, t))
         return batch
 
-    def _denoise(self, batch: "AtomsGraph", delta_t: float) -> "AtomsGraph":
+    def _denoise(self, batch: AtomsGraph, delta_t: float) -> AtomsGraph:
         """Denoises the positions of the atomistic structure.
 
         The denoising follows the Euler-Maruyama scheme.
@@ -108,7 +109,7 @@ class PositionsNoiser(Noiser):
 
         return batch
 
-    def _loss(self, batch: "AtomsGraph") -> torch.Tensor:
+    def _loss(self, batch: AtomsGraph) -> torch.Tensor:
         """Compute the noiser loss.
         
         Computes the loss of the diffusion model for the positions noiser
