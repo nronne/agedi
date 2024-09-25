@@ -8,7 +8,6 @@ ______________________________________________________________________
 [![Build
 Status](https://cdn.prod.website-files.com/5e0f1144930a8bc8aace526c/65dd9eb5aaca434fac4f1c7c_Build-Passing-brightgreen.svg)]()
 [![Documentation Status](https://readthedocs.org/projects/agedi/badge/?version=latest)](https://agedi.readthedocs.io/en/latest/?badge=latest)
-[![codecov](https://cdn.prod.website-files.com/5e0f1144930a8bc8aace526c/65dd9eb5aaca434fac4f1c31_Coverage-94%2525-green.svg)]()
 
 
 **[Documentation](https://agedi.readthedocs.io)**
