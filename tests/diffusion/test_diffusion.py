@@ -1,7 +1,9 @@
 import pytest
 
+import numpy as np
 from agedi.diffusion import Diffusion
 from agedi.models import ScoreModel
+from agedi.data import AtomsGraph
 
 
 def test_init(cutoff, package, conditionings, noisers):
@@ -46,4 +48,10 @@ def test_validation_step(diffusion, batch):
     assert loss > 0
 
     
-    
+def test_sample(diffusion):
+    out = diffusion.sample(2, steps=3, atomic_numbers=[6, 8, 8], cell=np.diag([10, 10, 10]))
+    assert len(out) == 2
+    assert isinstance(out[0], AtomsGraph)
+    assert out[0].pos.shape == (3, 3)
+
+
