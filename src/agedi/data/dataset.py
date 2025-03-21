@@ -117,6 +117,21 @@ class Dataset(LightningDataModule):
         else:
             self.dataset.extend(dataset)
 
+    def clear(self) -> None:
+        """Clear the dataset
+
+        Removes all data from the dataset
+
+        Returns
+        -------
+        None
+
+        """
+        self.dataset = None
+        self.train_idx = None
+        self.val_idx = None
+        self.test_idx = None
+
     def add_graph_data(self, data: List[AtomsGraph]) -> None:
         """Add AtomsGraph data to the dataset
 
