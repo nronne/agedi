@@ -47,7 +47,8 @@ class EMT(Potential):
             atoms.calc = aseEMT()
             Es.append(atoms.get_potential_energy())
 
-        return torch.tensor(Es)
+        Es = torch.tensor(Es, device=batch.pos.device)
+        return Es
 
     def forces(self, batch: AtomsGraph) -> torch.Tensor:
         """Computes the forces of the atomistic structure.
@@ -72,5 +73,6 @@ class EMT(Potential):
             Fs.append(atoms.get_forces())
 
         Fs = np.vstack(Fs)
-            
-        return torch.tensor(Fs)
+        Fs = torch.tensor(Fs, device=batch.pos.device)
+
+        return Fs

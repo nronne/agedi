@@ -21,16 +21,16 @@ class Pair(Potential):
     """
 
     def __init__(self, **kwargs) -> None:
-        """Initializes the EMT potential."""
+        """Initializes the potential."""
         super().__init__(**kwargs)
 
-    def energy(self, batch: AtomsGraph) -> torch.Tensor:
+    def energy(self, x: torch.Tensor) -> torch.Tensor:
         """Computes the energy of the atomistic structure.
 
         Parameters
         ----------
-        batch: AtomsGraph
-        The atomistic structure (or batch hereof) to be evaluated.
+        x: torch.Tensor
+        The positions of the atoms. shape (B, N, 3)
 
         Returns
         -------
@@ -38,44 +38,48 @@ class Pair(Potential):
         The energy of the atomistic structure.
 
         """
-        graph_list = batch.to_data_list()
-        Es = []
-        for g in graph_list:
-            r = g.pos
-            Es.append(self._energy(r))
+        # graph_list = batch.to_data_list()
+        # Es = []
+        # for g in graph_list:
+        #     r = g.pos
+        #     Es.append(self._energy(r))
 
-        return torch.tensor(Es)
+        # return torch.stack(Es)
+
+        dist = torch.cdist(x, x)
+        E = torch.sum(torch.sqrt(dist-1.0)**2, dim=(1, 2))
+        return E
 
     def _energy(self, r: torch.Tensor) -> torch.Tensor:
         dist = torch.cdist(r, r)
-        E = torch.sum((dist-1.0)**2)
+        E = torch.sum(torch.sqrt(dist-1.0)**2)
         
         return E
 
 
-    def forces(self, batch: AtomsGraph) -> torch.Tensor:
-        """Computes the forces of _energy using autograd
+    # def forces(self, batch: AtomsGraph) -> torch.Tensor:
+    #     """Computes the forces of _energy using autograd
 
-        Parameters
-        ----------
-        batch: AtomsGraph
-        The atomistic structure (or batch hereof) to be evaluated.
+    #     Parameters
+    #     ----------
+    #     batch: AtomsGraph
+    #     The atomistic structure (or batch hereof) to be evaluated.
 
-        Returns
-        -------
-        forces: torch.Tensor
-        The forces of the atomistic structure.
+    #     Returns
+    #     -------
+    #     forces: torch.Tensor
+    #     The forces of the atomistic structure.
 
-        """
+    #     """
 
-        graph_list = batch.to_data_list()
-        Fs = []
-        with torch.enable_grad():
-            for g in graph_list:
-                r = g.pos.clone().detach().requires_grad_(True)
-                E = self._energy(r)
+    #     graph_list = batch.to_data_list()
+    #     Fs = []
+    #     with torch.enable_grad():
+    #         for g in graph_list:
+    #             r = g.pos.clone().detach().requires_grad_(True)
+    #             E = self._energy(r)
 
-                F = -torch.autograd.grad(E, r)[0]
-                Fs.append(F)
+    #             F = -torch.autograd.grad(E, r)[0]
+    #             Fs.append(F)
 
-        return torch.cat(Fs)
+    #     return torch.cat(Fs)

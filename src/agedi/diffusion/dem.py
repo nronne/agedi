@@ -12,6 +12,22 @@ from agedi.models import ScoreModel
 from agedi.potentials import Potential
 
 
+def log_expectation_reward(
+    x: torch.Tensor,
+    energy_function: BaseEnergyFunction,
+    noise: torch.Tensor,
+    num_mc_samples: int,
+):
+    repeated_t = t.unsqueeze(0).repeat_interleave(num_mc_samples, dim=0)
+    repeated_x = x.unsqueeze(0).repeat_interleave(num_mc_samples, dim=0)
+
+    samples = repeated_x + (torch.randn_like(repeated_x) * noise.sqrt())
+
+    log_rewards = energy_function(samples)
+
+    return torch.logsumexp(log_rewards, dim=-1) - np.log(num_mc_samples)
+
+
 class DenoisingEnergyModel(Diffusion):
     """ Implements the diffusion energy model.
 
@@ -114,16 +130,16 @@ class DenoisingEnergyModel(Diffusion):
         """
 
         E, F = self.potential(batch)
-        index = torch.arange(len(batch)//self.mc_samples).repeat_interleave(self.mc_samples)
-        Z = torch.scatter_add(torch.zeros(len(batch)//self.mc_samples, dtype=E.dtype), 0, index, torch.exp(-E))
-        
+        index = torch.arange(len(batch)//self.mc_samples, device=E.device).repeat_interleave(self.mc_samples)
+        Z = torch.scatter_add(torch.zeros(len(batch)//self.mc_samples, dtype=E.dtype, device=E.device), 0, index, torch.exp(-E))
+
         w = torch.exp(-E)/Z.repeat_interleave(self.mc_samples)
         log_expectation = w.repeat_interleave(
             batch.n_atoms.view(-1)).unsqueeze(1)*F
 
         # index needs to look like: [0,1,0,1,0,1..., 2,3,2,3,2,3...]
         index = self._create_patterned_index(self.mc_samples, len(
-            batch)//self.mc_samples).unsqueeze(1).repeat(1, 3)
+            batch)//self.mc_samples, device=E.device).unsqueeze(1).repeat(1, 3)
 
         S = torch.zeros(batch.x.shape[0]//self.mc_samples, 3,
                         dtype=log_expectation.dtype, device=log_expectation.device)
@@ -131,12 +147,26 @@ class DenoisingEnergyModel(Diffusion):
 
         return S
 
-    def _create_patterned_index(self, block_length, num_blocks):
+    def _score_estimate_no_forces(self, batch: AtomsGraph) -> torch.Tensor:
+        pos = batch.pos
+        pos = pos.reshape(-1, self.mc_samples, 2, 3) # hardcoded for now
+
+        def lse(energy_func, x):
+            E = self.potential.energy(x)
+            return torch.logsumexp(log_rewards, dim=-1) - np.log(self.mc_samples)
+
+        grad_fxc = torch.func.grad(lse, argnums=1)
+        vmapped = torch.vmap(grad_fxc, in_dims=(0, 0, None, None))
+        
+        return vmapped(energy_func, pos)
+        
+
+    def _create_patterned_index(self, block_length, num_blocks, device):
         # Total number of elements
         total_length = block_length * num_blocks
 
         # Create indices from 0 to total_length - 1
-        indices = torch.arange(total_length)
+        indices = torch.arange(total_length, device=device)
 
         # Calculate block index for each position (0 to num_blocks-1)
         block_indices = indices // block_length
