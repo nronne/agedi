@@ -42,128 +42,130 @@ class DenoisingEnergyModel(Diffusion):
         self.temperature = temperature
         self.max_force = max_force
 
-    # def loss(self, batch: AtomsGraph, batch_idx: torch.Tensor) -> Dict:
-    #     """Computes the loss for the diffusion energy model.
+    def loss_old(self, batch: AtomsGraph, batch_idx: torch.Tensor) -> Dict:
+        """Computes the loss for the diffusion energy model.
 
-    #     Parameters
-    #     ----------
-    #     batch: AtomsGraph
-    #         A batch of AtomsGraph data.
-    #     batch_idx: torch.Tensor
-    #         The index of the batch.
+        Parameters
+        ----------
+        batch: AtomsGraph
+            A batch of AtomsGraph data.
+        batch_idx: torch.Tensor
+            The index of the batch.
 
-    #     Returns
-    #     -------
-    #     losses: dict
-    #         A dictionary of losses.
+        Returns
+        -------
+        losses: dict
+            A dictionary of losses.
 
-    #     """
-    #     noised_batch = batch.clone()
+        """
+        noised_batch = batch.clone()
 
-    #     self.sample_time(noised_batch)
+        self.sample_time(noised_batch)
 
-    #     #Noise and predict score
-    #     noised_batch = self.forward_step(noised_batch)
-    #     noised_batch = self.score_model(noised_batch)        
-    #     score_pred = noised_batch["pos_score"]
-    #     score_pred = batch.apply_mask(score_pred)
+        #Noise and predict score
+        noised_batch = self.forward_step(noised_batch)
+        noised_batch = self.score_model(noised_batch)        
+        score_pred = noised_batch["pos_score"]
+        score_pred = batch.apply_mask(score_pred)
 
 
         
-    #     # create monte carlo samples and estimate score
-    #     noised_batch.retain_graph = True
-    #     mc_batch = self._monte_carlo_sample(noised_batch)
-    #     score_estimate = self._score_estimate(mc_batch)
+        # create monte carlo samples and estimate score
+        noised_batch.retain_graph = True
+        mc_batch = self._monte_carlo_sample(noised_batch)
+        score_estimate = self._score_estimate(mc_batch)
 
-    #     # Calculate loss
-    #     loss = 100*(score_estimate - score_pred).pow(2).mean()
+        # Calculate loss
+        loss = 100*(score_estimate - score_pred).pow(2).mean()
 
-    #     # Debug logging
-    #     se_norm = torch.norm(score_estimate)
-    #     sp_norm = torch.norm(score_pred)
-    #     diff_norm = torch.norm(score_estimate - score_pred)
+        # Debug logging
+        se_norm = torch.norm(score_estimate)
+        sp_norm = torch.norm(score_pred)
+        diff_norm = torch.norm(score_estimate - score_pred)
        
-    #     print(f"Step {batch_idx}: score_est_norm={se_norm.item():.6f}, "
-    #           f"score_pred_norm={sp_norm.item():.6f}, diff={diff_norm.item():.6f}")
+        print(f"Step {batch_idx}: score_est_norm={se_norm.item():.6f}, "
+              f"score_pred_norm={sp_norm.item():.6f}, diff={diff_norm.item():.6f}")
 
 
-    #     losses = {
-    #         "loss": loss
-    #     }
+        losses = {
+            "loss": loss
+        }
 
-    #     return losses
+        return losses
 
+    def loss_debug(self, batch: AtomsGraph, batch_idx: torch.Tensor) -> Dict:
+        """Computes the loss with enhanced monitoring for zero-convergence issues"""
+        noised_batch = batch.clone()
+        self.sample_time(noised_batch)
 
-    # def loss_debug(self, batch: AtomsGraph, batch_idx: torch.Tensor) -> Dict:
-    #     """Computes the loss with enhanced monitoring for zero-convergence issues"""
-    #     noised_batch = batch.clone()
-    #     self.sample_time(noised_batch)
+        # Noise and predict score
+        noised_batch = self.forward_step(noised_batch)
+        noised_batch = self.score_model(noised_batch)        
+        score_pred = noised_batch["pos_score"]
+        score_pred = batch.apply_mask(score_pred)
 
-    #     # Noise and predict score
-    #     noised_batch = self.forward_step(noised_batch)
-    #     noised_batch = self.score_model(noised_batch)        
-    #     score_pred = noised_batch["pos_score"]
-    #     score_pred = batch.apply_mask(score_pred)
+        # Create Monte Carlo samples and estimate score
+        noised_batch.retain_graph = True
+        mc_batch = self._monte_carlo_sample(noised_batch)
+        score_estimate = self._score_estimate(mc_batch)
+        score_estimate = batch.apply_mask(score_estimate)
 
-    #     # Create Monte Carlo samples and estimate score
-    #     noised_batch.retain_graph = True
-    #     mc_batch = self._monte_carlo_sample(noised_batch)
-    #     score_estimate = self._score_estimate(mc_batch)
-    #     score_estimate = batch.apply_mask(score_estimate)
+        # Calculate norms for monitoring
+        pred_norm = torch.norm(score_pred, dim=1)
+        est_norm = torch.norm(score_estimate, dim=1)
+        diff_norm = torch.norm(score_estimate - score_pred, dim=1)
 
-    #     # Calculate norms for monitoring
-    #     pred_norm = torch.norm(score_pred, dim=1)
-    #     est_norm = torch.norm(score_estimate, dim=1)
-    #     diff_norm = torch.norm(score_estimate - score_pred, dim=1)
+        # Monitor zero-prediction issue
+        pred_zero_ratio = (pred_norm < 0.01).float().mean().item()
 
-    #     # Monitor zero-prediction issue
-    #     pred_zero_ratio = (pred_norm < 0.01).float().mean().item()
+        # Log basic statistics
+        self.log("train/score_pred_norm_mean", pred_norm.mean(), on_step=True)
+        self.log("train/score_est_norm_mean", est_norm.mean(), on_step=True)
+        self.log("train/score_diff_norm", diff_norm.mean(), on_step=True)
+        self.log("train/zero_pred_ratio", pred_zero_ratio, on_step=True)
 
-    #     # Log basic statistics
-    #     self.log("train/score_pred_norm_mean", pred_norm.mean(), on_step=True)
-    #     self.log("train/score_est_norm_mean", est_norm.mean(), on_step=True)
-    #     self.log("train/score_diff_norm", diff_norm.mean(), on_step=True)
-    #     self.log("train/zero_pred_ratio", pred_zero_ratio, on_step=True)
+        # Log percentiles for distribution analysis
+        percentiles = [25, 50, 75, 90, 95]
+        pred_np = pred_norm.detach().cpu().numpy()
+        est_np = est_norm.detach().cpu().numpy()
 
-    #     # Log percentiles for distribution analysis
-    #     percentiles = [25, 50, 75, 90, 95]
-    #     pred_np = pred_norm.detach().cpu().numpy()
-    #     est_np = est_norm.detach().cpu().numpy()
+        for p in percentiles:
+            if len(pred_np) > 0:  # Ensure we have data to compute percentiles
+                pred_p = float(np.percentile(pred_np, p))
+                est_p = float(np.percentile(est_np, p))
+                self.log(f"train/score_pred_p{p}", pred_p, on_step=False, on_epoch=True)
+                self.log(f"train/score_est_p{p}", est_p, on_step=False, on_epoch=True)
 
-    #     for p in percentiles:
-    #         if len(pred_np) > 0:  # Ensure we have data to compute percentiles
-    #             pred_p = float(np.percentile(pred_np, p))
-    #             est_p = float(np.percentile(est_np, p))
-    #             self.log(f"train/score_pred_p{p}", pred_p, on_step=False, on_epoch=True)
-    #             self.log(f"train/score_est_p{p}", est_p, on_step=False, on_epoch=True)
+        # Directional alignment metric (cosine similarity)
+        # Avoid division by zero with small epsilon
+        eps = 1e-8
+        pred_direction = score_pred / (pred_norm.unsqueeze(1) + eps)
+        est_direction = score_estimate / (est_norm.unsqueeze(1) + eps)
+        cosine_sim = (pred_direction * est_direction).sum(dim=1).mean()
+        self.log("train/direction_cosine_sim", cosine_sim, on_step=True)
 
-    #     # Directional alignment metric (cosine similarity)
-    #     # Avoid division by zero with small epsilon
-    #     eps = 1e-8
-    #     pred_direction = score_pred / (pred_norm.unsqueeze(1) + eps)
-    #     est_direction = score_estimate / (est_norm.unsqueeze(1) + eps)
-    #     cosine_sim = (pred_direction * est_direction).sum(dim=1).mean()
-    #     self.log("train/direction_cosine_sim", cosine_sim, on_step=True)
+        # Log ratio of magnitudes (to detect scaling issues)
+        magnitude_ratio = (pred_norm / (est_norm + eps)).clamp(0, 10).mean()
+        self.log("train/magnitude_ratio", magnitude_ratio, on_step=True)
 
-    #     # Log ratio of magnitudes (to detect scaling issues)
-    #     magnitude_ratio = (pred_norm / (est_norm + eps)).clamp(0, 10).mean()
-    #     self.log("train/magnitude_ratio", magnitude_ratio, on_step=True)
+        # Calculate loss (original implementation)
+        loss = (score_estimate - score_pred).pow(2).mean()
+        self.log("train/loss", loss, on_step=True)
 
-    #     # Calculate loss (original implementation)
-    #     loss = 100 * (score_estimate - score_pred).pow(2).mean()
-    #     self.log("train/loss", loss, on_step=True)
+        losses = {
+            "loss": loss
+        }
 
-    #     losses = {
-    #         "loss": loss
-    #     }
+        return losses
 
-    #     return losses
-
-
-    def loss(self, batch, batch_idx):
+    def loss(self, batch: AtomsGraph, batch_idx: torch.Tensor) -> Dict:
         # Get predicted and estimated scores
-        noised_batch = self.forward_step(batch.clone())
+        noised_batch = batch.clone()
+        self.sample_time(noised_batch)
+
+        noised_batch = self.forward_step(noised_batch)
         noised_batch = self.score_model(noised_batch)
+        
         score_pred = noised_batch["pos_score"]
         score_pred = batch.apply_mask(score_pred)
 
@@ -174,11 +176,11 @@ class DenoisingEnergyModel(Diffusion):
 
         # Decompose into direction and magnitude
         eps = 1e-8
-        pred_norm = torch.norm(score_pred, dim=1, keepdim=True) + eps
-        est_norm = torch.norm(score_estimate, dim=1, keepdim=True) + eps
+        pred_norm = torch.norm(score_pred[~batch.positions_mask].reshape(-1, 3), dim=1, keepdim=True) + eps
+        est_norm = torch.norm(score_estimate[~batch.positions_mask].reshape(-1, 3), dim=1, keepdim=True) + eps
 
-        pred_direction = score_pred / pred_norm
-        est_direction = score_estimate / est_norm
+        pred_direction = score_pred[~batch.positions_mask].reshape(-1, 3) / pred_norm
+        est_direction = score_estimate[~batch.positions_mask].reshape(-1, 3) / est_norm
 
         # Direction loss (1 - cos similarity)
         dir_loss = (1.0 - torch.sum(pred_direction * est_direction, dim=1)).mean()
@@ -306,6 +308,33 @@ class DenoisingEnergyModel(Diffusion):
         return S
 
     def _score_estimate(self, batch: AtomsGraph) -> torch.Tensor:
+        """Calculates the score estimate using log-weight forces approach for numerical stability.
+
+
+        NB: Does not work with batch_size > 1
+        
+        Parameters
+        ----------
+        batch: AtomsGraph
+            Batch containing MC samples for each original data point
+
+        Returns
+        -------
+        torch.Tensor
+            The estimated score for each original data point
+        """
+        # Get energies and forces
+        E, F = self.potential.energy_and_forces(batch)
+        F = batch.apply_mask(F)
+
+        log_weights = (-E/self.temperature).squeeze()
+        log_weights = log_weights - torch.logsumexp(log_weights, dim=0)
+        weights = torch.exp(log_weights).unsqueeze(1)
+
+        score_estimate = (weights.reshape(-1, 1, 1) * F.reshape(self.mc_samples, -1, 3)).sum(0)
+        return score_estimate
+
+    def _score_estimate_bug(self, batch: AtomsGraph) -> torch.Tensor:
         """Calculates the score estimate using log-weight forces approach for numerical stability.
 
         Parameters
