@@ -3,7 +3,6 @@ import numpy as np
 from .potential import Potential
 from agedi.data import AtomsGraph
 
-
 import torch
 from torch_geometric.data import Batch
 import torch.nn as nn
@@ -18,7 +17,7 @@ class LennardJones(Potential):
     V(r) = 4*epsilon * [(sigma/r)^12 - (sigma/r)^6]
     """
 
-    def __init__(self, epsilon=1.0, sigma=1.0, **kwargs):
+    def __init__(self, epsilon=1.0, sigma=1.0, C=40, **kwargs):
         """
         Parameters
         ----------
@@ -34,6 +33,7 @@ class LennardJones(Potential):
 
         self.epsilon = epsilon
         self.sigma = sigma
+        self.C = C
 
     def forward(self, graph):
         """Calculate LJ energy and forces
@@ -114,6 +114,21 @@ class LennardJones(Potential):
 
         # For batched data, sum energies per graph
         if isinstance(graph, Batch):
+            # batch_idx = graph.batch
+            # src_batch = batch_idx[src]
+
+            # # Sum contributions for each graph
+            # num_graphs = batch_idx.max().item() + 1
+            # energy = torch.zeros(num_graphs, device=pos.device)
+
+            # # Accumulate each pair contribution to the correct graph
+            # # Divide by 2 to avoid double counting each pair
+            # for i in range(num_graphs):
+            #     mask = (src_batch == i)
+            #     energy[i] = pair_energy[mask].sum() / 2.0
+
+
+            # NEW: Use scatter to sum contributions for each graph in one operation
             batch_idx = graph.batch
             src_batch = batch_idx[src]
 
@@ -121,15 +136,14 @@ class LennardJones(Potential):
             num_graphs = batch_idx.max().item() + 1
             energy = torch.zeros(num_graphs, device=pos.device)
 
-            # Accumulate each pair contribution to the correct graph
-            # Divide by 2 to avoid double counting each pair
-            for i in range(num_graphs):
-                mask = (src_batch == i)
-                energy[i] = pair_energy[mask].sum() / 2.0
+            # Use scatter_add_ to sum pair energies by graph in one operation
+            energy.scatter_add_(0, src_batch, pair_energy / 2.0)
+
+            
         else:
             energy = pair_energy.sum() / 2.0
 
-        return energy
+        return energy + self.C
 
     def energy_and_forces(self, graph):
         """Calculate energy and forces

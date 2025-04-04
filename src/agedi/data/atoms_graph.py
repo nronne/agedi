@@ -47,6 +47,11 @@ def batched(
                 if update_keys is not None:
                     for key in update_keys:
                         setattr(self, key, new_batch[key])
+                        #update _slice_dict and _inc_dict
+                        if hasattr(self, "_slice_dict") and key in self._slice_dict:
+                            self._slice_dict[key] = new_batch._slice_dict[key]
+                            self._inc_dict[key] = new_batch._inc_dict[key]
+
                 if return_batch:
                     return new_batch
             elif isinstance(self, Data):
@@ -456,6 +461,7 @@ class AtomsGraph(Data):
             cutoff,
             self.pbc.detach().cpu(),
         )
+
         self.edge_index = edge_index.to(device)
         self.shift_vectors = shift_vectors.to(device)
 
@@ -473,8 +479,8 @@ class AtomsGraph(Data):
         -------
         None
         """
-        del self.edge_index
-        del self.shift_vectors
+        # del self.edge_index
+        # del self.shift_vectors
 
     def __len__(self) -> int:
         """Return the number of atoms in the graph.

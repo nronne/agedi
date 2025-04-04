@@ -8,6 +8,7 @@ dependencies = [
     "torch<2.5.0",
     "lightning",
     "torch_geometric",
+    # "torch-scatter",
     "torch-ema",
     "tensorboard",
     "numpy<2",

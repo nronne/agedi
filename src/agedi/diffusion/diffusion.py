@@ -272,6 +272,7 @@ class Diffusion(LightningModule):
                 torch.ones_like(template.x, dtype=torch.bool),
                 torch.zeros_like(graph.x, dtype=torch.bool)
             ]))
+            setattr(new_graph, "n_atoms", torch.tensor(new_graph.x.shape[0]).reshape(1, 1))
         else:
             new_graph = graph
 
@@ -447,7 +448,7 @@ class Diffusion(LightningModule):
 
         return batch.to_data_list()
 
-    def forward_step(self, batch: AtomsGraph) -> AtomsGraph:
+    def forward_step(self, batch: AtomsGraph, update_graph=True) -> AtomsGraph:
         """Forward diffusion step
 
         Performs a forward step in the diffusion model.
@@ -467,7 +468,9 @@ class Diffusion(LightningModule):
         for noiser in self.noisers:
             batch = noiser.noise(batch)
 
-        batch.update_graph()
+        if update_graph:
+            batch.update_graph()
+            
         return batch
 
     def reverse_step(self, batch: AtomsGraph, delta_t: float, last: bool=False) -> AtomsGraph:
