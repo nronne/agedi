@@ -789,7 +789,7 @@ class AtomsGraph(Data):
         """
         self.cell = self.vector_to_cell(cellpar).view(-1, 3)
         
-    def cell_to_vectors(self, cell):
+    def cell_to_vectors(self, cell, V0=2.0):
         """Convert cell matrix to cell parameters.
 
         Parameters
@@ -804,7 +804,7 @@ class AtomsGraph(Data):
 
         """
         cell = cell.view(-1, 3, 3)
-        
+
         a = torch.norm(cell[..., 0, :], dim=-1)
         b = torch.norm(cell[..., 1, :], dim=-1)
         c = torch.norm(cell[..., 2, :], dim=-1)
@@ -819,16 +819,21 @@ class AtomsGraph(Data):
             torch.sum(cell[..., 0, :] * cell[..., 1, :], dim=-1) / (a * b)
         )
 
-        # alpha = alpha * 180 / torch.pi
-        # beta = beta * 180 / torch.pi
-        # gamma = gamma * 180 / torch.pi
-
-        a,b,c = torch.log(a), torch.log(b), torch.log(c)
+        V = torch.det(cell).abs()
+        V13 = V**(1/3)
+        vol = (V/self.n_atoms.view(-1)) ** (1 / 3) - V0
+        
+        a,b,c = torch.log(a/V13), torch.log(b/V13), torch.log(c/V13)
+        # log_vol = torch.log(vol)
+        
         alpha, beta, gamma = alpha - torch.pi / 2, beta - torch.pi / 2, gamma - torch.pi / 2
+        alpha_deg = alpha * 180 / np.pi
+        beta_deg = beta * 180 / np.pi
+        gamma_deg = gamma * 180 / np.pi
 
-        return torch.stack([a, b, c, alpha, beta, gamma], dim=-1)
+        return torch.stack([a, b, c, alpha, beta, gamma, vol], dim=-1)
 
-    def vector_to_cell(self, cellpar):
+    def vector_to_cell(self, cellpar, V0=2.0):
         """Convert cell parameters to cell matrix.
 
         Parameters
@@ -842,16 +847,24 @@ class AtomsGraph(Data):
             The cell matrix.
 
         """
-        a, b, c, alpha, beta, gamma = cellpar.unbind(-1)
-
-        a, b, c = torch.exp(a), torch.exp(b), torch.exp(c)
+        a, b, c, alpha, beta, gamma, vol = cellpar.unbind(-1)
+        alpha = alpha * np.pi / 180
+        beta = beta * np.pi / 180
+        gamma = gamma * np.pi / 180
+        
+        V = (vol + V0)**3 * self.n_atoms.view(-1)
+        V13 = V ** (1 / 3)
+        a, b, c = torch.exp(a)*V13, torch.exp(b)*V13, torch.exp(c)*V13
         alpha, beta, gamma = alpha + torch.pi / 2, beta + torch.pi / 2, gamma + torch.pi / 2
+        print('a, b, c, alpha, beta, gamma:', a,b,c, alpha*180/np.pi, beta*180/np.pi, gamma*180/np.pi)
+        
         
 
         cos_alpha = torch.cos(alpha)
         cos_beta = torch.cos(beta)
         cos_gamma = torch.cos(gamma)
         sin_gamma = torch.sin(gamma)
+
 
         cell = torch.zeros(cellpar.shape[:-1] + (3, 3), device=cellpar.device)
         cell[..., 0, 0] = a
@@ -860,8 +873,14 @@ class AtomsGraph(Data):
 
         cell[..., 1, 1] = b * sin_gamma
         cell[..., 1, 2] = c * (cos_alpha - cos_beta * cos_gamma) / sin_gamma
+        
+        discriminant = 1 - cos_beta**2 - (cell[..., 2, 1] / c)**2  # FIXED reference
+        # Add safety check to prevent NaN
+        discriminant = torch.clamp(discriminant, min=0.0)
+        cell[..., 2, 2] = c * torch.sqrt(discriminant)
 
-        cell[..., 2, 2] = c * torch.sqrt(1 - cos_beta ** 2 - cell[..., 1, 2] ** 2 / c ** 2)
+        #ensure cell volume is V
+        cell = cell * (V / torch.det(cell).abs().unsqueeze(-1).unsqueeze(-1)).pow(1/3)
 
         return cell
 

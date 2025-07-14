@@ -4,7 +4,7 @@ import numpy as np
 from typing import Dict
 from agedi.data import AtomsGraph
 from agedi.diffusion.noisers import Noiser
-from agedi.diffusion.sdes import SDE, VP
+from agedi.diffusion.sdes import SDE, VP, VE
 from agedi.diffusion.distributions import Distribution, Normal, StandardNormal
 
 
@@ -37,8 +37,8 @@ class CellNoiser(Noiser):
 
     def __init__(
         self,
-        sde_class: SDE = VP,
-        sde_kwargs: Dict = {"beta_max": 1.0},
+        sde_class: SDE = VE,
+        sde_kwargs: Dict = {"sigma_max": 0.1},
         distribution: Distribution = Normal(),
         prior: Distribution = Normal(),
         **kwargs
@@ -65,23 +65,25 @@ class CellNoiser(Noiser):
         """
 
         cellpar = getattr(batch, self.key)
+        f = batch.frac.clone()
         t = batch.time[batch.ptr[:-1]].reshape(-1, 1)
 
         w = self.distribution.get_callable(batch)
         noised_cellpar = self.sde.transition_kernel(cellpar, t, w)
 
 
-        a, b, c, alpha, beta, gamma = cellpar.unbind(-1)
-        a, b, c = torch.clamp(a, min=0), torch.clamp(b, min=0), torch.clamp(c, min=0)
-        alpha, beta, gamma = torch.clamp(alpha, min=-1.0, max=1.0), torch.clamp(beta, min=-1.0, max=1.0), torch.clamp(gamma, min=-1.0, max=1.0)
+        a, b, c, alpha, beta, gamma, V = noised_cellpar.unbind(-1)
+        # a, b, c = torch.clamp(a, min=0), torch.clamp(b, min=0), torch.clamp(c, min=0)
+        # alpha, beta, gamma = torch.clamp(alpha, min=-1.0, max=1.0), torch.clamp(beta, min=-1.0, max=1.0), torch.clamp(gamma, min=-1.0, max=1.0)
         
-        noised_cellpar = torch.stack([a,b,c,alpha,beta,gamma], dim=-1)
+        noised_cellpar = torch.stack([a,b,c,alpha,beta,gamma,V], dim=-1)
         
         setattr(batch, self.key, noised_cellpar)
+        batch.frac = f
         # batch[self.key + "_noise"] = self.sde.noise(cellpar, noised_cellpar, t)
         batch.add_batch_attr(self.key + "_noise", self.sde.noise(cellpar, noised_cellpar, t), type="graph")
 
-        batch.wrap_positions()
+        # batch.wrap_positions()
 
         return batch
 
@@ -113,6 +115,7 @@ class CellNoiser(Noiser):
 
         """
         c = getattr(batch, self.key)
+        f = batch.frac.clone()
         c_score = batch[self.key + "_score"]
         if c_score.isnan().any():
             breakpoint()
@@ -132,16 +135,18 @@ class CellNoiser(Noiser):
             )
 
 
-        a, b, c, alpha, beta, gamma = cellpar.unbind(-1)
-        a, b, c = torch.clamp(a, min=0.3, max=1.3), torch.clamp(b, min=0.3, max=1.3), torch.clamp(c, min=0.3, max=1.3)
-        alpha, beta, gamma = torch.clamp(alpha, min=-1.0, max=1.0), torch.clamp(beta, min=-1.0, max=1.0), torch.clamp(gamma, min=-1.0, max=1.0)
+        a, b, c, alpha, beta, gamma, V = cellpar.unbind(-1)
+        # a, b, c = torch.clamp(a, min=0.3, max=1.3), torch.clamp(b, min=0.3, max=1.3), torch.clamp(c, min=0.3, max=1.3)
+        # alpha, beta, gamma = torch.clamp(alpha, min=-1.0, max=1.0), torch.clamp(beta, min=-1.0, max=1.0), torch.clamp(gamma, min=-1.0, max=1.0)
         
-        cellpar = torch.stack([a,b,c,alpha,beta,gamma], dim=-1)
+        cellpar = torch.stack([a,b,c,alpha,beta,gamma,V], dim=-1)
 
-        print('lenghts:', torch.exp(a), torch.exp(b), torch.exp(c))
-        print('angles:', (alpha + np.pi/2)*180/np.pi, (beta + np.pi/2)*180/np.pi, (gamma + np.pi/2)*180/np.pi)
+        # print('lenghts:', torch.exp(a), torch.exp(b), torch.exp(c))
+        # print('angles:', (alpha + np.pi/2)*180/np.pi, (beta + np.pi/2)*180/np.pi, (gamma + np.pi/2)*180/np.pi)
         setattr(batch, self.key, cellpar)
-        print(batch.cell)
+        batch.frac = f
+        
+        # print(batch.cell)
 
 
         return batch
@@ -185,45 +190,4 @@ class CellNoiser(Noiser):
         )
 
         return loss
-
-    # def mu(self, batch: AtomsGraph) -> torch.Tensor:
-    #     """
-    #     Parameters
-    #     ----------
-    #     batch: AtomsGraph
-    #         The atomistic structure (or batch hereof) to be noised.
-
-    #     Returns
-    #     -------
-    #     torch.Tensor
-            
-
-    #     """
-    #     cells = getattr(batch, self.key)
-    #     n_atoms = batch.n_atoms
-
-    #     c = torch.repeat_interleave(self.volume_scaling*n_atoms**(1/3), 3)[..., None]
-    #     eye = torch.repeat_interleave(torch.eye(3, device=cells.device)[None,...], n_atoms.shape[0], dim=0).reshape(-1, 3)
-    #     mu = c*eye
-
-    #     return mu
-
-    # def initialize_graph(self, batch: AtomsGraph) -> None:
-    #     """Initializes the graph with the prior distribution.
-
-    #     Parameters
-    #     ----------
-    #     batch: AtomsGraph
-    #         The atomistic structure (or batch hereof) to be noised and denoised.
-
-    #     """
-    #     mu = self.mu(batch)
-    #     std = torch.sqrt(self.sde.var(torch.tensor([1.0])))
-        
-    #     setattr(
-    #         batch,
-    #         self.key,
-    #         self.prior.get_callable(batch)(mu, std),
-    #     )
-        
-        
+    
