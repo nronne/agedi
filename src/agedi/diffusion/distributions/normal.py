@@ -139,3 +139,102 @@ class TruncatedNormal(Distribution):
         return torch.stack(x, dim=1)
 
 
+class WrappedNormal(Distribution):
+    """Wrapped Normal Distribution"""
+
+    def __init__(self, N: int = 10, T: float = 1.0, **kwargs) -> None:
+        """Initialize the distribution"""
+        super().__init__(**kwargs)
+        self.N = N
+        self.T = T
+
+    def _sample(self, mu: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Sample from the wrapped normal distribution
+
+        Parameters
+        ----------
+        mu : torch.Tensor
+            Mean of the distribution
+        sigma : torch.Tensor
+            Standard deviation of the distribution
+
+        Returns
+        -------
+        torch.Tensor
+            Sampled tensor
+
+        """
+        return mu + sigma * torch.randn_like(mu)
+
+    def p(self, x: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Calculate the probability density function of the wrapped normal distribution
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Sampled tensor
+        mu : torch.Tensor
+            Mean of the distribution
+        sigma : torch.Tensor
+            Standard deviation of the distribution
+
+        Returns
+        -------
+        torch.Tensor
+            Probability density function
+
+        """
+        p_ = 0
+        for i in range(-self.N, self.N + 1):
+            p_ += torch.exp(-((x + self.T * i) ** 2) / 2 / sigma**2)
+        return p_
+        
+        
+    def d_log_p(self, x: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Calculate the gradient of the log probability density function of the wrapped normal distribution
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Sampled tensor
+        mu : torch.Tensor
+            Mean of the distribution
+        sigma : torch.Tensor
+            Standard deviation of the distribution
+
+        Returns
+        -------
+        torch.Tensor
+            Gradient of the log probability density function
+
+        """
+        p_ = 0
+        for i in range(-self.N, self.N + 1):
+            p_ += (x + self.T * i) / sigma**2 * torch.exp(-((x + self.T * i) ** 2) / 2 / sigma**2)
+        return p_ / self.p(x, sigma, self.N, self.T)
+
+
+    def sigma_norm(self, sigma: torch.Tensor, sn: int=10000) -> torch.Tensor:
+        """Calculate the normalization constant of the wrapped normal distribution
+
+        Parameters
+        ----------
+        sigma : torch.Tensor
+            Standard deviation of the distribution
+
+        sn : int
+            Number of samples to use for the calculation
+
+        Returns
+        -------
+        torch.Tensor
+            Normalization constant
+
+        """
+        sigmas = sigma[None, :].repeat(sn, 1)
+        x_sample = sigma * torch.randn_like(sigmas)
+        x_sample = x_sample % self.T
+        normal_ = self.d_log_p(x_sample, sigmas, T=self.T)
+        
+        return (normal_**2).mean(dim=0)
+        
