@@ -213,3 +213,34 @@ class TypesScore(Head):
         pred = self.net(scalar_representation)
         return pred
 
+
+class CellScore(Head):
+    """Predict cell parameters with simple physical constraints.
+    
+    Ensures:
+    - Three positive numbers for lengths (a, b, c)
+    - Three numbers between 0 and π for angles (α, β, γ)
+    """
+    _key = "cellpar"
+
+    def __init__(self, input_dim_scalar=66, input_dim_vector=64, **kwargs):
+        super().__init__(**kwargs)
+        lattice_dim = 9
+        self.net = nn.Sequential(
+            nn.Linear(input_dim_scalar, input_dim_scalar, bias=True),
+            nn.ReLU(),
+            nn.Linear(input_dim_scalar, cellpar_dim, bias=False), # bias = False
+        )
+        
+    def _score(self, batch):
+        """Predict cell parameters with appropriate physical ranges."""
+        cell = batch["cell"].view(-1, 3, 3)
+        scalar_representation = batch["scalar_representation"]
+        structure_representation = scatter(scalar_representation, batch["_idx_m"], dim=0, reduce="mean")
+
+        # Get raw predictions
+        out = self.net(structure_representation).view(-1, 3, 3)
+        
+        pred = torch.einsum("bij,bjk->bik", out, cell)
+        
+        return pred
