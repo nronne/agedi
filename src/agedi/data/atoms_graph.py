@@ -798,25 +798,40 @@ class AtomsGraph(Data):
 
 
     @property
-    def cellpar(self) -> torch.Tensor:
-        """Return the cell parameters of the graph."""
-        return self.cell_to_vectors(self.cell)
+    def cell(self) -> torch.Tensor:
+        """Return the cell of the graph.
 
-    @cellpar.setter
-    def cellpar(self, cellpar: torch.Tensor) -> None:
-        """Set the cell parameters of the graph.
+        Returns
+        -------
+        cell: torch.Tensor
+            The cell of the graph.
+
+        """
+        return self["cell"]
+
+    @cell.setter
+    def cell(self, cell: torch.Tensor) -> None:
+        """Set the cell of the graph.
 
         Parameters
         ----------
-        cellpar: torch.Tensor
-            The cell parameters of the graph.
+        cell: torch.Tensor
+            The new cell of the graph.
 
         Returns
         -------
         None
 
         """
-        self.cell = self.vector_to_cell(cellpar).view(-1, 3)
+        if "cell" in self._store:
+            self.clear_graph()
+            del self["cell"]
+            if "frac" in self._store:
+                del self["frac"]
+
+        self.add_batch_attr("cell", cell, type="graph")
+
+
         
     def cell_to_vectors(self, cell: torch.Tensor) -> torch.Tensor:
         """Convert cell matrix to cell parameters.

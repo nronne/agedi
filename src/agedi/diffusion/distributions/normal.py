@@ -211,7 +211,7 @@ class WrappedNormal(Distribution):
         p_ = 0
         for i in range(-self.N, self.N + 1):
             p_ += (x + self.T * i) / sigma**2 * torch.exp(-((x + self.T * i) ** 2) / 2 / sigma**2)
-        return p_ / self.p(x, sigma, self.N, self.T)
+        return p_ / self.p(x, sigma)
 
 
     def sigma_norm(self, sigma: torch.Tensor, sn: int=10000) -> torch.Tensor:
@@ -231,10 +231,9 @@ class WrappedNormal(Distribution):
             Normalization constant
 
         """
-        sigmas = sigma[None, :].repeat(sn, 1)
+        sigmas = sigma.repeat(1, sn)
         x_sample = sigma * torch.randn_like(sigmas)
         x_sample = x_sample % self.T
         normal_ = self.d_log_p(x_sample, sigmas, T=self.T)
-        
-        return (normal_**2).mean(dim=0)
+        return (normal_**2).mean(dim=1)[..., None]
         

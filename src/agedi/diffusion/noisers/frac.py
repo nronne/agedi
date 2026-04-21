@@ -6,6 +6,7 @@ from agedi.data import AtomsGraph
 from agedi.diffusion.noisers import Noiser
 from agedi.diffusion.sdes import SDE, VE
 from agedi.diffusion.distributions import Distribution, StandardNormal, UniformCell
+from agedi.diffusion.distributions.normal import WrappedNormal
 from agedi.utils import OFFSET_LIST
 
 
@@ -81,7 +82,7 @@ class FractionalNoiser(Noiser):
             The noised atomistic structure (or bach hereof).
 
         """
-        r0 = batch[self.key]
+        r0 = batch.frac
         t = batch.time
 
         w = self.distribution.get_callable(batch)
@@ -122,8 +123,8 @@ class FractionalNoiser(Noiser):
             The denoised atomistic structure (or bach hereof).
 
         """
-        r = batch[self.key]
-        r_score = batch[self.key + "_score"]
+        r = batch.frac
+        r_score = batch["pos_score"]
         
         r_score[torch.isnan(r_score)] = 0.0
         t = batch.time
@@ -173,7 +174,7 @@ class FractionalNoiser(Noiser):
 
         """
         t = batch.time
-        r_score = batch[self.key + "_score"]
+        r_score = batch["pos_score"]
         r_noise = batch[self.key + "_noise"]
 
         var = self.sde.var(t)
@@ -188,6 +189,8 @@ class FractionalNoiser(Noiser):
         r_target = self.distribution.d_log_p(sigma*r_noise, sigma) / sigma_norm
         
         loss = F.mse_loss(r_score, r_target)
+
+        breakpoint()
         
         return loss
 
