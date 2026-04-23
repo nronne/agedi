@@ -898,40 +898,28 @@ class AtomsGraph(Data):
 
 
     @property
-    def cell(self) -> torch.Tensor:
-        """Return the cell of the graph.
+    def cellpar(self) -> torch.Tensor:
+        """Return the cell parameters of the graph."""
+        return self.cell_to_vectors(self.cell)
 
-        Returns
-        -------
-        cell: torch.Tensor
-            The cell of the graph.
-
-        """
-        return self["cell"]
-
-    @cell.setter
-    def cell(self, cell: torch.Tensor) -> None:
-        """Set the cell of the graph.
+    @cellpar.setter
+    def cellpar(self, cellpar: torch.Tensor) -> None:
+        """Set the cell parameters of the graph.
 
         Parameters
         ----------
-        cell: torch.Tensor
-            The new cell of the graph.
+        cellpar: torch.Tensor
+            The cell parameters of the graph.
 
         Returns
         -------
         None
 
         """
-        if "cell" in self._store:
-            self.clear_graph()
-            del self["cell"]
-            if "frac" in self._store:
-                del self["frac"]
-
-        self.add_batch_attr("cell", cell, type="graph")
-
-
+        cell = self.vector_to_cell(cellpar)
+        if cell.ndim == 3 and cell.shape[0] == 1:
+            cell = cell.reshape(3, 3)
+        self.cell = cell
         
     @staticmethod
     def _is_lower_triangular(cell: torch.Tensor) -> bool:
