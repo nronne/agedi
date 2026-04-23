@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Any, Dict
 
 import torch
 from schnetpack.properties import R, Z, cell, energy, forces, idx_i, idx_j, idx_m, n_atoms, offsets, pbc
@@ -13,6 +13,65 @@ class SchNetPackTranslator(Translator):
     This class is used to translate the input data to the format required by the SchNetPack models.
 
     """
+
+    def get_representation_hparams(self, representation: Any) -> Dict:
+        """Extract hyperparameters from a SchNetPack representation object.
+
+        Supports :class:`schnetpack.representation.PaiNN`.  Extracts
+        ``n_atom_basis``, ``n_interactions``, and nested configs for the
+        ``radial_basis`` and ``cutoff_fn`` so that the representation can be
+        fully reconstructed with :func:`~agedi.functional._instantiate_from_config`.
+
+        Parameters
+        ----------
+        representation : any
+            An instantiated SchNetPack representation object.
+
+        Returns
+        -------
+        dict
+            Hyperparameter dictionary with a ``_target_`` key and
+            representation-specific parameters.
+
+        Raises
+        ------
+        NotImplementedError
+            If the representation type is not recognised.
+        """
+        import schnetpack as spk
+
+        if isinstance(representation, spk.representation.PaiNN):
+            hparams: Dict[str, Any] = {
+                "_target_": f"{type(representation).__module__}.{type(representation).__qualname__}",
+                "n_atom_basis": representation.n_atom_basis,
+                "n_interactions": representation.n_interactions,
+            }
+            # Encode radial_basis as a nested instantiation config
+            if hasattr(representation, "radial_basis"):
+                rb = representation.radial_basis
+                rb_hparams: Dict[str, Any] = {
+                    "_target_": f"{type(rb).__module__}.{type(rb).__qualname__}",
+                    "n_rbf": int(rb.n_rbf),
+                }
+                # Cutoff is stored implicitly in the last offset value
+                if hasattr(rb, "offsets") and rb.offsets.numel() > 0:
+                    rb_hparams["cutoff"] = float(rb.offsets[-1])
+                hparams["radial_basis"] = rb_hparams
+            # Encode cutoff_fn as a nested instantiation config
+            if hasattr(representation, "cutoff_fn"):
+                cf = representation.cutoff_fn
+                cf_hparams: Dict[str, Any] = {
+                    "_target_": f"{type(cf).__module__}.{type(cf).__qualname__}",
+                }
+                if hasattr(cf, "cutoff") and cf.cutoff.numel() > 0:
+                    cf_hparams["cutoff"] = float(cf.cutoff[0])
+                hparams["cutoff_fn"] = cf_hparams
+            return hparams
+
+        raise NotImplementedError(
+            f"get_representation_hparams is not implemented for "
+            f"representation type '{type(representation).__name__}'"
+        )
 
     def _translate(self, batch: "AtomsGraph") -> Dict[str, torch.Tensor]:
         """Translate the input batch to the format required by the model.

@@ -1,6 +1,6 @@
 import torch
 
-from agedi.diffusion.noisers.types import NoiseSchedule, TypesNoiser
+from agedi.diffusion.noisers.types import NoiseSchedule, Types
 
 
 def test_noise_schedule_methods():
@@ -17,7 +17,7 @@ def test_noise_schedule_methods():
 
 
 def test_types_noiser_sample_transition_output_shape_and_bounds():
-    noiser = TypesNoiser()
+    noiser = Types()
     x = torch.tensor([1, 2, 3, 4])
     sigma = torch.tensor([0.1, 0.2, 0.3, 0.4])
 
@@ -28,7 +28,7 @@ def test_types_noiser_sample_transition_output_shape_and_bounds():
 
 
 def test_types_noiser_transp_rate_and_reverse_rate():
-    noiser = TypesNoiser()
+    noiser = Types()
     x = torch.tensor([0, 5, 7])
     score = torch.ones((3, 100))
 
@@ -41,7 +41,7 @@ def test_types_noiser_transp_rate_and_reverse_rate():
 
 
 def test_types_noiser_staggered_score_and_transition():
-    noiser = TypesNoiser()
+    noiser = Types()
     x = torch.tensor([0, 5])
     sigma = torch.tensor([[0.2], [0.4]])
     score = torch.softmax(torch.randn((2, 100)), dim=-1)
@@ -56,7 +56,7 @@ def test_types_noiser_staggered_score_and_transition():
 
 
 def test_types_noiser_score_entropy_shape():
-    noiser = TypesNoiser()
+    noiser = Types()
     score = torch.randn((4, 100))
     sigma = torch.tensor([[0.2], [0.3], [0.4], [0.5]])
     x = torch.tensor([0, 1, 0, 2])
@@ -69,7 +69,7 @@ def test_types_noiser_score_entropy_shape():
 
 
 def test_types_noiser_sample_rate():
-    noiser = TypesNoiser()
+    noiser = Types()
     x = torch.tensor([1, 2])
     rate = torch.zeros((2, 100))
     sampler = lambda probs: probs.argmax(dim=-1)
@@ -80,7 +80,7 @@ def test_types_noiser_sample_rate():
 
 
 def test_types_noiser_noise_loss_and_denoise(batch):
-    noiser = TypesNoiser()
+    noiser = Types()
     batch.time = torch.rand((batch.num_nodes, 1))
     original_types = batch.x.clone()
 

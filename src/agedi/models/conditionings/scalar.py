@@ -9,17 +9,21 @@ class ScalarConditioning(Conditioning):
     conditioning vector.
     """
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, input_dim: int = 1, output_dim: int = 2, **kwargs) -> None:
         """Initialize the scalar conditioning module.
 
         Parameters
         ----------
         *args
             Positional arguments forwarded to :class:`~agedi.models.conditionings.base.Conditioning`.
+        input_dim : int, optional
+            Keyword-only dimension of the scalar input. Defaults to 1.
+        output_dim : int, optional
+            Keyword-only dimension of the output conditioning (cos + sin). Defaults to 2.
         **kwargs
             Keyword arguments forwarded to :class:`~agedi.models.conditionings.base.Conditioning`.
         """
-        super().__init__(input_dim=1, output_dim=2, *args, **kwargs)
+        super().__init__(input_dim=input_dim, output_dim=output_dim, *args, **kwargs)
 
         self.embedder = torch.nn.Sequential(
             torch.nn.Linear(self.input_dim, self.input_dim),

@@ -14,7 +14,7 @@ from agedi.data import AtomsGraph
 click.rich_click.OPTION_GROUPS.update(
     {
         "agedi sample": [
-            {"name": "Model Options", "options": ["path", "--style"]},
+            {"name": "Model Options", "options": ["path"]},
             {
                 "name": "Structure Options",
                 "options": [
@@ -35,6 +35,13 @@ click.rich_click.OPTION_GROUPS.update(
                     "--seed",
                     "--eps",
                     "--batch_size",
+                ],
+            },
+            {
+                "name": "Force-field Guidance",
+                "options": [
+                    "--ff_guidance",
+                    "--ff_zeta",
                 ],
             },
         ]
@@ -67,36 +74,47 @@ click.rich_click.OPTION_GROUPS.update(
     "--save_trajectory", is_flag=True, help="Save entire diffusion trajectory"
 )
 @click.option(
-    "--style",
-    type=click.Choice(["Default", "surface", "cluster"]),
-    default=None,
-    show_default=False,
-    help="Override the diffusion style (default: read from model hparams)",
+    "--ff_guidance",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help=(
+        "Force-field guidance scale. Set > 0 to enable guidance using the trained "
+        "Forces head (requires the model was trained with --forces). "
+        "Larger values increase the influence of the force-field on sampling."
+    ),
+)
+@click.option(
+    "--ff_zeta",
+    type=float,
+    default=3.0,
+    show_default=True,
+    help=(
+        "Exponent for the time-dependent weight in force-field guidance: "
+        "(1-t)**zeta. Higher values concentrate guidance near the end of the trajectory."
+    ),
 )
 def sample(path: str, **kwargs) -> None:
     """Sample structures from a trained AGeDi diffusion model.
 
-    Loads the model from *path*, generates structures according to the provided
-    options, and writes the output to the specified directory.
-
-    Parameters
-    ----------
-    path : str
-        Path to the AGeDi log / model directory containing the checkpoint.
-    **kwargs
-        CLI options forwarded from Click (``n_samples``, ``steps``, ``eps``,
-        ``batch_size``, ``output``, ``name``, ``n_atoms``, ``formula``,
-        ``cell``, ``template_path``, ``confinement``, ``progress_bar``,
-        ``save_trajectory``, ``seed``, ``style``).
-
-    Returns
-    -------
-    None
+    Loads the model from PATH, generates structures according to the provided
+    options, and writes the output to the specified directory.  The model
+    architecture and prior are fully reconstructed from the ``hparams.yaml``
+    stored during training.
     """
+    from agedi.diffusion import ForcefieldGuidanceConfig
+
     console = Console()
     console.print(f"Loading model from: [cyan]{path}[/cyan]")
 
-    diffusion = load_diffusion(path, style=kwargs.get("style"))
+    diffusion = load_diffusion(path)
+
+    ff_guidance = None
+    if kwargs["ff_guidance"] > 0.0:
+        ff_guidance = ForcefieldGuidanceConfig(
+            guidance=kwargs["ff_guidance"],
+            zeta=kwargs["ff_zeta"],
+        )
 
     sample_kwargs = dict(
         n_samples=kwargs["n_samples"],
@@ -107,6 +125,7 @@ def sample(path: str, **kwargs) -> None:
         progress_bar=kwargs["progress_bar"],
         save_trajectory=kwargs["save_trajectory"],
         confinement=kwargs["confinement"],
+        ff_guidance=ff_guidance,
         as_atoms=True,
     )
 

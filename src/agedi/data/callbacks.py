@@ -107,39 +107,117 @@ class EpochProgressPrinter(Callback):
             print(f"Best checkpoint    : {best_ckpt_path}")
 
 
+def _flatten_hparams(d: dict, prefix: str = "", sep: str = "/") -> dict:
+    """Recursively flatten a nested dict into a flat dict with dotted keys.
+
+    Only scalar values (int, float, str, bool) are kept; lists and nested
+    dicts are flattened recursively.  This is required for TensorBoard's
+    ``log_hyperparams`` which only accepts scalar values.
+
+    Parameters
+    ----------
+    d : dict
+        The nested hyperparameter dict to flatten.
+    prefix : str
+        Key prefix to prepend (used in recursion).
+    sep : str
+        Separator between key segments (default ``"/"``).
+
+    Returns
+    -------
+    dict
+        Flat dict with scalar values only.
+    """
+    result: dict = {}
+    for k, v in d.items():
+        key = f"{prefix}{sep}{k}" if prefix else str(k)
+        if isinstance(v, dict):
+            result.update(_flatten_hparams(v, prefix=key, sep=sep))
+        elif isinstance(v, (list, tuple)):
+            for i, item in enumerate(v):
+                if isinstance(item, dict):
+                    result.update(_flatten_hparams(item, prefix=f"{key}/{i}", sep=sep))
+                elif isinstance(item, (int, float, str, bool)):
+                    result[f"{key}/{i}"] = item
+        elif isinstance(v, (int, float, str, bool)):
+            result[key] = v
+    return result
+
+
 class HParamsMetricLogger(Callback):
     """Manages hyperparameter logging and populates the TensorBoard hp_metric panel.
 
-    For TensorBoard:
-      * Writes ``hparams.yaml`` at training start (before any epoch) so the file
-        is available for crash recovery via :func:`~agedi.functional.load_diffusion`.
-      * Logs a single HPARAMS entry with ``hp_metric = best_val_loss`` at fit end,
-        replacing the empty "dot" that TensorBoard normally shows.
+    When a full ``hparams`` dict is provided (including training metadata such
+    as ``distribution``, ``prior``, ``sde``, ``conditioning``, ``batch_size``,
+    etc.) it is written to ``hparams.yaml`` at training start, complementing the
+    baseline written by
+    :meth:`~agedi.diffusion.diffusion.Diffusion.on_fit_start`.  When no dict
+    is provided the callback falls back to calling ``pl_module.get_hparams()``,
+    which returns only the model-architecture config.
 
-    For other loggers (e.g. WandB):
-      * Calls ``log_hyperparams`` normally at training start.
+    For non-TensorBoard loggers (e.g. WandB) the resolved hparams dict is
+    forwarded to ``log_hyperparams`` at training start.
 
     Parameters
     ----------
     hparams:
-        Dictionary of hyperparameters to log.
+        Full hyperparameter dictionary to log (architecture + training metadata).
+        When ``None`` the callback resolves hparams from ``pl_module.get_hparams()``.
     """
 
-    def __init__(self, hparams: Dict):
+    def __init__(self, hparams: Optional[Dict] = None):
         self._hparams = hparams
+
+    def _resolve_hparams(self, pl_module) -> Dict:
+        if self._hparams is not None:
+            return self._hparams
+        if hasattr(pl_module, "get_hparams"):
+            return {"diffusion": pl_module.get_hparams()}
+        return {}
+
+    # Keys excluded from TensorBoard hparam logging (kept in hparams.yaml).
+    _TB_EXCLUDE_KEYS = frozenset({"cell"})
+
+    def _flatten_for_tb(self, resolved: dict) -> dict:
+        """Flatten hparams for TensorBoard, excluding keys that are not useful there."""
+        filtered = {k: v for k, v in resolved.items() if k not in self._TB_EXCLUDE_KEYS}
+        return _flatten_hparams(filtered)
 
     def on_train_start(self, trainer, pl_module):
         from lightning.pytorch.loggers import TensorBoardLogger
 
+        resolved = self._resolve_hparams(pl_module)
+        # Write (or overwrite) hparams.yaml with the full resolved dict so
+        # that metadata fields are persisted and available to `agedi inspect`.
         if isinstance(trainer.logger, TensorBoardLogger):
-            # Write hparams.yaml directly so it is available immediately without
-            # creating a "dot" entry in the TensorBoard HPARAMS plugin.
             log_dir = Path(trainer.logger.log_dir)
             log_dir.mkdir(parents=True, exist_ok=True)
             with open(log_dir / "hparams.yaml", "w") as fh:
-                yaml.safe_dump(self._hparams, fh, default_flow_style=False)
+                yaml.safe_dump(resolved, fh, default_flow_style=False)
+            # Log hparams to TensorBoard at training start (with a nan placeholder
+            # metric) so runs appear in the HPARAMS tab immediately and can be
+            # compared across concurrent or interrupted runs.
+            flat = self._flatten_for_tb(resolved)
+            if flat:
+                trainer.logger.log_hyperparams(flat, {"hp_metric": float("nan")})
         elif trainer.logger is not None:
-            trainer.logger.log_hyperparams(self._hparams)
+            # For non-TensorBoard loggers (e.g. WandB), forward the resolved hparams.
+            trainer.logger.log_hyperparams(resolved)
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        from lightning.pytorch.loggers import TensorBoardLogger
+
+        if trainer.sanity_checking or not isinstance(trainer.logger, TensorBoardLogger):
+            return
+
+        val_loss = trainer.callback_metrics.get("val_loss")
+        if val_loss is None:
+            return
+
+        hparams = self._resolve_hparams(pl_module)
+        flat = self._flatten_for_tb(hparams)
+        if flat:
+            trainer.logger.log_hyperparams(flat, {"hp_metric": float(val_loss)})
 
     def on_fit_end(self, trainer, pl_module):
         from lightning.pytorch.loggers import TensorBoardLogger
@@ -154,8 +232,14 @@ class HParamsMetricLogger(Callback):
                     best_val_loss = float(cb.best_model_score)
                 break
 
-        metrics = {"hp_metric": best_val_loss} if best_val_loss is not None else {}
-        trainer.logger.log_hyperparams(self._hparams, metrics)
+        hparams = self._resolve_hparams(pl_module)
+        flat = self._flatten_for_tb(hparams)
+        if not flat:
+            return
+        # Call log_hyperparams at the end of training so TensorBoard shows the
+        # final best val_loss as the hp_metric value.
+        metrics = {"hp_metric": best_val_loss} if best_val_loss is not None else {"hp_metric": float("nan")}
+        trainer.logger.log_hyperparams(flat, metrics)
 
 
 class TrainingPhase(Callback):

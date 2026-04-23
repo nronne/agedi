@@ -24,20 +24,47 @@ Pd template surface for sampling
 Train
 -----
 
-Using the CLI training can be performed by
+For this surface system with Z-confined adsorbates we use the
+``ConfinedCellPositions`` noiser, which pairs a
+:class:`~agedi.diffusion.distributions.UniformCellConfined` prior with a
+:class:`~agedi.diffusion.distributions.TruncatedNormal` noise distribution.
+
+Using the CLI:
 
 .. code-block:: console
 
-   agedi train -t 3 --style surface --mask MaskFixed --confinement 2 10 PdO_training_data.traj
+   agedi train -t 3 --noisers ConfinedCellPositions --mask MaskFixed --confinement 2 10 PdO_training_data.traj
 
 Notes:
 
 - ``MaskFixed`` maps ASE ``FixAtoms`` constraints to the graph mask.
 - Confinement applies to z-coordinates and is useful for slab/surface tasks.
+- Use ``ConfinedCellPositions`` together with ``--confinement`` for
+  surface/slab systems; ``Positions`` for gas-phase clusters.
 - Outputs are written in ``logs/version_0`` (or next available
   version).
 
-Instead, we can also use the Python API
+This should produce an overview of the architecture like shown below,
+and then start training.
+
+.. figure:: agedi-train.png
+
+During training, you can inspect the progress using Tensorboard (or
+WandB).
+
+After training you can always inspect the model using
+
+.. code-block:: console
+
+   agedi inspect logs/version_0
+
+
+This should produce an output similar to the one shown below
+
+.. figure:: agedi-inspect.png
+
+   
+Again, we can also use the Python API:
 
 .. code-block:: python
 
@@ -48,16 +75,15 @@ Instead, we can also use the Python API
 
    diffusion, dataset, trainer = train_from_atoms(
        data,
-       noisers=("positions",),
-       style="surface",
+       noisers=("ConfinedCellPositions",),
        mask="MaskFixed",
        confinement=(2.0, 10.0),
-       max_time=2,  # hours
+       max_time=3,  # hours
        log_dir="logs",
    )
 
 
-Or more explicit as
+Or more explicitly:
 
 .. code-block:: python
 
@@ -67,9 +93,7 @@ Or more explicit as
    data = read("PdO_training_data.traj", ":")
    
    diffusion = create_diffusion(
-       noisers=("positions",),
-       style="surface",
-       confinement=(2.0, 10.0)
+       noisers=("ConfinedCellPositions",),
    )
    
    dataset = create_dataset(
@@ -79,7 +103,7 @@ Or more explicit as
    )
    
    trainer = create_trainer(
-       max_time=3, # hours
+       max_time=3,  # hours
        log_dir="logs"
    )
    
@@ -89,15 +113,15 @@ Or more explicit as
 Sample
 ------
 
-Using the CLI sampling can be performed by calling
+Using the CLI:
 
 .. code-block:: console
 
-   agedi sample logs/version_0 -f Pd2O2 --template_path template.traj --style surface --confinement 2 10
+   agedi sample logs/version_0 -f Pd2O2 --template_path template.traj --confinement 2 10
 
 This writes sampled structures to ``sampled.traj``.
 
-Again, the same can be obtained using the Python API
+Using the Python API:
 
 .. code-block:: python
 

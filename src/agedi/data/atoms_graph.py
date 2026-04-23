@@ -265,6 +265,7 @@ class AtomsGraph(Data):
         dtype: torch.dtype = torch.float,
         initialize_mask: Optional[bool] = None,
         confinement: Optional[Tuple[float, float]] = None,
+        canonical_cell: bool = False,
     ) -> "AtomsGraph":
         """Create a graph from an ASE Atoms object.
 
@@ -286,6 +287,13 @@ class AtomsGraph(Data):
             attach to the graph.  When provided, a ``confinement`` tensor of
             shape ``(1, 2)`` is stored on the graph.  When ``None`` (the
             default), no confinement attribute is added.
+        canonical_cell: bool
+            When ``True`` (the default), the cell is stored in canonical
+            lower-triangular form.  If the input cell is not already
+            canonical, Cartesian positions are recomputed to preserve
+            fractional coordinates and a warning is printed.  Set to
+            ``False`` to store the cell exactly as provided by ASE (no
+            rotation or recomputation is performed).
 
         Returns
         -------
@@ -307,8 +315,35 @@ class AtomsGraph(Data):
         if initialize_mask:
             kwargs["mask"] = torch.zeros_like(kwargs["x"], dtype=torch.bool)
 
-        kwargs["pos"] = torch.tensor(atoms.get_positions(), dtype=dtype)
-        kwargs["cell"] = torch.tensor(np.array(atoms.get_cell()), dtype=dtype)
+        # Canonicalize the cell (cellpar -> cell round-trip) and update
+        # Cartesian positions so that fractional coordinates are preserved.
+        # Use float64 for the round-trip to avoid precision loss from log/exp.
+        cell_np = np.array(atoms.get_cell())
+        pos_np = np.array(atoms.get_positions())
+        cell_f64 = torch.tensor(cell_np, dtype=torch.float64)
+
+        if not canonical_cell:
+            # Caller opted out: store the cell exactly as provided by ASE.
+            final_cell_f64 = cell_f64
+            final_pos = torch.tensor(pos_np, dtype=dtype)
+        elif cls._is_lower_triangular(cell_f64):
+            # Cell is already in canonical lower-triangular form; keep it as-is
+            # to avoid introducing floating-point rounding artefacts.
+            final_cell_f64 = cell_f64
+            final_pos = torch.tensor(pos_np, dtype=dtype)
+        else:
+            print(
+                "AtomsGraph.from_atoms: cell is not in canonical lower-triangular "
+                "form; canonicalizing. Cartesian positions will be recomputed to "
+                "preserve fractional coordinates."
+            )
+            final_cell_f64 = cls.vector_to_cell(cls.cell_to_vectors(cell_f64)).view(3, 3)
+            pos_f64 = torch.tensor(pos_np, dtype=torch.float64)
+            frac_f64 = torch.linalg.solve(cell_f64.T, pos_f64.T).T
+            final_pos = (frac_f64 @ final_cell_f64).to(dtype)
+
+        kwargs["pos"] = final_pos
+        kwargs["cell"] = final_cell_f64.to(dtype)
         kwargs["pbc"] = torch.tensor(atoms.get_pbc())
 
         edge_index, shift_vectors = cls.make_graph(
@@ -361,7 +396,7 @@ class AtomsGraph(Data):
         value: torch.Tensor
             The value of the attribute.
         type: str
-            The type of the attribute. Can be either "node" or "graph".
+            The type of the attribute. Can be either "node" or "graph"
 
         Returns
         -------
@@ -400,6 +435,20 @@ class AtomsGraph(Data):
             cell=self.cell.detach().cpu().numpy(),
             pbc=self.pbc.detach().cpu().numpy(),
         )
+
+        if "energy_prediction" in self._store:
+            energy = self.energy_prediction.item()
+            atoms.calc = SinglePointCalculator(atoms, energy=energy)
+            atoms.calc.name = "AGeDi"
+
+        if "forces_prediction" in self._store:
+            forces = self.forces_prediction.detach().cpu().numpy()
+            if hasattr(atoms, "calc") and atoms.calc is not None:
+                atoms.calc.results["forces"] = forces
+            else:
+                atoms.calc = SinglePointCalculator(atoms, forces=forces)
+                atoms.calc.name = "AGeDi"
+            
         return atoms
 
     @staticmethod
@@ -507,6 +556,57 @@ class AtomsGraph(Data):
 
         """
         return self.pos.shape[0]
+
+    @property
+    def cell(self) -> torch.Tensor:
+        """Return the canonical cell matrix of the graph.
+
+        Returns
+        -------
+        cell: torch.Tensor
+            The cell matrix of shape ``(3, 3)``.
+        """
+        return self._store["cell"]
+
+    @cell.setter
+    def cell(self, cell: torch.Tensor) -> None:
+        """Set the cell matrix, preserving fractional coordinates.
+
+        Cartesian positions are recomputed when both ``pos`` and an old
+        ``cell`` are already present so that fractional coordinates remain
+        unchanged.  No canonicalization is performed; use
+        :meth:`from_atoms` with ``canonical_cell=True`` if you need the
+        cell stored in canonical lower-triangular form.
+
+        Parameters
+        ----------
+        cell: torch.Tensor
+            The new cell matrix.
+
+        Returns
+        -------
+        None
+        """
+        # Only invalidate the edge cache when the cell is being *changed*
+        # (i.e. a cell already existed) on an individual graph.  Skip during
+        # Batch construction (where edge_index is already correct) and skip
+        # during initial construction (where no prior cell exists yet).
+        cell_was_set = "cell" in self._store
+        # Preserve fractional coordinates when both pos and old cell exist.
+        if "pos" in self._store and cell_was_set:
+            frac = self.pos_to_frac(self.pos)
+            self._store["cell"] = cell
+            pos = self.frac_to_pos(frac)
+            Data.pos.fset(self, pos)
+            if "frac" in self._store:
+                del self._store["frac"]
+        else:
+            self._store["cell"] = cell
+
+        if cell_was_set and not isinstance(self, Batch) and (
+            "edge_index" in self._store or "shift_vectors" in self._store
+        ):
+            self.clear_graph()
 
     @Data.pos.setter
     def pos(self, pos: torch.Tensor) -> None:
@@ -833,7 +933,33 @@ class AtomsGraph(Data):
 
 
         
-    def cell_to_vectors(self, cell: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def _is_lower_triangular(cell: torch.Tensor) -> bool:
+        """Return True if *cell* is in canonical lower-triangular form.
+
+        A cell matrix is considered canonical when the three strictly
+        upper-triangular entries (cell[0,1], cell[0,2], cell[1,2]) are
+        all zero (within a tight floating-point tolerance of 1e-10).
+
+        Parameters
+        ----------
+        cell : torch.Tensor
+            The cell matrix.
+
+        Returns
+        -------
+        bool
+            True if the cell is already lower-triangular.
+        """
+        c = cell.reshape(3, 3)
+        return bool(
+            c[0, 1].abs() < 1e-10
+            and c[0, 2].abs() < 1e-10
+            and c[1, 2].abs() < 1e-10
+        )
+
+    @staticmethod
+    def cell_to_vectors(cell: torch.Tensor) -> torch.Tensor:
         """Convert cell matrix to cell parameters.
 
         Parameters
@@ -872,7 +998,8 @@ class AtomsGraph(Data):
 
         return torch.stack([a, b, c, alpha, beta, gamma], dim=-1)
 
-    def vector_to_cell(self, cellpar: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def vector_to_cell(cellpar: torch.Tensor) -> torch.Tensor:
         """Convert cell parameters to cell matrix.
 
         Parameters
@@ -883,7 +1010,7 @@ class AtomsGraph(Data):
         Returns
         -------
         torch.Tensor
-            The cell matrix of shape ``(N, 3)``.
+            The cell matrix of shape ``(N, 3, 3)`` where each row is a lattice vector.
 
         """
         a, b, c, alpha, beta, gamma = cellpar.unbind(-1)
@@ -897,15 +1024,15 @@ class AtomsGraph(Data):
         cos_gamma = torch.cos(gamma)
         sin_gamma = torch.sin(gamma)
 
-        cell = torch.zeros(cellpar.shape[:-1] + (3, 3), device=cellpar.device)
+        cell = torch.zeros(cellpar.shape[:-1] + (3, 3), device=cellpar.device, dtype=cellpar.dtype)
         cell[..., 0, 0] = a
-        cell[..., 0, 1] = b * cos_gamma
-        cell[..., 0, 2] = c * cos_beta
+        cell[..., 1, 0] = b * cos_gamma
+        cell[..., 2, 0] = c * cos_beta
 
         cell[..., 1, 1] = b * sin_gamma
-        cell[..., 1, 2] = c * (cos_alpha - cos_beta * cos_gamma) / sin_gamma
+        cell[..., 2, 1] = c * (cos_alpha - cos_beta * cos_gamma) / sin_gamma
 
-        cell[..., 2, 2] = c * torch.sqrt(1 - cos_beta ** 2 - cell[..., 1, 2] ** 2 / c ** 2)
+        cell[..., 2, 2] = c * torch.sqrt(torch.clamp(1 - cos_beta ** 2 - cell[..., 2, 1] ** 2 / c ** 2, min=0))
 
         return cell
 

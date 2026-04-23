@@ -4,3 +4,6 @@
 .report.xml
 docs/_build
 **/__pycache__/
+logs/
+wandb/
+.coverage-html/

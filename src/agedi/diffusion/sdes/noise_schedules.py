@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Dict
 import math
 import torch
 
@@ -22,6 +23,23 @@ class NoiseSchedule(ABC):
         """
         self.min = min
         self.max = max
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters sufficient to reconstruct this noise schedule.
+
+        Returns a dictionary with a ``_target_`` key plus ``min`` and ``max``.
+        Subclasses can call ``super().get_hparams()`` and add their own params.
+
+        Returns
+        -------
+        dict
+            Hyperparameter dictionary.
+        """
+        return {
+            "_target_": f"{type(self).__module__}.{type(self).__qualname__}",
+            "min": self.min,
+            "max": self.max,
+        }
     
     @abstractmethod
     def f(self, t: torch.Tensor) -> torch.Tensor:

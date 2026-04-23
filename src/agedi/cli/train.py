@@ -2,10 +2,6 @@ import rich_click as click
 from rich.console import Console
 from pathlib import Path
 
-from ase.io import read
-
-from agedi.functional import train_from_atoms
-
 click.rich_click.OPTION_GROUPS.update(
     {
         "agedi train": [
@@ -15,7 +11,7 @@ click.rich_click.OPTION_GROUPS.update(
             },
             {
                 "name": "Diffusion Model Options",
-                "options": ["--noisers", "--conditioning"],
+                "options": ["--noisers", "--sde", "--conditioning", "--conditioning_type", "--force_field"],
             },
             {
                 "name": "Training Options",
@@ -33,12 +29,11 @@ click.rich_click.OPTION_GROUPS.update(
             {
                 "name": "Data Options",
                 "options": [
-                    "--style",
                     "--mask",
                     "--confinement",
                     "--repeat",
                     "--repeat_epoch",
-                    "--conditioning_type",
+                    "--canonical_cell",
                 ],
             },
             {
@@ -56,15 +51,28 @@ click.rich_click.OPTION_GROUPS.update(
 )
 
 
+_VALID_NOISERS = {
+    "Positions",
+    "CellPositions",
+    "ConfinedCellPositions",
+    "Types",
+    "positions",
+    "cell_positions",
+    "confined_cell_positions",
+    "types",
+}
+_DEFAULT_NOISER = "CellPositions"
+
+
 @click.command()
-@click.argument("data", type=click.Path(exists=True))
+@click.argument("input", type=click.Path(exists=True))
+@click.argument("overrides", nargs=-1, metavar="[KEY=VALUE ...]")
 @click.option(
-    "--style",
-    "-s",
-    type=click.Choice(["Default", "surface", "cluster"]),
-    default="Default",
+    "--sde",
+    type=click.Choice(["ve", "vp"]),
+    default="ve",
     show_default=True,
-    help="Style of diffusion model depending on data type",
+    help="SDE to use for position noisers",
 )
 @click.option(
     "--model",
@@ -100,11 +108,18 @@ click.rich_click.OPTION_GROUPS.update(
 @click.option(
     "--noisers",
     "-n",
-    type=click.Choice(["positions", "types", "cell"]),
-    default=["positions"],
+    type=str,
+    default=(_DEFAULT_NOISER,),
     multiple=True,
     show_default=True,
-    help="Type of noisers to use",
+    help=(
+        "Noiser(s) to use for diffusion. "
+        "Valid values: Positions, CellPositions, ConfinedCellPositions, Types "
+        "(snake_case aliases also accepted). "
+        "Use a comma-separated list to specify multiple noisers in a single flag "
+        "(e.g. '--noisers ConfinedCellPositions,Types'), "
+        "or repeat the flag (e.g. '--noisers ConfinedCellPositions --noisers Types')."
+    ),
 )
 @click.option(
     "--conditioning",
@@ -120,6 +135,15 @@ click.rich_click.OPTION_GROUPS.update(
     default="scalar",
     show_default=True,
     help="Type of conditioning to use",
+)
+@click.option(
+    "--force_field",
+    is_flag=True,
+    default=False,
+    help=(
+        "Train a force field jointly with the diffusion score. Make sure the training data contains energy and force labels. "
+        "Enables force-field guided sampling (--ff_guidance)."
+    ),
 )
 @click.option(
     "--epochs",
@@ -188,6 +212,14 @@ click.rich_click.OPTION_GROUPS.update(
     help="How many epochs between repeats",
 )
 @click.option(
+    "--canonical_cell",
+    "canonical_cell",
+    default=False,
+    is_flag=True,
+    show_default="store as given in the input data",
+    help="Store cell in canonical lower-triangular form",
+)
+@click.option(
     "--logger",
     type=click.Choice(["tensorboard", "wandb"]),
     default="tensorboard",
@@ -221,60 +253,127 @@ click.rich_click.OPTION_GROUPS.update(
 def train(**params) -> None:
     """Train an AGeDi diffusion model from the command line.
 
-    Reads the dataset from the file specified by ``--data``, constructs a
-    diffusion model and trainer from the remaining CLI options, and starts
-    training via :func:`~agedi.functional.train_from_atoms`.
+    INPUT can be a trajectory file or a YAML configuration file.
 
-    Parameters
-    ----------
-    **params
-        CLI options forwarded from Click (``data``, ``model``, ``cutoff``,
-        ``feature_size``, ``n_blocks``, ``noisers``, ``style``,
-        ``conditioning``, ``conditioning_type``, ``mask``, ``confinement``,
-        ``batch_size``, ``repeat``, ``lr``, ``lr_factor``, ``lr_patience``,
-        ``epochs``, ``max_time``, ``logger``, ``log_dir``, ``project``,
-        ``name``, ``log_interval``, ``gradient_clip_val``, ``progress_bar``,
-        ``repeat_epoch``).
+    \b
+    Trajectory mode — build the model from CLI options:
 
-    Returns
-    -------
-    None
+        agedi train training_data.traj --noisers ConfinedCellPositions,Types
+
+    \b
+    Config mode — load all settings from a YAML file:
+
+        agedi train my_train.yaml
+
+    In config mode, optional KEY=VALUE pairs can be appended to override
+    individual config entries without editing the file:
+
+    \b
+        agedi train my_train.yaml feature_size=128 epochs=200
+
+    A ready-to-edit YAML template is available at:
+
+    \b
+        python -c "import agedi, pathlib; print(pathlib.Path(agedi.__file__).parent / 'conf' / 'train.yaml')"
     """
-    data_path = str(Path(params["data"]).resolve())
-    data = read(data_path, ":")
-
-    train_from_atoms(
-        data,
-        model=params["model"],
-        cutoff=params["cutoff"],
-        feature_size=params["feature_size"],
-        n_blocks=params["n_blocks"],
-        noisers=params["noisers"],
-        style=params["style"],
-        conditioning=params["conditioning"],
-        conditioning_type=params["conditioning_type"],
-        mask=params["mask"],
-        confinement=params["confinement"],
-        batch_size=params["batch_size"],
-        repeat=params["repeat"],
-        lr=params["lr"],
-        lr_factor=params["lr_factor"],
-        lr_patience=params["lr_patience"],
-        data_path=data_path,
-        # trainer kwargs forwarded via **trainer_kwargs in train_from_atoms
-        epochs=params["epochs"],
-        max_time=params["max_time"],
-        logger=params["logger"],
-        log_dir=params["log_dir"],
-        project=params["project"],
-        name=params["name"],
-        log_interval=params["log_interval"],
-        gradient_clip_val=params["gradient_clip_val"],
-        progress_bar=params["progress_bar"],
-        repeat_epoch=params["repeat_epoch"],
-    )
+    import yaml
+    from agedi.functional import train_from_config
 
     console = Console()
+    input_path = Path(params["input"])
+
+    if input_path.suffix.lower() in (".yaml", ".yml"):
+        # ── Config-file mode ──────────────────────────────────────────────
+        with open(input_path) as fh:
+            cfg: dict = yaml.safe_load(fh) or {}
+
+        for override in params["overrides"]:
+            if "=" not in override:
+                raise click.UsageError(
+                    f"Override '{override}' is not in KEY=VALUE format."
+                )
+            key, _, raw_value = override.partition("=")
+            cfg[key] = _parse_override_value(raw_value)
+
+        train_from_config(cfg)
+        log_dir = cfg.get("log_dir", "logs")
+    else:
+        # ── Trajectory mode ───────────────────────────────────────────────
+        from ase.io import read
+        from agedi.functional import train_from_atoms
+
+        # Parse comma-separated values and flatten into a single list
+        noisers: list[str] = []
+        for entry in params["noisers"]:
+            for part in entry.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if part not in _VALID_NOISERS:
+                    raise click.BadParameter(
+                        f"'{part}' is not a valid noiser. "
+                        f"Valid options: {', '.join(sorted(_VALID_NOISERS))}",
+                        param_hint="'--noisers'",
+                    )
+                noisers.append(part)
+        if not noisers:
+            noisers = [_DEFAULT_NOISER]
+
+        data_path = str(input_path.resolve())
+        data = read(data_path, ":")
+
+        train_from_atoms(
+            data,
+            model=params["model"],
+            cutoff=params["cutoff"],
+            feature_size=params["feature_size"],
+            n_blocks=params["n_blocks"],
+            noisers=noisers,
+            sde=params["sde"],
+            conditioning=params["conditioning"],
+            conditioning_type=params["conditioning_type"],
+            force_field=params["force_field"],
+            mask=params["mask"],
+            confinement=params["confinement"],
+            batch_size=params["batch_size"],
+            repeat=params["repeat"],
+            canonical_cell=params["canonical_cell"],
+            lr=params["lr"],
+            lr_factor=params["lr_factor"],
+            lr_patience=params["lr_patience"],
+            data_path=data_path,
+            epochs=params["epochs"],
+            max_time=params["max_time"],
+            logger=params["logger"],
+            log_dir=params["log_dir"],
+            project=params["project"],
+            name=params["name"],
+            log_interval=params["log_interval"],
+            gradient_clip_val=params["gradient_clip_val"],
+            progress_bar=params["progress_bar"],
+            repeat_epoch=params["repeat_epoch"],
+        )
+        log_dir = params["log_dir"]
+
     console.print(f"\n[green]✓ Training complete.[/green]")
     console.print(f"To sample from the model run:")
-    console.print(f"  [bold]agedi sample {params['log_dir']} -f ...[/bold]")
+    console.print(f"  [bold]agedi sample {log_dir} -f ...[/bold]")
+
+
+def _parse_override_value(raw: str):
+    """Coerce a CLI override string to int, float, bool, or str."""
+    if raw.lower() == "true":
+        return True
+    if raw.lower() == "false":
+        return False
+    if raw.lower() in ("null", "none", "~"):
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    return raw

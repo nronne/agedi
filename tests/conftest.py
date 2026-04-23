@@ -102,11 +102,11 @@ def conditionings(request):
         from agedi.models.conditionings import TimeConditioning, ScalarConditioning
         return [TimeConditioning(), ScalarConditioning('property'),]
 
-@pytest.fixture(params=["positions"])
+@pytest.fixture(params=["cell_positions"])
 def noisers(request):
-    if request.param == "positions":
-        from agedi.diffusion.noisers import PositionsNoiser
-        return [PositionsNoiser(),]
+    if request.param == "cell_positions":
+        from agedi.diffusion.noisers import CellPositions
+        return [CellPositions(),]
 
 
 @pytest.fixture

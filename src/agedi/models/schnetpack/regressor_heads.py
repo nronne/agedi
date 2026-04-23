@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Dict
 
 import schnetpack.nn as snn
 import torch
@@ -86,7 +86,7 @@ def build_gated_equivariant_mlp(
     out_net = nn.Sequential(*layers)
     return out_net
 
-class Forces(torch.nn.Module):
+class Forces(Head):
     """Predict the atomic force on the atoms in the structure.
 
     Parameters
@@ -120,9 +120,12 @@ class Forces(torch.nn.Module):
         gated_blocks : int, optional
             Number of gated equivariant blocks in the network.
         **kwargs
-            Additional keyword arguments forwarded to :class:`torch.nn.Module`.
+            Additional keyword arguments forwarded to :class:`~agedi.models.head.Head`.
         """
         super().__init__(**kwargs)
+        self.input_dim_scalar = input_dim_scalar
+        self.input_dim_vector = input_dim_vector
+        self.gated_blocks = gated_blocks
         self.net = build_gated_equivariant_mlp(
             input_dim_scalar,
             input_dim_vector,
@@ -130,45 +133,145 @@ class Forces(torch.nn.Module):
             n_layers=gated_blocks,
         )
 
-    @property
-    def key(self) -> str:
-        """The key of the attribute to be noised and denoised."""
-        return self._key
-    
-    def __call__(self, batch: dict) -> torch.Tensor:
-        """Forward pass – alias for :meth:`predict`.
-
-        Parameters
-        ----------
-        batch : dict
-            The input batch.
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters sufficient to reconstruct this head.
 
         Returns
         -------
-        torch.Tensor
-            The predicted forces.
+        dict
+            Hyperparameter dictionary.
         """
-        return self.predict(batch)
+        return {
+            **super().get_hparams(),
+            "input_dim_scalar": self.input_dim_scalar,
+            "input_dim_vector": self.input_dim_vector,
+            "gated_blocks": self.gated_blocks,
+        }
 
-
-    def predict(self, batch: dict) -> torch.Tensor:
+    def _score(self, translated_batch: dict) -> torch.Tensor:
         """Predict the force on the atoms in the structure.
 
         Parameters
         ----------
-        batch: dict
-            The input batch.
+        translated_batch: dict
+            The translated input batch.
 
         Returns
         -------
         torch.Tensor
-            The predicted positions score.
+            The predicted forces tensor.
 
         """
-        
-        scalar_representation = batch["scalar_representation"]
-        vector_representation = batch["vector_representation"]
+        scalar_representation = translated_batch["scalar_representation"]
+        vector_representation = translated_batch["vector_representation"]
 
         scalar, vector = self.net([scalar_representation, vector_representation])
 
         return vector.squeeze(-1)
+
+    def predict(self, translated_batch: dict) -> torch.Tensor:
+        """Predict forces – alias for :meth:`Forces._score` kept for backwards compatibility.
+
+        Parameters
+        ----------
+        translated_batch: dict
+            The translated input batch.
+
+        Returns
+        -------
+        torch.Tensor
+            The predicted forces tensor.
+        """
+        return self._score(translated_batch)
+
+
+class Energy(Head):
+    """Predict the potential energy of the structure.
+
+    Parameters
+    ----------
+    input_dim_scalar: int
+        The dimension of the scalar input.
+
+    Returns
+    -------
+    Head
+
+    """
+
+    _key = "energy"
+
+    def __init__(
+        self, input_dim_scalar: int = 64, **kwargs
+    ) -> None:
+        """Initialize the energy prediction head.
+
+        Parameters
+        ----------
+        input_dim_scalar : int, optional
+            Dimension of the scalar input features.
+        **kwargs
+            Additional keyword arguments forwarded to :class:`~agedi.models.head.Head`.
+        """
+        super().__init__(**kwargs)
+        self.input_dim_scalar = input_dim_scalar
+        self.net = nn.Sequential(
+            nn.Linear(input_dim_scalar, input_dim_scalar // 2),
+            nn.SiLU(),
+            nn.Linear(input_dim_scalar // 2, 1, bias=False),
+        )
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters sufficient to reconstruct this head.
+
+        Returns
+        -------
+        dict
+            Hyperparameter dictionary.
+        """
+        return {
+            **super().get_hparams(),
+            "input_dim_scalar": self.input_dim_scalar,
+        }
+
+    def _score(self, translated_batch: dict) -> torch.Tensor:
+        """Predict the force on the atoms in the structure.
+
+        Parameters
+        ----------
+        translated_batch: dict
+            The translated input batch.
+
+        Returns
+        -------
+        torch.Tensor
+            The predicted forces tensor.
+
+        """
+        scalar_representation = translated_batch["scalar_representation"]
+
+
+        atomic_energies = self.net(scalar_representation)
+        idx = translated_batch["_idx_m"]
+
+        num_classes = idx.max().item() + 1
+        energy = torch.zeros(num_classes, dtype=atomic_energies.dtype, device=atomic_energies.device)
+        
+        energy.scatter_add_(dim=0, index=idx, src=atomic_energies.squeeze(-1))
+
+        return energy
+
+    def predict(self, translated_batch: dict) -> torch.Tensor:
+        """Predict forces – alias for :meth:`Forces._score` kept for backwards compatibility.
+
+        Parameters
+        ----------
+        translated_batch: dict
+            The translated input batch.
+
+        Returns
+        -------
+        torch.Tensor
+            The predicted forces tensor.
+        """
+        return self._score(translated_batch)

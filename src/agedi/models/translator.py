@@ -1,6 +1,6 @@
 import torch
 from abc import ABC, abstractmethod
-from typing import List, Callable, Any, Dict
+from typing import Any, Dict, List, Callable, Optional
 from agedi.data import Representation
 from agedi.data import AtomsGraph
 
@@ -18,11 +18,63 @@ class Translator(ABC):
         A list of functions that will be applied to the input data after it is translated.
 
     """
-    def __init__(self, input_modules: List[Callable]=[]):
+    def __init__(self, input_modules: Optional[List[Callable]] = None):
         """Constructor for the Translator class.
 
         """
-        self.input_modules = input_modules
+        self.input_modules = input_modules if input_modules is not None else []
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters sufficient to reconstruct this translator.
+
+        Returns a dictionary with a ``_target_`` key (the fully-qualified class
+        name) plus ``input_modules`` (each serialised with its own ``_target_``
+        key where available).  Subclasses should call ``super().get_hparams()``
+        and merge in their own constructor parameters.
+
+        Returns
+        -------
+        dict
+            Hyperparameter dictionary.
+        """
+        modules_hparams = []
+        for m in self.input_modules:
+            modules_hparams.append({
+                "_target_": f"{type(m).__module__}.{type(m).__qualname__}",
+            })
+        return {
+            "_target_": f"{type(self).__module__}.{type(self).__qualname__}",
+            "input_modules": modules_hparams,
+        }
+
+    def get_representation_hparams(self, representation: Any) -> Dict:
+        """Extract hyperparameters from a representation object.
+
+        This method is called by :meth:`~agedi.models.ScoreModel.get_hparams`
+        to serialise the representation (e.g. a PaiNN network) that the
+        translator wraps.  The base implementation raises
+        :class:`NotImplementedError`; subclasses must override it for the
+        specific representation type they support.
+
+        Parameters
+        ----------
+        representation : any
+            The instantiated representation object.
+
+        Returns
+        -------
+        dict
+            Hyperparameter dictionary that can be used to reconstruct the
+            representation (should contain a ``_target_`` key).
+
+        Raises
+        ------
+        NotImplementedError
+            If the subclass has not implemented this method.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement get_representation_hparams()"
+        )
         
     @abstractmethod
     def _translate(self, batch: "AtomsGraph") -> "AtomsGraph":
@@ -160,7 +212,7 @@ class Translator(ABC):
         return batch
 
     
-    def add_prediction(self, batch: "AtomsGraph", targets: Dict[str, torch.Tensor]) -> "AtomsGraph":
+    def add_prediction(self, batch: "AtomsGraph", targets: Dict[str, torch.Tensor], type: Optional[str]=None) -> "AtomsGraph":
         """Adds the targets given by the model to the original batch of data.
 
         Parameters
@@ -177,7 +229,10 @@ class Translator(ABC):
         
         """
         for k, v in targets.items():
-            batch[k + "_prediction"] = v
+            if type is None:
+                batch[k + "_prediction"] = v
+            else:
+                batch.add_batch_attr(k + "_prediction", v, type=type)
         return batch
     
 

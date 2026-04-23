@@ -8,5 +8,7 @@ This section documents practical AGeDi workflows.
 
    cli
    api
+   train_hydra
+   objects
    pdo
 

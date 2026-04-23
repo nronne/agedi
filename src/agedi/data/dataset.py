@@ -71,7 +71,7 @@ class Dataset(LightningDataModule):
         self.phase_transforms = phase_transforms
         self.num_workers = num_workers
 
-    def add_atoms_data(self, data: List[Atoms], mask_method: Optional[str] = None, confinement: Optional[Tuple[float, float]] = None, properties: Optional[List[Dict]] = None) -> None:
+    def add_atoms_data(self, data: List[Atoms], mask_method: Optional[str] = None, confinement: Optional[Tuple[float, float]] = None, properties: Optional[List[Dict]] = None, canonical_cell: bool = False) -> None:
         """Add ASE data to the dataset
 
         Converts a list of ASE Atoms objects to AtomsGraph objects and adds them to the dataset
@@ -87,6 +87,10 @@ class Dataset(LightningDataModule):
         properties : List[Dict], optional
             Per-structure property dictionaries; each entry is mapped to the
             corresponding graph via :func:`setattr`.
+        canonical_cell : bool, optional
+            When ``True`` (the default), cells are stored in canonical
+            lower-triangular form.  Set to ``False`` to store cells exactly
+            as provided by ASE.
 
         Returns
         -------
@@ -95,12 +99,21 @@ class Dataset(LightningDataModule):
         """
         dataset = []
         for i, d in enumerate(data):
-            ag = AtomsGraph.from_atoms(d, cutoff=self.cutoff)
+            ag = AtomsGraph.from_atoms(d, cutoff=self.cutoff, canonical_cell=canonical_cell)
             
             if properties is not None:
                 props = properties[i]
                 for key, value in props.items():
                     setattr(ag, key, torch.tensor(value, dtype=torch.float32))
+
+            #Add energy and forces if they are present
+            has_E, has_F = self._has_energy_forces(d)
+            if has_E:
+                E = d.get_potential_energy()
+                setattr(ag, "energy", torch.tensor(E, dtype=torch.float32))
+            if has_F:
+                F = d.get_forces(apply_constraint=False)
+                setattr(ag, "forces", torch.tensor(F, dtype=torch.float32))
                     
             
             if mask_method is not None:
@@ -120,6 +133,9 @@ class Dataset(LightningDataModule):
                 ag.confinement = torch.tensor(confinement, dtype=torch.float32).reshape(1, 2)
 
             dataset.append(ag)
+
+        if confinement is not None:
+            self._check_confinement(dataset, confinement)
 
         if self.dataset is None:
             self.dataset = dataset
@@ -252,5 +268,78 @@ class Dataset(LightningDataModule):
             persistent_workers=self.num_workers > 0,
         )
 
+    def _check_confinement(self, dataset: List["AtomsGraph"], confinement: Tuple[float, float]) -> None:
+        """Check that all unmasked atoms in *dataset* lie within *confinement*.
+
+        Parameters
+        ----------
+        dataset : List[AtomsGraph]
+            The list of graphs to validate.
+        confinement : Tuple[float, float]
+            The ``(z_min, z_max)`` confinement bounds.
+
+        Raises
+        ------
+        ValueError
+            If any unmasked atom has a Z position outside the confinement.
+            The error message includes a suggested confinement that covers all
+            unmasked atoms.
+        """
+        z_min, z_max = float(confinement[0]), float(confinement[1])
+
+        all_z: List[torch.Tensor] = []
+        for ag in dataset:
+            pos = ag.pos  # shape [N, 3]
+            if "mask" in ag:
+                unmasked = ~ag.mask
+                z_positions = pos[unmasked, 2]
+            else:
+                z_positions = pos[:, 2]
+            if z_positions.numel() > 0:
+                all_z.append(z_positions)
+
+        if not all_z:
+            return
+
+        all_z_cat = torch.cat(all_z)
+        actual_min = all_z_cat.min()
+        actual_max = all_z_cat.max()
+
+        if actual_min < z_min or actual_max > z_max:
+            raise ValueError(
+                f"Unmasked atoms have Z positions outside the confinement "
+                f"[{z_min:.3f}, {z_max:.3f}]. "
+                f"Actual Z range of unmasked atoms: [{actual_min.item():.3f}, {actual_max.item():.3f}]. "
+                f"Consider using confinement=({actual_min.floor().item():.1f}, {actual_max.ceil().item():.1f}) instead."
+            )
+
+    def _has_energy_forces(self, atoms):
+        """
+        Check if the given ASE Atoms object has energy and forces information available.
+        This method checks if a calculator is attached to the Atoms object and if it contains the 'energy' and 'forces' properties in its results.
+        It avoids a calculation if there is a calculator, but it has not yet been used.
+
+        Parameters
+        ----------
+        atoms : Atoms
+            The ASE Atoms object to check for energy and forces information.
+        
+        Returns
+        -------
+        Tuple[bool, bool]
+            A tuple indicating whether energy and forces information is available, respectively.
+        """
+        # 1. Check if a calculator is even attached
+        if atoms.calc is None:
+            return False, False
+
+        # 2. Check if the specific properties exist in the results dict
+        # Using .get() prevents KeyErrors if 'results' isn't initialized
+        results = getattr(atoms.calc, 'results', {})
+
+        has_energy = 'energy' in results
+        has_forces = 'forces' in results
+
+        return has_energy, has_forces
                 
 

@@ -1,5 +1,5 @@
 import torch
-from typing import Optional
+from typing import Dict, Optional
 from agedi.diffusion.distributions import Distribution
 from agedi.data import AtomsGraph
 
@@ -23,6 +23,10 @@ class Uniform(Distribution):
         super().__init__(key=key, **kwargs)
         self.low = low
         self.high = high
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters for this distribution."""
+        return {**super().get_hparams(), "low": self.low, "high": self.high}
 
     def _setup(self, batch: AtomsGraph) -> None:
         """Prepare the distribution for sampling from *batch*.
@@ -104,12 +108,16 @@ class UniformCell(Uniform):
 
         """
         f = super()._sample()  # (n_atoms, 3)
-        if self.cell.shape[0] == f.shape[0]:
+        if self.cell.dim() == 3:
+            # Batched path: self.cell is (n_atoms, 3, 3), f is (n_atoms, 3, 1).
+            # cell[i] @ f[i] gives the Cartesian position for atom i.
             r = (
                 torch.matmul(self.cell, f).view((self.shape[0], self.shape[1]))
                 + self.corner
             )  # (n_atoms, 3)
         else:
+            # Single-graph path: self.cell is (3, 3), f is (n_atoms, 3).
+            # f @ cell maps fractional coordinates to Cartesian (row-vector convention).
             r = f @ self.cell + self.corner
 
         return r
@@ -135,9 +143,26 @@ class UniformCellConfined(UniformCell):
 
         """
         super()._setup(batch)
+        if batch.confinement is None:
+            raise ValueError(
+                "UniformCellConfined requires 'batch.confinement' to be set "
+                "(a tensor of shape [num_graphs, 2] with z_min and z_max per graph)."
+            )
         self.confinement = batch.confinement
         if batch.batch is not None:
-            raise NotImplementedError("Batched version not implemented")
+            if self.confinement.shape[0] != batch.num_graphs:
+                raise ValueError(
+                    f"batch.confinement has {self.confinement.shape[0]} rows but "
+                    f"the batch contains {batch.num_graphs} graphs. "
+                    "Provide one [z_min, z_max] row per graph."
+                )
+            conf_per_atom = self.confinement[batch.batch]  # (n_atoms, 2)
+            z_dist = conf_per_atom[:, 1] - conf_per_atom[:, 0]  # (n_atoms,)
+            z_min = conf_per_atom[:, 0]  # (n_atoms,)
+            # self.cell is (n_atoms, 3, 3) from parent _setup
+            self.cell[:, 2, :2] = 0.0
+            self.cell[:, 2, 2] = z_dist
+            self.corner[:, 2] = z_min
         else:
             z_dist = self.confinement[:, 1] - self.confinement[:, 0]
             z_min = self.confinement[:, 0]

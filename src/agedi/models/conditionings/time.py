@@ -1,4 +1,5 @@
 import torch
+from typing import Dict
 
 from .base import Conditioning
 
@@ -12,18 +13,34 @@ class TimeConditioning(Conditioning):
         Time tensor of shape (Nodes, 1).
 
     """
-    def __init__(self, **kwargs) -> None:
+    def __init__(self, input_dim: int = 1, output_dim: int = 2, **kwargs) -> None:
         """Initialize the TimeConditioning class.
+
+        Parameters
+        ----------
+        input_dim : int, optional
+            Dimension of the time input. Defaults to 1.
+        output_dim : int, optional
+            Dimension of the sinusoidal output (sin + cos). Defaults to 2.
+        **kwargs
+            Keyword arguments forwarded to :class:`~agedi.models.conditionings.base.Conditioning`.
         """
+        kwargs.pop("property", None)
         super().__init__(
             property="time",
-            input_dim=1,
-            output_dim=2,
+            input_dim=input_dim,
+            output_dim=output_dim,
             concatenation_type="scalar",
             **kwargs
         )
         
         self.omega = torch.pi
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters for this time conditioning module."""
+        hparams = super().get_hparams()
+        hparams.pop("property", None)
+        return hparams
 
     def get_conditioning(self, t: torch.Tensor) -> torch.Tensor:
         """Get the conditioning tensor for the time t.
@@ -59,7 +76,7 @@ class TimeConditioning(Conditioning):
             Empty conditioning tensor of shape (1, 2).
 
         """
-        return torch.zeros(n, 2, device=self.device)
+        return torch.zeros(n, self.output_dim, device=self.device)
 
 
     def forward(self, batch: "AtomsGraph", empty: bool=False) -> "AtomsGraph":

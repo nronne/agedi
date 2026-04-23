@@ -1,5 +1,5 @@
 import torch
-from typing import Type, Optional
+from typing import Dict, Type, Optional
 from agedi.diffusion.distributions import Distribution
 from agedi.data import AtomsGraph
 
@@ -27,6 +27,10 @@ class Constant(Distribution):
         super().__init__(key=key, **kwargs)
         self.value = value
         self.dtype = dtype
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters for this distribution."""
+        return {**super().get_hparams(), "value": self.value}
 
     def _setup(self, batch: AtomsGraph) -> None:
         """Prepare the distribution for sampling from *batch*.

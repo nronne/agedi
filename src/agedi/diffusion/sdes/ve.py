@@ -1,4 +1,5 @@
 import torch
+from typing import Dict
 from agedi.diffusion.sdes import SDE
 
 
@@ -21,7 +22,13 @@ class VE(SDE):
     def __init__(self, sigma_min: float = 1e-2, sigma_max: float = 1.0, **kwargs):
         """Initializes the VP SDE."""
         super().__init__(**kwargs)
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
         self.noise_schedule = self.noise_schedule_cls(sigma_min, sigma_max)
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters for this VE SDE."""
+        return {**super().get_hparams(), "sigma_min": self.sigma_min, "sigma_max": self.sigma_max}
 
 
     def drift(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:

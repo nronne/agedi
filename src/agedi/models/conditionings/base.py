@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import Dict
 
 import torch
 from lightning import LightningModule
@@ -44,6 +45,28 @@ class Conditioning(ABC, LightningModule):
 
         self.concatenation_type = concatenation_type
         self.probability = probability
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters sufficient to reconstruct this conditioning module.
+
+        Returns a dictionary with a ``_target_`` key (the fully-qualified class
+        name) plus ``property``, ``probability``, ``input_dim``, and
+        ``output_dim`` from the base class.
+        Subclasses should call ``super().get_hparams()`` and merge in their own
+        constructor parameters.
+
+        Returns
+        -------
+        dict
+            Hyperparameter dictionary.
+        """
+        return {
+            "_target_": f"{type(self).__module__}.{type(self).__qualname__}",
+            "property": self.property,
+            "probability": self.probability,
+            "input_dim": self.input_dim,
+            "output_dim": self.output_dim,
+        }
 
     @abstractmethod
     def get_conditioning(self, x: torch.Tensor) -> torch.Tensor:

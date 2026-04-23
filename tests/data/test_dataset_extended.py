@@ -67,6 +67,40 @@ class TestDatasetAddAndSetup:
         ds.add_atoms_data(_make_molecules(1), confinement=[2.0, 8.0])
         assert ds.dataset[0].confinement is not None
 
+    def test_confinement_raises_if_atoms_outside(self):
+        """Raise ValueError when unmasked atoms are outside the confinement."""
+        ds = Dataset(batch_size=2, n_train=1.0, n_val=0.0, n_test=0.0)
+        # Molecules are centered in a 10x10x10 cell (Z ≈ 5), so [0, 1] is too narrow.
+        with pytest.raises(ValueError, match="confinement"):
+            ds.add_atoms_data(_make_molecules(1), confinement=[0.0, 1.0])
+
+    def test_confinement_error_suggests_new_bounds(self):
+        """The error message must propose an alternative confinement."""
+        ds = Dataset(batch_size=2, n_train=1.0, n_val=0.0, n_test=0.0)
+        with pytest.raises(ValueError, match="Consider using confinement="):
+            ds.add_atoms_data(_make_molecules(1), confinement=[0.0, 1.0])
+
+    def test_confinement_ignores_masked_atoms(self):
+        """Masked (fixed) atoms outside confinement must not trigger an error."""
+        from ase.build import fcc111
+        surf = fcc111("Au", (2, 2, 3), vacuum=5)
+        surf.set_pbc(True)
+        z_positions = surf.get_positions()[:, 2]
+        z_sorted = sorted(z_positions)
+        # Use the middle-of-slab Z as the split point.
+        z_split = float(z_sorted[len(z_sorted) // 2])
+        z_max = float(z_sorted[-1])
+        # Fix atoms in the lower half so they fall outside the confinement.
+        fixed = [i for i, z in enumerate(z_positions) if z < z_split]
+        surf.set_constraint(FixAtoms(indices=fixed))
+        ds = Dataset(batch_size=2, n_train=1.0, n_val=0.0, n_test=0.0)
+        # Confinement covers from z_split - 0.5 upward, which includes all
+        # unmasked atoms but NOT the masked (fixed) low-Z atoms.
+        # The 0.5 margin below and 1.0 margin above avoid floating-point
+        # boundary issues when comparing float32 positions to float64 bounds.
+        ds.add_atoms_data([surf], mask_method="MaskFixed", confinement=[z_split - 0.5, z_max + 1.0])
+        assert ds.dataset[0].confinement is not None
+
     def test_setup_splits_data(self):
         ds = Dataset(batch_size=2, n_train=0.8, n_val=0.2, n_test=0.0)
         ds.add_atoms_data(_make_molecules(5))

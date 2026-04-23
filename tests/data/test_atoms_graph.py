@@ -13,8 +13,13 @@ def test_to_atoms(atoms: "Atoms") -> None:
     graph = AtomsGraph.from_atoms(atoms)
     a = graph.to_atoms()
 
-    assert np.allclose(a.positions, atoms.positions)
-    assert np.allclose(a.cell, atoms.cell)
+    # With canonical_cell=False (default) the cell is stored as-is so
+    # fractional coordinates are trivially preserved.
+    orig_frac = atoms.get_scaled_positions(wrap=False)
+    new_frac = a.get_scaled_positions(wrap=False)
+    assert np.allclose(
+        (orig_frac + 0.5) % 1, (new_frac + 0.5) % 1, atol=1e-5
+    )
     assert np.allclose(a.pbc, atoms.pbc)
     assert np.equal(a.numbers, atoms.numbers).all()
 
@@ -179,6 +184,37 @@ def test_apply_mask_error(graph: AtomsGraph) -> None:
 def test_empty() -> None:
     graph = AtomsGraph.empty()
     assert isinstance(graph, AtomsGraph)
+
+
+def test_cell_is_canonical(atoms) -> None:
+    """Cell stored in AtomsGraph must be canonical (cellpar round-trip) when canonical_cell=True."""
+    graph = AtomsGraph.from_atoms(atoms, canonical_cell=True)
+    cell = graph.cell
+    cell_params = AtomsGraph.cell_to_vectors(cell)
+    canonical = AtomsGraph.vector_to_cell(cell_params).view(3, 3)
+    assert torch.allclose(cell, canonical, atol=1e-5)
+
+
+def test_cell_setter_preserves_frac(graph: AtomsGraph) -> None:
+    """Setting a new cell must not change fractional coordinates."""
+    frac_before = graph.frac.clone()
+    # Rotate the cell slightly by applying a small perturbation to the cellpar
+    cell_params = AtomsGraph.cell_to_vectors(graph.cell).squeeze(0)
+    cell_params[3] += 0.05  # shift alpha a little
+    new_cell = AtomsGraph.vector_to_cell(cell_params).view(3, 3)
+    graph.cell = new_cell
+    frac_after = graph.frac
+    assert torch.allclose(frac_before, frac_after, atol=1e-5)
+
+
+def test_cell_setter_clears_graph(graph: AtomsGraph) -> None:
+    """Setting the cell must invalidate the edge index."""
+    cell_params = AtomsGraph.cell_to_vectors(graph.cell).squeeze(0)
+    cell_params[0] += 0.1
+    graph.cell = AtomsGraph.vector_to_cell(cell_params).view(3, 3)
+    assert "edge_index" not in graph.keys()
+    assert "shift_vectors" not in graph.keys()
+
 
 
 def test_representation_to_tensor() -> None:

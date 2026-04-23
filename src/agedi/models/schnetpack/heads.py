@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Dict
 
 import schnetpack.nn as snn
 import torch
@@ -124,12 +124,24 @@ class PositionsScore(Head):
             Additional keyword arguments forwarded to :class:`~agedi.models.head.Head`.
         """
         super().__init__(**kwargs)
+        self.input_dim_scalar = input_dim_scalar
+        self.input_dim_vector = input_dim_vector
+        self.gated_blocks = gated_blocks
         self.net = build_gated_equivariant_mlp(
             input_dim_scalar,
             input_dim_vector,
             1,
             n_layers=gated_blocks,
         )
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters for this positions score head."""
+        return {
+            **super().get_hparams(),
+            "input_dim_scalar": self.input_dim_scalar,
+            "input_dim_vector": self.input_dim_vector,
+            "gated_blocks": self.gated_blocks,
+        }
 
     def _score(self, batch: dict) -> torch.Tensor:
         """Predict the positions score of the atoms in the structure.
@@ -163,8 +175,6 @@ class TypesScore(Head):
         The dimension of the scalar input.
     input_dim_vector: int
         The dimension of the vector input.
-    layers: int
-        The number of layers
 
     Returns
     -------
@@ -174,7 +184,7 @@ class TypesScore(Head):
 
     _key = "x"
 
-    def __init__(self, input_dim_scalar: int = 66, input_dim_vector: int = 64, layers: int = 3, **kwargs) -> None:
+    def __init__(self, input_dim_scalar: int = 66, input_dim_vector: int = 64, n_classes: int = 100, **kwargs) -> None:
         """Initialize the types score head.
 
         Parameters
@@ -184,15 +194,29 @@ class TypesScore(Head):
         input_dim_vector : int, optional
             Dimension of the vector input features (unused, kept for API
             consistency).
-        layers : int, optional
-            Number of layers in the linear head.
+        n_classes : int, optional
+            Number of atom-type classes (output logits).  Must match the
+            ``n_classes`` of the corresponding
+            :class:`~agedi.diffusion.noisers.Types` noiser.  Defaults to 100.
         **kwargs
             Additional keyword arguments forwarded to :class:`~agedi.models.head.Head`.
         """
         super().__init__(**kwargs)
-        self.net = nn.Linear(input_dim_scalar, 100)
+        self.input_dim_scalar = input_dim_scalar
+        self.input_dim_vector = input_dim_vector
+        self.n_classes = n_classes
+        self.net = nn.Linear(input_dim_scalar, n_classes)
         self.net.weight.data.zero_()
         self.net.bias.data.zero_()
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters for this types score head."""
+        return {
+            **super().get_hparams(),
+            "input_dim_scalar": self.input_dim_scalar,
+            "input_dim_vector": self.input_dim_vector,
+            "n_classes": self.n_classes,
+        }
 
     def _score(self, batch: dict) -> torch.Tensor:
         """Predict the types score of the atoms in the structure.

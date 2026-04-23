@@ -1,0 +1,81 @@
+# AGeDi training configuration template
+# Pass this file to `agedi train-hydra` or `agedi.train_from_config()`.
+# Individual keys can be overridden from the command line as KEY=VALUE pairs:
+#   agedi train-hydra conf/train.yaml feature_size=128 epochs=200
+
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+data_path: /path/to/train.traj   # Required – ASE-readable file
+
+# ---------------------------------------------------------------------------
+# Score-model architecture
+# ---------------------------------------------------------------------------
+model: PaiNN          # Currently only PaiNN is supported
+cutoff: 6.0           # Neighbour-list cutoff in Å
+feature_size: 64      # Embedding / feature dimension
+n_blocks: 4           # Number of interaction blocks
+n_rbf: 30             # Number of radial basis functions
+
+# ---------------------------------------------------------------------------
+# Diffusion / noiser configuration
+# ---------------------------------------------------------------------------
+noisers:
+  - CellPositions     # One or more of:
+                      #   Positions               : StandardNormal prior + Normal (gas-phase clusters)
+                      #   CellPositions           : UniformCell prior + Normal (periodic bulk/surface)
+                      #   ConfinedCellPositions   : UniformCellConfined prior + TruncatedNormal (Z-confined)
+                      #   Types                   : discrete atom-type diffusion
+
+# SDE for position noisers.
+#   ve : Variance-Exploding SDE (default)
+#   vp : Variance-Preserving SDE
+sde: ve
+
+# Property conditioning (optional).  Set to "none" to disable.
+conditioning: none
+conditioning_type: scalar   # scalar | integer
+
+# Z-confinement range [z_min, z_max] in Å – null to disable.
+# Required when using the 'ConfinedCellPositions' noiser.
+confinement: null
+
+# Train a Forces regression head alongside the diffusion score.
+# Set to true when training data contains per-atom DFT forces and you want to
+# use force-field guidance during sampling (agedi sample --ff_guidance <scale>).
+forces: false
+
+# ---------------------------------------------------------------------------
+# Dataset splits and augmentation
+# ---------------------------------------------------------------------------
+batch_size: 64
+train_split: 0.9      # Fraction (float) or absolute count (int) for training
+val_split: 0.1        # Fraction (float) or absolute count (int) for validation
+mask: none            # Masking strategy: none | MaskFixed
+repeat: null          # Number of repetition levels (null = disabled)
+repeat_epoch: null    # Epochs between repetition-level increases
+canonical_cell: false  # Store cell in canonical lower-triangular form; set to true to canonicalize
+
+# ---------------------------------------------------------------------------
+# Optimiser
+# ---------------------------------------------------------------------------
+lr: 0.0001
+lr_factor: 0.95
+lr_patience: 100
+weight_decay: 0.0
+eps: 0.00001
+guidance_weight: -1.0
+
+# ---------------------------------------------------------------------------
+# Trainer / logging
+# ---------------------------------------------------------------------------
+epochs: -1            # -1 = unlimited (stop by max_time or manually)
+max_time: 24          # Wall-clock limit in hours (null = no limit)
+gradient_clip_val: 10.0
+
+logger: tensorboard   # tensorboard | wandb
+log_dir: logs
+project: agedi        # WandB project name
+name: agedi           # WandB run display name
+log_interval: 10
+progress_bar: false

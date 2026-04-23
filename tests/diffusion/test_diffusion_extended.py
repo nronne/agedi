@@ -125,3 +125,98 @@ def test_sample_split_batches(diffusion):
     )
     assert len(out) == 5
     assert all(isinstance(g, AtomsGraph) for g in out)
+
+
+# ── Combined-loss training (regressor present) ───────────────────────────────
+
+@pytest.fixture
+def diffusion_with_regressor(diffusion):
+    """Diffusion fixture that includes a Forces regressor."""
+    from agedi.models.regressor import RegressorModel
+    from agedi.models.schnetpack.regressor_heads import Forces
+
+    feature_size = 64
+    forces_head = Forces(input_dim_scalar=feature_size, input_dim_vector=feature_size)
+    regressor = RegressorModel(
+        translator=diffusion.score_model.translator,
+        representation=diffusion.score_model.representation,
+        heads=[forces_head],
+    )
+    diffusion.regressor_model = regressor
+    return diffusion
+
+
+def test_configure_optimizers_with_regressor_deduplicates_params(diffusion_with_regressor):
+    """Optimizer should cover all unique parameters exactly once."""
+    cfg = diffusion_with_regressor.configure_optimizers()
+    assert "optimizer" in cfg
+    opt_params = {id(p) for p in cfg["optimizer"].param_groups[0]["params"]}
+
+    score_params = {id(p) for p in diffusion_with_regressor.score_model.parameters()}
+    reg_params = {id(p) for p in diffusion_with_regressor.regressor_model.parameters()}
+    all_unique = score_params | reg_params
+
+    assert opt_params == all_unique
+
+
+def test_loss_combines_diffusion_and_regressor_when_forces_present(diffusion_with_regressor, batch):
+    """loss() total must equal diffusion_loss + weight * regressor_loss (exact identity)."""
+    import numpy as np
+    diffusion_with_regressor.score_model.training_mode()
+    batch.forces = torch.randn_like(batch.pos)
+
+    # Save RNG state so loss() and diffusion_loss() draw the same random noise/time.
+    torch_rng_state = torch.random.get_rng_state()
+    numpy_rng_state = np.random.get_state()
+
+    losses = diffusion_with_regressor.loss(batch, 0)
+
+    torch.random.set_rng_state(torch_rng_state)
+    np.random.set_state(numpy_rng_state)
+    diff_only = diffusion_with_regressor.diffusion_loss(batch, 0)
+
+    assert "regressor_loss" in losses, "regressor_loss key should be present"
+    assert "loss" in losses
+
+    expected_total = (
+        diff_only["loss"]
+        + diffusion_with_regressor.regressor_loss_weight * losses["regressor_loss"]
+    )
+    assert torch.isclose(losses["loss"], expected_total), (
+        "Combined loss must equal diffusion_loss + weight * regressor_loss"
+    )
+
+
+def test_loss_without_forces_is_diffusion_only(diffusion_with_regressor, batch):
+    """loss() should fall back to diffusion loss when forces are absent."""
+    diffusion_with_regressor.score_model.training_mode()
+    if hasattr(batch, "forces"):
+        del batch.forces
+
+    losses = diffusion_with_regressor.loss(batch, 0)
+    assert "regressor_loss" not in losses, "regressor_loss key should not be present without forces"
+
+
+def test_loss_respects_regressor_loss_weight(diffusion_with_regressor, batch):
+    """regressor_loss_weight should scale the contribution of the regressor loss."""
+    import numpy as np
+    diffusion_with_regressor.score_model.training_mode()
+    batch.forces = torch.randn_like(batch.pos)
+
+    diffusion_with_regressor.regressor_loss_weight = 0.0
+
+    # Save RNG state so loss() and diffusion_loss() use the same sampled randomness.
+    torch_rng_state = torch.random.get_rng_state()
+    numpy_rng_state = np.random.get_state()
+
+    losses_zero = diffusion_with_regressor.loss(batch, 0)
+
+    torch.random.set_rng_state(torch_rng_state)
+    np.random.set_state(numpy_rng_state)
+    diffusion_only = diffusion_with_regressor.diffusion_loss(batch, 0)
+
+    # The regressor contribution should still be returned, but weighted out of total loss.
+    assert "regressor_loss" in losses_zero
+    assert torch.isclose(losses_zero["loss"], diffusion_only["loss"]), (
+        "With weight=0, combined loss should equal the diffusion-only loss"
+    )

@@ -1,4 +1,4 @@
-from typing import Callable, Optional
+from typing import Callable, Dict, Optional
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -28,6 +28,21 @@ class NoiseSchedule:
         """
         self.beta_min = beta_min
         self.beta_max = beta_max
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters sufficient to reconstruct this noise schedule.
+
+        Returns
+        -------
+        dict
+            Hyperparameter dictionary with ``_target_``, ``beta_min``, and
+            ``beta_max``.
+        """
+        return {
+            "_target_": f"{type(self).__module__}.{type(self).__qualname__}",
+            "beta_min": self.beta_min,
+            "beta_max": self.beta_max,
+        }
 
     def _beta_t(self, time: torch.Tensor) -> torch.Tensor:
         """Beta function for the type noiser Q
@@ -88,13 +103,14 @@ class Transition:
     """Placeholder class for transition matrix representations."""
 
 
-class TypesNoiser(Noiser):
-    """Type Noiser
+class Types(Noiser):
+    """Type noiser.
 
     Based on score entropy and discrete diffusion model.
-    See https://arxiv.org/abs/2310.16834 for more details
+    See https://arxiv.org/abs/2310.16834 for more details.
 
-    Using the adsorbing states as the first state in the transition matrix
+    Uses an absorbing state (index 0) as the first state in the transition
+    matrix.
 
     """
 
@@ -106,6 +122,7 @@ class TypesNoiser(Noiser):
         distribution=Categorical(),
         noise_schedule: NoiseSchedule = NoiseSchedule(0.01, 3.0),
         sampling_mask: Optional[torch.Tensor] = None,
+        n_classes: int = 100,
         **kwargs
     ) -> None:
         """Initialize the types noiser.
@@ -120,6 +137,9 @@ class TypesNoiser(Noiser):
             Noise schedule controlling the forward corruption rate.
         sampling_mask : torch.Tensor, optional
             Boolean mask restricting which element types can be sampled.
+        n_classes : int, optional
+            Number of element-type classes (i.e. size of the type vocabulary).
+            Defaults to ``100``, which covers all elements up to Fermium.
         **kwargs
             Additional keyword arguments forwarded to :class:`~agedi.diffusion.noisers.Noiser`.
         """
@@ -127,7 +147,15 @@ class TypesNoiser(Noiser):
 
         self.noise_schedule = noise_schedule
         self.sampling_mask = sampling_mask
-        
+        self.n_classes = n_classes
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters for this types noiser."""
+        return {
+            **super().get_hparams(),
+            "noise_schedule": self.noise_schedule.get_hparams(),
+            "n_classes": self.n_classes,
+        }
 
     def _noise(self, batch: AtomsGraph) -> AtomsGraph:
         """Noises the attribute of the atomistic structure.
@@ -316,7 +344,7 @@ class TypesNoiser(Noiser):
             The i'th row of the rate transition matrix Q
         
         """
-        edge = -F.one_hot(x, num_classes=100)
+        edge = -F.one_hot(x, num_classes=self.n_classes)
         edge[x == 0] += 1
         return edge
 
@@ -366,7 +394,7 @@ class TypesNoiser(Noiser):
         torch.Tensor
            The sampled rate
         """
-        return callable(F.one_hot(x, num_classes=100).to(rate) + rate)
+        return callable(F.one_hot(x, num_classes=self.n_classes).to(rate) + rate)
 
     def staggered_score(self, score: torch.Tensor, dsigma: torch.Tensor) -> torch.Tensor:
         """Computes the staggered score
@@ -410,6 +438,10 @@ class TypesNoiser(Noiser):
             The transition matrix
         """
         # sigma = unsqueeze_as(sigma, i[..., None])
-        edge = (-sigma).exp() * F.one_hot(x, num_classes=100)
+        edge = (-sigma).exp() * F.one_hot(x, num_classes=self.n_classes)
         edge += torch.where(x == 0, 1 - (-sigma).squeeze(-1).exp(), 0)[..., None]
         return edge
+
+
+#: Backward-compatible alias for :class:`Types`.
+TypesNoiser = Types

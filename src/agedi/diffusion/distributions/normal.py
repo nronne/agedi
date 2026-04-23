@@ -1,8 +1,10 @@
 import torch
-from typing import Optional
+from typing import Dict, Optional
 from agedi.diffusion.distributions import Distribution
 from agedi.data import AtomsGraph
 from agedi.utils import TruncatedNormal as TN
+
+_CONFINEMENT_CLAMP_EPS = 1e-4
 
 
 class StandardNormal(Distribution):
@@ -79,6 +81,10 @@ class TruncatedNormal(Distribution):
         super().__init__(**kwargs)
         self.index = index
 
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters for this distribution."""
+        return {**super().get_hparams(), "index": self.index}
+
     def _setup(self, batch: AtomsGraph) -> None:
         """Setup the distribution
 
@@ -124,11 +130,17 @@ class TruncatedNormal(Distribution):
                         + "https://agedi.readthedocs.io/en/latest/troubleshooting.html"
                     )
 
+                z_lo = self.confinement[:, 0][~self.mask]
+                z_hi = self.confinement[:, 1][~self.mask]
+                mu_z = mu[:, i][~self.mask].clamp(
+                    min=z_lo + _CONFINEMENT_CLAMP_EPS,
+                    max=z_hi - _CONFINEMENT_CLAMP_EPS,
+                )
                 sampled = TN(
-                    mu[:, i][~self.mask],
+                    mu_z,
                     sigma[:, 0][~self.mask],
-                    self.confinement[:, 0][~self.mask],
-                    self.confinement[:, 1][~self.mask],
+                    z_lo,
+                    z_hi,
                 ).sample()
 
                 xi = torch.zeros_like(mu[:, i])

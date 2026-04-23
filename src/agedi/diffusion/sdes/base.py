@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Callable
+from typing import Callable, Dict
 from .noise_schedules import NoiseSchedule, Linear
 import torch
 
@@ -10,6 +10,20 @@ class SDE(ABC):
         """Initializes the SDE."""
         super().__init__()
         self.noise_schedule_cls = noise_schedule
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters sufficient to reconstruct this SDE.
+
+        Returns a dictionary with a ``_target_`` key (the fully-qualified class
+        name).  Subclasses should call ``super().get_hparams()`` and merge in
+        their own constructor parameters.
+
+        Returns
+        -------
+        dict
+            Hyperparameter dictionary.
+        """
+        return {"_target_": f"{type(self).__module__}.{type(self).__qualname__}"}
 
     @abstractmethod
     def drift(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:

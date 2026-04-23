@@ -1,6 +1,6 @@
 import torch
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 class Head(ABC,torch.nn.Module):
     """Abstract base class for any score model heads.
@@ -38,7 +38,24 @@ class Head(ABC,torch.nn.Module):
 
         """
         return self._key
-        
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters sufficient to reconstruct this head.
+
+        Returns a dictionary with a ``_target_`` key (the fully-qualified class
+        name) plus ``score_clip`` from the base class.  Subclasses should call
+        ``super().get_hparams()`` and merge in their own constructor parameters.
+
+        Returns
+        -------
+        dict
+            Hyperparameter dictionary.
+        """
+        return {
+            "_target_": f"{type(self).__module__}.{type(self).__qualname__}",
+            "score_clip": self._score_clip,
+        }
+
     def forward(self, translated_batch: Any) -> torch.Tensor:
         """Forward pass of the head using a translated batch
         

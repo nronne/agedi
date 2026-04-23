@@ -1,7 +1,7 @@
 import torch
 from lightning import LightningModule
 
-from typing import List
+from typing import Dict, List, Optional
 
 from torch_geometric.data import Batch
 from agedi.models.conditionings import Conditioning, TimeConditioning
@@ -33,10 +33,8 @@ class ScoreModel(LightningModule):
         self,
         translator: Translator,
         representation: Representation,
-        conditionings: List[Conditioning] = [
-            TimeConditioning(),
-        ],
-        heads: List[Head] = [],
+        conditionings: Optional[List[Conditioning]] = None,
+        heads: Optional[List[Head]] = None,
         w: float = -1.0,
         **kwargs
     ):
@@ -44,14 +42,39 @@ class ScoreModel(LightningModule):
         super().__init__(**kwargs)
         self.translator = translator
         self.representation = representation
-        self.conditionings = torch.nn.ModuleList(conditionings)
-        self.heads = torch.nn.ModuleList(heads)
+        self.conditionings = torch.nn.ModuleList(
+            conditionings if conditionings is not None else [TimeConditioning()]
+        )
+        self.heads = torch.nn.ModuleList(heads if heads is not None else [])
 
         # self.register_buffer("w", torch.tensor(w))
         self.w = torch.tensor(w)
         self.guidance = True if w > -1.0 else False
 
         self.training_mode()
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters sufficient to reconstruct this score model.
+
+        Collects hyperparameters from the translator, representation (via
+        :meth:`~agedi.models.translator.Translator.get_representation_hparams`),
+        conditionings, and heads, as well as the guidance weight ``w``.
+
+        Returns
+        -------
+        dict
+            Hyperparameter dictionary with a ``_target_`` key and nested
+            ``translator``, ``representation``, ``conditionings``, ``heads``,
+            and ``w`` entries.
+        """
+        return {
+            "_target_": f"{type(self).__module__}.{type(self).__qualname__}",
+            "translator": self.translator.get_hparams(),
+            "representation": self.translator.get_representation_hparams(self.representation),
+            "conditionings": [c.get_hparams() for c in self.conditionings],
+            "heads": [h.get_hparams() for h in self.heads],
+            "w": float(self.w),
+        }
 
     def forward(self, batch: Batch) -> Batch:
         """Forward pass of the model.

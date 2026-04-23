@@ -61,8 +61,8 @@ pip install -e ".[test,full]"
 ## Quickstart (CLI)
 
 ```bash
-# Train (example: 3 hours)
-agedi train -t 3 --style surface --mask MaskFixed --confinement 2 10 PdO_training_data.traj
+# Train (example: 3 hours, surface/slab system)
+agedi train -t 3 --noisers ConfinedCellPositions --mask MaskFixed --confinement 2 10 PdO_training_data.traj
 
 # Inspect saved hyperparameters
 agedi inspect logs/version_0
@@ -80,7 +80,7 @@ from agedi import train_from_atoms, sample, AtomsGraph
 data = read("PdO_training_data.traj", ":")
 diffusion, dataset, trainer = train_from_atoms(
     data,
-    noisers=("positions",),
+    noisers=("Positions",),
     style="surface",
     mask="MaskFixed",
     confinement=(2.0, 10.0),
