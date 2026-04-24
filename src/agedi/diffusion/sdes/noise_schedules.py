@@ -94,7 +94,6 @@ class Exponential(NoiseSchedule):
         """Return the integral of the noise schedule from 0 to *t*."""
         return self.min * ((self.max / self.min) ** t - 1) / math.log(self.max / self.min)
 
-
 class Cosine(NoiseSchedule):
     """Cosine noise schedule: ``f(t) = min + (max - min) * (1 - cos(πt)) / 2``."""
 

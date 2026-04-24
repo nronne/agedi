@@ -667,7 +667,7 @@ class AtomsGraph(Data):
         None
 
         """
-        frac %= 1
+        frac %= 1.0
         if "frac" in self._store:
             self.clear_graph()
         if "mask" in self._store:

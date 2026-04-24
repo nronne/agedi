@@ -1,16 +1,17 @@
 import torch
 import torch.nn.functional as F
 
-from typing import Dict
+from typing import Dict, Optional
 from agedi.data import AtomsGraph
 from agedi.diffusion.noisers import Noiser
 from agedi.diffusion.sdes import SDE, VE
 from agedi.diffusion.distributions import Distribution, StandardNormal, UniformCell
 from agedi.diffusion.distributions.normal import WrappedNormal
+from agedi.diffusion.sdes.noise_schedules import Exponential
 from agedi.utils import OFFSET_LIST
 
 
-class FractionalNoiser(Noiser):
+class Fractional(Noiser):
     """Implements noising of atoms positions in fractional coordinates.
 
     Parameters
@@ -40,9 +41,10 @@ class FractionalNoiser(Noiser):
     def __init__(
         self,
         sde_class: SDE = VE,
-        sde_kwargs: Dict = {},
+        sde_kwargs: Optional[Dict] = {"noise_schedule": Exponential},
         distribution: Distribution = WrappedNormal(),
         prior: Distribution = UniformCell(),
+        sde: Optional[SDE] = None,
         **kwargs
     ) -> None:
         """Initialize the positions noiser.
@@ -63,7 +65,13 @@ class FractionalNoiser(Noiser):
             Additional keyword arguments forwarded to :class:`~agedi.diffusion.noisers.Noiser`.
         """
         super().__init__(distribution, prior, **kwargs)
-        self.sde = sde_class(**sde_kwargs)
+        if sde is not None:
+            self.sde = sde
+        else:
+            if sde_kwargs is None:
+                sde_kwargs = {}
+            self.sde = sde_class(**sde_kwargs)
+        
 
     def _noise(self, batch: AtomsGraph) -> AtomsGraph:
         """Initializes the noise for the positions noiser.
@@ -82,17 +90,23 @@ class FractionalNoiser(Noiser):
             The noised atomistic structure (or bach hereof).
 
         """
-        r0 = batch.frac
         t = batch.time
+        mu, sigmas = self.sde.mean(t), self.sde.var(t)
+        sigmas_norm = self.distribution.sigma_norm(sigmas)
+        
 
-        w = self.distribution.get_callable(batch)
+        # mean is 1
+        frac_coords = batch.frac
+        noise_coords = torch.randn_like(frac_coords)
 
-        rt = self.sde.transition_kernel(r0, t, w)
-        noise = self.sde.noise(r0, rt, t)
-        rt = rt % 1.0
+        # NEW IMPLEMENTATION
+        target_coords = self.distribution.d_log_p(sigmas * noise_coords, sigmas) / torch.sqrt(sigmas_norm)  # [B_n, 1]
 
-        setattr(batch, self.key, rt)
-        batch[self.key + "_noise"] = batch.apply_mask(noise)
+        batch[self.key + "_target"] = target_coords
+        batch[self.key + "_noise"] = sigmas * noise_coords
+        
+        x_t_coords = (frac_coords + sigmas*target_coords) % 1.0
+        batch.frac = x_t_coords
         
         return batch
 
@@ -123,27 +137,36 @@ class FractionalNoiser(Noiser):
             The denoised atomistic structure (or bach hereof).
 
         """
+        t = batch.time        
         r = batch.frac
-        r_score = batch["pos_score"]
-        
-        r_score[torch.isnan(r_score)] = 0.0
-        t = batch.time
+        sigmas = self.sde.var(t)
+        sigmas_norm = self.distribution.sigma_norm(sigmas)
+        pred = batch["pos_score"]
+        r_score = -pred * torch.sqrt(sigmas_norm)
 
+        # # NEW IMPLEMENTATION
+        # std = torch.sqrt(sigmas)
+        # if last:
+        #     w = torch.zeros_like(r)
+        # else:
+        #     w = torch.randn_like(r)
+        # pred = pred * torch.sqrt(sigmas_norm)
+
+        # new_pos = r - delta_t * pred + torch.sqrt(delta_t) * std * w
+
+        # OLD
         drift = self.sde.drift(r, t)
         diffusion = self.sde.diffusion(t)
 
-        w = self.distribution.get_callable(batch)
-        
+        w = torch.randn_like(r)
         if last:
             new_pos = r + delta_t * (diffusion**2 * r_score + drift) 
         else:
-            new_pos = w(
-                r + delta_t * (diffusion**2 * r_score + drift),  # mean
-                torch.sqrt(delta_t) * diffusion,  # variance
-            )
+            new_pos = r + delta_t * (diffusion**2 * r_score + drift) + torch.sqrt(delta_t) * diffusion * w
+            
+
         new_pos = new_pos % 1.0
-        
-        setattr(batch, self.key, new_pos)
+        batch.frac = new_pos
 
         return batch
 
@@ -174,21 +197,21 @@ class FractionalNoiser(Noiser):
 
         """
         t = batch.time
+        var = self.sde.var(t)
         r_score = batch["pos_score"]
+        r_target = batch[self.key + "_target"]
         r_noise = batch[self.key + "_noise"]
 
-        var = self.sde.var(t)
-        sigma = torch.sqrt(var)
-        sigma_norm = self.distribution.sigma_norm(sigma)
+        loss_coords = F.mse_loss(r_score, r_target)
 
-        r_score = batch.apply_mask(r_score)
-
-        lt = 1.0  # /var.sqrt()
-
-
-        r_target = self.distribution.d_log_p(sigma*r_noise, sigma) / sigma_norm
+        # loss_coords = torch.mean((r_score - r_target) ** 2)
         
-        loss = F.mse_loss(r_score, r_target)
+        # loss_coords = torch.mean(
+        #     torch.sum((r_noise + r_score * var) ** 2, dim=-1, keepdim=True)
+        # )
+
+
+        loss = loss_coords
 
         return loss
 

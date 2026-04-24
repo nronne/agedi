@@ -275,6 +275,7 @@ def _painn_factory(cutoff: float, heads: Sequence[str], feature_size: int, n_blo
                 | "CellPositions"
                 | "ConfinedCellPositions"
                 | "positions"
+                | "Fractional"
                 | "cell_positions"
                 | "confined_cell_positions"
             ):
