@@ -91,7 +91,7 @@ class Fractional(Noiser):
 
         """
         t = batch.time
-        mu, sigmas = self.sde.mean(t), self.sde.var(t)
+        sigmas = self.sde.noise_schedule.f(t)
         sigmas_norm = self.distribution.sigma_norm(sigmas)
         
 
@@ -105,7 +105,8 @@ class Fractional(Noiser):
         batch[self.key + "_target"] = target_coords
         batch[self.key + "_noise"] = sigmas * noise_coords
         
-        x_t_coords = (frac_coords + sigmas*target_coords) % 1.0
+        x_t_coords = (frac_coords + sigmas*noise_coords) % 1.0
+
         batch.frac = x_t_coords
         
         return batch
@@ -139,30 +140,32 @@ class Fractional(Noiser):
         """
         t = batch.time        
         r = batch.frac
-        sigmas = self.sde.var(t)
+        # sigmas = self.sde.var(t)
+        sigmas = self.sde.noise_schedule.f(t)
         sigmas_norm = self.distribution.sigma_norm(sigmas)
         pred = batch["pos_score"]
-        r_score = -pred * torch.sqrt(sigmas_norm)
 
-        # # NEW IMPLEMENTATION
-        # std = torch.sqrt(sigmas)
-        # if last:
-        #     w = torch.zeros_like(r)
-        # else:
-        #     w = torch.randn_like(r)
-        # pred = pred * torch.sqrt(sigmas_norm)
 
-        # new_pos = r - delta_t * pred + torch.sqrt(delta_t) * std * w
-
-        # OLD
-        drift = self.sde.drift(r, t)
-        diffusion = self.sde.diffusion(t)
-
-        w = torch.randn_like(r)
+        # NEW IMPLEMENTATION
+        std = torch.sqrt(sigmas)
         if last:
-            new_pos = r + delta_t * (diffusion**2 * r_score + drift) 
+            w = torch.zeros_like(r)
         else:
-            new_pos = r + delta_t * (diffusion**2 * r_score + drift) + torch.sqrt(delta_t) * diffusion * w
+            w = torch.randn_like(r)
+        pred = pred * torch.sqrt(sigmas_norm)
+
+        new_pos = r + delta_t * pred + torch.sqrt(delta_t) * std * w
+
+        # # OLD
+        # r_score = pred * torch.sqrt(sigmas_norm)
+        # drift = self.sde.drift(r, t)
+        # diffusion = self.sde.diffusion(t)
+
+        # w = torch.randn_like(r)
+        # if last:
+        #     new_pos = r + delta_t * (diffusion**2 * r_score + drift) 
+        # else:
+        #     new_pos = r + delta_t * (diffusion**2 * r_score + drift) + torch.sqrt(delta_t) * diffusion * w
             
 
         new_pos = new_pos % 1.0

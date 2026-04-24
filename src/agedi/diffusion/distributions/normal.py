@@ -222,7 +222,7 @@ class WrappedNormal(Distribution):
         """
         p_ = 0
         for i in range(-self.N, self.N + 1):
-            p_ += (x + self.T * i) / sigma**2 * torch.exp(-((x + self.T * i) ** 2) / 2 / sigma**2)
+            p_ -= (x + self.T * i) / sigma**2 * torch.exp(-((x + self.T * i) ** 2) / 2 / sigma**2)
         return p_ / self.p(x, sigma)
 
 
