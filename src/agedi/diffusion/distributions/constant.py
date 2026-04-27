@@ -1,10 +1,10 @@
 import torch
 from typing import Dict, Type, Optional
-from agedi.diffusion.distributions import Distribution
+from agedi.diffusion.distributions import Distribution, PriorDistribution
 from agedi.data import AtomsGraph
 
 
-class Constant(Distribution):
+class Constant(PriorDistribution):
     """Constant Integer Distribution"""
 
     def __init__(

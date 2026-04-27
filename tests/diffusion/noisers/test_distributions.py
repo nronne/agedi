@@ -1,7 +1,36 @@
 import pytest
 import torch
 
-from agedi.diffusion.distributions import StandardNormal, Normal, TruncatedNormal, Uniform, UniformCell
+from agedi.diffusion.distributions import (
+    StandardNormal, Normal, TruncatedNormal, Uniform, UniformCell,
+    PriorDistribution, NoiseDistribution, UniformCellConfined, Constant,
+)
+from agedi.diffusion.distributions.categorical import Categorical
+from agedi.diffusion.distributions.normal import WrappedNormal
+
+
+# ---------------------------------------------------------------------------
+# PriorDistribution / NoiseDistribution type hierarchy
+# ---------------------------------------------------------------------------
+
+def test_prior_subclasses():
+    """Verify that the expected classes are instances of PriorDistribution."""
+    for cls in (StandardNormal, UniformCell, UniformCellConfined, Constant):
+        assert issubclass(cls, PriorDistribution), f"{cls.__name__} should be a PriorDistribution"
+
+
+def test_noise_sampler_subclasses():
+    """Verify that the expected classes are instances of NoiseDistribution."""
+    for cls in (Normal, TruncatedNormal, WrappedNormal, Categorical):
+        assert issubclass(cls, NoiseDistribution), f"{cls.__name__} should be a NoiseDistribution"
+
+
+def test_prior_sample_interface(batch):
+    """PriorDistribution.sample(batch) should return a tensor of the right shape."""
+    d = UniformCell()
+    result = d.sample(batch)
+    assert result.shape == batch.pos.shape
+
 
 def test_standard_normal() -> None:
     d = StandardNormal()

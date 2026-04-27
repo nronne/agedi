@@ -4,9 +4,12 @@ import torch
 from typing import Dict, Optional
 from agedi.data import AtomsGraph
 from agedi.diffusion.noisers import Noiser
+from agedi.diffusion.noisers.sde import SDENoiser
 from agedi.diffusion.sdes import SDE, VE
 from agedi.diffusion.distributions import (
     Distribution,
+    NoiseDistribution,
+    PriorDistribution,
     Normal,
     TruncatedNormal,
     StandardNormal,
@@ -16,7 +19,7 @@ from agedi.diffusion.distributions import (
 from agedi.utils import OFFSET_LIST
 
 
-class PositionsNoiser(Noiser):
+class PositionsNoiser(SDENoiser):
     """Implements noising of atoms positions in Cartesian coordinates.
 
     Parameters
@@ -25,9 +28,9 @@ class PositionsNoiser(Noiser):
         The class of the SDE to be used for the noising.
     sde_kwargs : Dict
         The keyword arguments to be passed to the SDE class.
-    distribution : Distribution
-        The distribution to be used for the noise.
-    prior : Distribution
+    distribution : NoiseDistribution
+        The noise sampler to be used for the noise.
+    prior : PriorDistribution
         The prior distribution to be used for the noise.
     sde : SDE, optional
         An already-instantiated SDE object.  When provided, *sde_class* and
@@ -51,8 +54,8 @@ class PositionsNoiser(Noiser):
         self,
         sde_class: SDE = VE,
         sde_kwargs: Optional[Dict] = None,
-        distribution: Distribution = Normal(),
-        prior: Distribution = UniformCell(),
+        distribution: NoiseDistribution = Normal(),
+        prior: PriorDistribution = UniformCell(),
         sde: Optional[SDE] = None,
         **kwargs
     ) -> None:
@@ -66,45 +69,34 @@ class PositionsNoiser(Noiser):
         sde_kwargs : dict, optional
             Keyword arguments forwarded to *sde_class*.
             Ignored when *sde* is provided.
-        distribution : Distribution, optional
-            Noise distribution used during noising and denoising.
+        distribution : NoiseDistribution, optional
+            Noise sampler used during noising and denoising.
             Defaults to :class:`~agedi.diffusion.distributions.Normal`.
-        prior : Distribution, optional
+        prior : PriorDistribution, optional
             Prior distribution used to sample starting positions.
             Defaults to :class:`~agedi.diffusion.distributions.UniformCell`.
         sde : SDE, optional
             Pre-instantiated SDE object.  When provided, *sde_class* and
             *sde_kwargs* are ignored.
         **kwargs
-            Additional keyword arguments forwarded to :class:`~agedi.diffusion.noisers.Noiser`.
+            Additional keyword arguments forwarded to :class:`~agedi.diffusion.noisers.sde.SDENoiser`.
         """
-        super().__init__(distribution, prior, **kwargs)
-        if sde is not None:
-            self.sde = sde
-        else:
-            if sde_kwargs is None:
-                sde_kwargs = {}
-            self.sde = sde_class(**sde_kwargs)
+        super().__init__(sde_class, sde_kwargs, distribution, prior, sde, **kwargs)
 
-    def get_hparams(self) -> Dict:
-        """Return hyperparameters for this positions noiser."""
-        return {**super().get_hparams(), "sde": self.sde.get_hparams()}
+    def noise(self, batch: AtomsGraph) -> AtomsGraph:
+        """Add noise to the atom positions.
 
-    def _noise(self, batch: AtomsGraph) -> AtomsGraph:
-        """Initializes the noise for the positions noiser.
-
-        Added noise is stored in the self.key+"_noise", which by default is
-        "positions_noise".
+        Added noise is stored in ``pos_noise``.
 
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised.
+            The atomistic structure (or batch thereof) to be noised.
 
         Returns
         -------
         AtomsGraph
-            The noised atomistic structure (or bach hereof).
+            The noised atomistic structure (or batch thereof).
 
         """
         r = batch[self.key]
@@ -116,31 +108,31 @@ class PositionsNoiser(Noiser):
 
         return batch
 
-    def _denoise(self, batch: AtomsGraph, delta_t: float, last: bool) -> AtomsGraph:
-        """Denoises the positions of the atomistic structure.
+    def denoise(self, batch: AtomsGraph, delta_t: float, last: bool) -> AtomsGraph:
+        """Denoise the atom positions using the Euler-Maruyama scheme.
 
-        The denoising follows the Euler-Maruyama scheme.
-        ::math::
-        R_i+1 = R_i +
-                \Delta t (f(R_i, t) + g(t)**2 * s(R_i, t)) +
-                \sqrt{\Delta t} g(t) * w
+        The update rule is:
 
-        The used score is expected to be stored in the self.key+"_score",
-        which by default is "pos_score".
+        .. math::
+
+            R_{i+1} = R_i + \\Delta t (f(R_i, t) + g(t)^2 s(R_i, t))
+                      + \\sqrt{\\Delta t} g(t) w
+
+        The score is expected to be stored in ``pos_score``.
 
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be denoised.
+            The atomistic structure (or batch thereof) to be denoised.
         delta_t: float
             The time step for the denoising.
         last: bool
-            If the denoising is the last step of the denoising.
+            Whether this is the final denoising step.
 
         Returns
         -------
         AtomsGraph
-            The denoised atomistic structure (or bach hereof).
+            The denoised atomistic structure (or batch thereof).
 
         """
         r = batch[self.key]
@@ -185,29 +177,26 @@ class PositionsNoiser(Noiser):
 
         return batch
 
-    def _loss(self, batch: AtomsGraph) -> torch.Tensor:
-        """Compute the noiser loss.
+    def loss(self, batch: AtomsGraph) -> torch.Tensor:
+        """Compute the positions noiser loss.
 
-        Computes the loss of the diffusion model for the positions noiser
+        Expects the noise in ``pos_noise`` and the predicted score in
+        ``pos_score``.
 
-        Expects the total added positions noise to be stored in the self.key+"_noise",
-        which by default is "pos_noise" and the predicted score to be stored in the
-        self.key+"_score", which by default is "pos_score".
+        The loss is:
 
-        The loss is computed as
-        ::math::
-        L = \sum_i ||\sigma_t w_i + \sigma_t^2 s(R_i)||^2
+        .. math::
 
-        With the noise taking into account periodic boundary conditions.
+            L = \\sum_i \\|\\sigma_t w_i + \\sigma_t^2 s(R_i)\\|^2
 
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised and denoised.
+            The atomistic structure (or batch thereof) to be noised and denoised.
 
         Returns
         -------
-        float
+        torch.Tensor
             The loss of the noised and denoised atomistic structure.
 
         """
@@ -218,12 +207,8 @@ class PositionsNoiser(Noiser):
         var = self.sde.var(t)
 
         r_score = batch.apply_mask(r_score)
-        # r_noise = self.periodic_distance(batch.pos, r_noise, batch.cell, batch.batch)
 
-        lt = 1.0  # /var.sqrt()
-
-        # snr = 1.0 / var - 1.0
-        # lt = torch.minimum(snr, torch.tensor(5.0, device=snr.device))
+        lt = 1.0
 
         loss = torch.mean(
             lt * torch.sum((r_noise + r_score * var) ** 2, dim=-1, keepdim=True)
@@ -276,7 +261,7 @@ class PositionsNoiser(Noiser):
 
 class Positions(PositionsNoiser):
     """Positions noiser with :class:`~agedi.diffusion.distributions.StandardNormal` prior
-    and :class:`~agedi.diffusion.distributions.Normal` noise distribution.
+    and :class:`~agedi.diffusion.distributions.Normal` noise sampler.
 
     This is the base positions noiser suited for gas-phase clusters or systems
     where positions are not constrained to a periodic unit cell.  The SDE can
@@ -295,9 +280,9 @@ class Positions(PositionsNoiser):
     sde : SDE, optional
         Pre-instantiated SDE object.  When provided *sde_class* and
         *sde_kwargs* are ignored.
-    distribution : Distribution, optional
-        Noise distribution.  Subclasses may supply a different default.
-    prior : Distribution, optional
+    distribution : NoiseDistribution, optional
+        Noise sampler.  Subclasses may supply a different default.
+    prior : PriorDistribution, optional
         Prior distribution.  Subclasses may supply a different default.
     **kwargs
         Additional keyword arguments forwarded to
@@ -309,8 +294,8 @@ class Positions(PositionsNoiser):
         sde_class: SDE = VE,
         sde_kwargs: Optional[Dict] = None,
         sde: Optional[SDE] = None,
-        distribution: Distribution = Normal(),
-        prior: Distribution = StandardNormal(),
+        distribution: NoiseDistribution = Normal(),
+        prior: PriorDistribution = StandardNormal(),
         **kwargs,
     ) -> None:
         super().__init__(
@@ -337,7 +322,7 @@ class Positions(PositionsNoiser):
 
 class CellPositions(Positions):
     """Positions noiser with :class:`~agedi.diffusion.distributions.UniformCell` prior
-    and :class:`~agedi.diffusion.distributions.Normal` noise distribution.
+    and :class:`~agedi.diffusion.distributions.Normal` noise sampler.
 
     Suited for periodic bulk or surface systems where atoms should be
     initialised uniformly within the unit cell.  Inherits from
@@ -377,7 +362,7 @@ class CellPositions(Positions):
 
 class ConfinedCellPositions(Positions):
     """Positions noiser with :class:`~agedi.diffusion.distributions.UniformCellConfined`
-    prior and :class:`~agedi.diffusion.distributions.TruncatedNormal` noise distribution.
+    prior and :class:`~agedi.diffusion.distributions.TruncatedNormal` noise sampler.
 
     Suited for surface adsorption or porous-material systems where atoms are
     confined to a Z-range within the unit cell.  Inherits from
@@ -413,3 +398,4 @@ class ConfinedCellPositions(Positions):
             sde=sde,
             **kwargs,
         )
+

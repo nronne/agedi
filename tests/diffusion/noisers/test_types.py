@@ -1,19 +1,23 @@
 import torch
 
 from agedi.diffusion.noisers.types import NoiseSchedule, Types
+from agedi.diffusion.sdes.noise_schedules import DiscreteExponential
 
 
 def test_noise_schedule_methods():
     schedule = NoiseSchedule(beta_min=0.01, beta_max=3.0)
     t = torch.tensor([0.0, 0.5, 1.0])
 
-    beta_t = schedule._beta_t(t)
     rate = schedule.rate_noise(t)
     total = schedule.total_noise(t)
 
-    assert torch.allclose(beta_t, torch.tensor([0.01, 1.505, 3.0]))
     assert rate.shape == t.shape
     assert total.shape == t.shape
+
+
+def test_noise_schedule_is_discrete_exponential():
+    """NoiseSchedule is an alias for DiscreteExponential."""
+    assert NoiseSchedule is DiscreteExponential
 
 
 def test_types_noiser_sample_transition_output_shape_and_bounds():
@@ -84,17 +88,18 @@ def test_types_noiser_noise_loss_and_denoise(batch):
     batch.time = torch.rand((batch.num_nodes, 1))
     original_types = batch.x.clone()
 
-    noised = noiser._noise(batch)
+    noised = noiser.noise(batch)
     assert "x_noise" in noised.keys()
     assert noised.x.shape == original_types.shape
 
     noised.x_score = torch.log_softmax(torch.randn((batch.num_nodes, 100)), dim=-1)
-    loss = noiser._loss(noised)
+    loss = noiser.loss(noised)
     assert torch.isfinite(loss)
 
     noiser.distribution.get_callable = lambda _: (lambda probs: probs.argmax(dim=-1))
-    denoised_last = noiser._denoise(noised, delta_t=0.01, last=True)
+    denoised_last = noiser.denoise(noised, delta_t=0.01, last=True)
     assert denoised_last.x.shape == original_types.shape
 
-    denoised_step = noiser._denoise(noised, delta_t=0.01, last=False)
+    denoised_step = noiser.denoise(noised, delta_t=0.01, last=False)
     assert denoised_step.x.shape == original_types.shape
+

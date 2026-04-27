@@ -3,15 +3,15 @@ import torch.nn.functional as F
 
 from typing import Dict, Optional
 from agedi.data import AtomsGraph
-from agedi.diffusion.noisers import Noiser
+from agedi.diffusion.noisers.sde import SDENoiser
 from agedi.diffusion.sdes import SDE, VE
-from agedi.diffusion.distributions import Distribution, StandardNormal, UniformCell
+from agedi.diffusion.distributions import NoiseDistribution, PriorDistribution, StandardNormal, UniformCell
 from agedi.diffusion.distributions.normal import WrappedNormal
 from agedi.diffusion.sdes.noise_schedules import Exponential
 from agedi.utils import OFFSET_LIST
 
 
-class Fractional(Noiser):
+class Fractional(SDENoiser):
     """Implements noising of atoms positions in fractional coordinates.
 
     Parameters
@@ -20,9 +20,9 @@ class Fractional(Noiser):
         The class of the SDE to be used for the noising.
     sde_kwargs : Dict
         The keyword arguments to be passed to the SDE class.
-    distribution : Distribution
-        The distribution to be used for the noise.
-    prior : Distribution
+    distribution : NoiseDistribution
+        The noise sampler to be used for the noise.
+    prior : PriorDistribution
         The prior distribution to be used for the noise.
     key : str
         The key to be used for the noising.
@@ -42,12 +42,12 @@ class Fractional(Noiser):
         self,
         sde_class: SDE = VE,
         sde_kwargs: Optional[Dict] = {"noise_schedule": Exponential},
-        distribution: Distribution = WrappedNormal(),
-        prior: Distribution = UniformCell(),
+        distribution: NoiseDistribution = WrappedNormal(),
+        prior: PriorDistribution = UniformCell(),
         sde: Optional[SDE] = None,
         **kwargs
     ) -> None:
-        """Initialize the positions noiser.
+        """Initialize the fractional positions noiser.
 
         Parameters
         ----------
@@ -55,39 +55,35 @@ class Fractional(Noiser):
             Class of the SDE to use.  Defaults to :class:`~agedi.diffusion.sdes.VE`.
         sde_kwargs : dict, optional
             Keyword arguments forwarded to *sde_class*.
-        distribution : Distribution, optional
-            Noise distribution used during noising and denoising.
-            Defaults to :class:`~agedi.diffusion.distributions.Normal`.
-        prior : Distribution, optional
+        distribution : NoiseDistribution, optional
+            Noise sampler used during noising and denoising.
+            Defaults to :class:`~agedi.diffusion.distributions.normal.WrappedNormal`.
+        prior : PriorDistribution, optional
             Prior distribution used to sample starting positions.
             Defaults to :class:`~agedi.diffusion.distributions.UniformCell`.
+        sde : SDE, optional
+            Pre-instantiated SDE object.  When provided, *sde_class* and
+            *sde_kwargs* are ignored.
         **kwargs
-            Additional keyword arguments forwarded to :class:`~agedi.diffusion.noisers.Noiser`.
+            Additional keyword arguments forwarded to :class:`~agedi.diffusion.noisers.sde.SDENoiser`.
         """
-        super().__init__(distribution, prior, **kwargs)
-        if sde is not None:
-            self.sde = sde
-        else:
-            if sde_kwargs is None:
-                sde_kwargs = {}
-            self.sde = sde_class(**sde_kwargs)
-        
+        super().__init__(sde_class, sde_kwargs, distribution, prior, sde, **kwargs)
 
-    def _noise(self, batch: AtomsGraph) -> AtomsGraph:
-        """Initializes the noise for the positions noiser.
+    def noise(self, batch: AtomsGraph) -> AtomsGraph:
+        """Add noise to the fractional atom coordinates.
 
-        Added noise is stored in the self.key+"_noise", which by default is
-        "positions_noise".
+        Added noise is stored in ``frac_noise`` and the training target in
+        ``frac_target``.
 
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised.
+            The atomistic structure (or batch thereof) to be noised.
 
         Returns
         -------
         AtomsGraph
-            The noised atomistic structure (or bach hereof).
+            The noised atomistic structure (or batch thereof).
 
         """
         t = batch.time
@@ -111,31 +107,31 @@ class Fractional(Noiser):
         
         return batch
 
-    def _denoise(self, batch: AtomsGraph, delta_t: float, last: bool) -> AtomsGraph:
-        """Denoises the positions of the atomistic structure.
+    def denoise(self, batch: AtomsGraph, delta_t: float, last: bool) -> AtomsGraph:
+        """Denoise the fractional atom coordinates using Euler-Maruyama.
 
-        The denoising follows the Euler-Maruyama scheme.
-        ::math::
-        R_i+1 = R_i +
-                \Delta t (f(R_i, t) + g(t)**2 * s(R_i, t)) +
-                \sqrt{\Delta t} g(t) * w
+        The update rule is:
 
-        The used score is expected to be stored in the self.key+"_score",
-        which by default is "pos_score".
+        .. math::
+
+            R_{i+1} = R_i + \\Delta t (f(R_i, t) + g(t)^2 s(R_i, t))
+                      + \\sqrt{\\Delta t} g(t) w
+
+        The score is expected to be stored in ``pos_score``.
 
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be denoised.
+            The atomistic structure (or batch thereof) to be denoised.
         delta_t: float
             The time step for the denoising.
         last: bool
-            If the denoising is the last step of the denoising.
+            Whether this is the final denoising step.
 
         Returns
         -------
         AtomsGraph
-            The denoised atomistic structure (or bach hereof).
+            The denoised atomistic structure (or batch thereof).
 
         """
         t = batch.time        
@@ -144,8 +140,8 @@ class Fractional(Noiser):
         sigmas_norm = self.distribution.sigma_norm(sigmas)
         pred = batch["pos_score"]
 
-        r_score = pred * torch.sqrt(sigmas_norm) # works better without sqrt using Euler-Mayurama sampler
-        drift = self.sde.drift(r, t) # drift is zero for VE, but not for other SDEs
+        r_score = pred * torch.sqrt(sigmas_norm)
+        drift = self.sde.drift(r, t)
         diffusion = self.sde.diffusion(t)
 
         w = torch.randn_like(r)
@@ -153,63 +149,35 @@ class Fractional(Noiser):
             new_pos = r + delta_t * (diffusion**2 * r_score + drift) 
         else:
             new_pos = r + delta_t * (diffusion**2 * r_score + drift) + torch.sqrt(delta_t) * diffusion * w
-
-        # score_norm = torch.norm(delta_t * diffusion**2 * r_score, dim=1).mean()
-        # noise_norm = torch.norm(torch.sqrt(delta_t) * diffusion * w, dim=1).mean()
-        # time = batch.time.mean()
-        # print(f"time: {time:.2f}, score_term_norm: {score_norm:.5f}, noise_term_norm: {noise_norm:.4f}, diffusion: {diffusion.mean():.3f}")
             
         new_pos = new_pos % 1.0
         batch.frac = new_pos
 
         return batch
 
-    def _loss(self, batch: AtomsGraph) -> torch.Tensor:
-        """Compute the noiser loss.
+    def loss(self, batch: AtomsGraph) -> torch.Tensor:
+        """Compute the fractional noiser loss.
 
-        Computes the loss of the diffusion model for the positions noiser
-
-        Expects the total added positions noise to be stored in the self.key+"_noise",
-        which by default is "pos_noise" and the predicted score to be stored in the
-        self.key+"_score", which by default is "pos_score".
-
-        The loss is computed as
-        ::math::
-        L = \sum_i ||\sigma_t w_i + \sigma_t^2 s(R_i)||^2
-
-        With the noise taking into account periodic boundary conditions.
+        Expects the training target in ``frac_target`` and the predicted score in
+        ``pos_score``.
 
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised and denoised.
+            The atomistic structure (or batch thereof) to be noised and denoised.
 
         Returns
         -------
-        float
+        torch.Tensor
             The loss of the noised and denoised atomistic structure.
 
         """
         t = batch.time
-        # var = self.sde.var(t)
         sigmas = self.sde.sigma(t)
         sigmas_norm = self.distribution.sigma_norm(sigmas)
         r_score = batch["pos_score"]
         r_target = batch[self.key + "_target"]
-        r_noise = batch[self.key + "_noise"]
         loss_coords = F.mse_loss(r_score, r_target)
-
-        
-        # loss_coords = torch.mean(
-        #     torch.sum((r_target + r_score * var) ** 2, dim=-1, keepdim=True)
-        # )
-
-        # loss_coords = torch.mean((r_score - r_target) ** 2)
-        
-        # loss_coords = torch.mean(
-        #     torch.sum((r_noise + r_score * var) ** 2, dim=-1, keepdim=True)
-        # )
-
 
         loss = loss_coords
 
