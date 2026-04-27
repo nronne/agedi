@@ -54,7 +54,7 @@ class WeightedPositionsNoiser(PositionsNoiser):
         """Return hyperparameters for this weighted positions noiser."""
         return {**super().get_hparams(), "temperature": self.temperature}
 
-    def _loss(self, batch: AtomsGraph) -> torch.Tensor:
+    def loss(self, batch: AtomsGraph) -> torch.Tensor:
         """Computes the loss for the weighted positions noiser.
 
         Parameters
@@ -79,9 +79,8 @@ class WeightedPositionsNoiser(PositionsNoiser):
         var = self.sde.var(t)
 
         r_score = batch.apply_mask(r_score)
-        # r_noise = self.periodic_distance(batch.pos, r_noise, batch.cell, batch.batch)
 
-        lt = 1.0  # /var.sqrt()
+        lt = 1.0
         lt *= weights
 
         loss = torch.mean(

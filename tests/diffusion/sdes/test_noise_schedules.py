@@ -2,7 +2,7 @@ import math
 import torch
 import pytest
 
-from agedi.diffusion.sdes.noise_schedules import Linear, Exponential, Cosine, NoiseSchedule
+from agedi.diffusion.sdes.noise_schedules import Linear, Exponential, Cosine, NoiseSchedule, DiscreteExponential
 
 
 # ── Linear ──────────────────────────────────────────────────────────────────
@@ -91,3 +91,37 @@ class TestCosine:
         t = torch.tensor(0.3)
         expected = 2 * self.sched.f(t) * self.sched.fprime(t)
         assert self.sched.df2dt(t).item() == pytest.approx(expected.item(), rel=1e-5)
+
+
+# ── DiscreteExponential ──────────────────────────────────────────────────────
+
+class TestDiscreteExponential:
+    def setup_method(self):
+        self.sched = DiscreteExponential(min=0.01, max=3.0)
+
+    def test_total_noise_equals_f(self):
+        t = torch.tensor([0.0, 0.5, 1.0])
+        assert torch.allclose(self.sched.total_noise(t), self.sched.f(t))
+
+    def test_rate_noise_equals_fprime(self):
+        t = torch.tensor([0.2, 0.7])
+        assert torch.allclose(self.sched.rate_noise(t), self.sched.fprime(t))
+
+    def test_beta_min_beta_max_aliases(self):
+        """beta_min / beta_max keyword arguments are backward-compatible aliases."""
+        sched = DiscreteExponential(beta_min=0.01, beta_max=3.0)
+        assert sched.min == pytest.approx(0.01)
+        assert sched.max == pytest.approx(3.0)
+
+    def test_positional_and_keyword_equivalent(self):
+        s_pos = DiscreteExponential(0.01, 3.0)
+        s_kw = DiscreteExponential(min=0.01, max=3.0)
+        t = torch.tensor(0.5)
+        assert s_pos.total_noise(t).item() == pytest.approx(s_kw.total_noise(t).item())
+
+    def test_total_noise_at_zero(self):
+        assert self.sched.total_noise(torch.tensor(0.0)).item() == pytest.approx(0.01)
+
+    def test_total_noise_at_one(self):
+        assert self.sched.total_noise(torch.tensor(1.0)).item() == pytest.approx(3.0)
+

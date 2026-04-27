@@ -97,3 +97,50 @@ class Distribution(ABC):
             return self._sample(*args, **kwargs)
 
         return _sampler
+
+
+class Prior(Distribution):
+    """Abstract base class for prior distributions.
+
+    A ``Prior`` is used to initialise the noised state at the start of the
+    reverse (generative) trajectory.  It knows only about the :class:`~agedi.data.AtomsGraph`
+    batch and returns a complete tensor that is assigned to a graph attribute.
+
+    Concrete subclasses include :class:`~agedi.diffusion.distributions.UniformCell`,
+    :class:`~agedi.diffusion.distributions.UniformCellConfined`,
+    :class:`~agedi.diffusion.distributions.StandardNormal`, and
+    :class:`~agedi.diffusion.distributions.Constant`.
+    """
+
+    def sample(self, batch: AtomsGraph) -> torch.Tensor:
+        """Sample the initial state from the prior.
+
+        Parameters
+        ----------
+        batch : AtomsGraph
+            The atomistic graph (or batch thereof) used to determine the shape
+            and any geometry-dependent parameters (e.g. unit-cell vectors).
+
+        Returns
+        -------
+        torch.Tensor
+            Initial state tensor, ready to be assigned to a graph attribute.
+        """
+        self._setup(batch)
+        return self._sample()
+
+
+class NoiseSampler(Distribution):
+    """Abstract base class for noise (step) samplers.
+
+    A ``NoiseSampler`` is used during the forward and reverse diffusion steps.
+    Given a current state ``mu`` and a scale ``sigma``, it returns a perturbed
+    sample.  Unlike :class:`Prior`, it does not need to know about graph
+    geometry, only the current diffusion step parameters.
+
+    Concrete subclasses include :class:`~agedi.diffusion.distributions.Normal`,
+    :class:`~agedi.diffusion.distributions.TruncatedNormal`,
+    :class:`~agedi.diffusion.distributions.WrappedNormal`, and
+    :class:`~agedi.diffusion.distributions.Categorical`.
+    """
+

@@ -1,7 +1,7 @@
 import torch
-from agedi.diffusion.distributions import Distribution
+from agedi.diffusion.distributions import Distribution, NoiseSampler
 
-class Categorical(Distribution):
+class Categorical(NoiseSampler):
     """Categorical Distribution
 
     Implements hard sampling using the Gumbel-Max trick.
