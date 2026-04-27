@@ -91,7 +91,7 @@ class Fractional(Noiser):
 
         """
         t = batch.time
-        sigmas = self.sde.noise_schedule.f(t)
+        sigmas = self.sde.sigma(t)
         sigmas_norm = self.distribution.sigma_norm(sigmas)
         
 
@@ -100,7 +100,7 @@ class Fractional(Noiser):
         noise_coords = torch.randn_like(frac_coords)
 
         # NEW IMPLEMENTATION
-        target_coords = self.distribution.d_log_p(sigmas * noise_coords, sigmas) / torch.sqrt(sigmas_norm)  # [B_n, 1]
+        target_coords = self.distribution.d_log_p(sigmas * noise_coords, sigmas)/torch.sqrt(sigmas_norm)  # [B_n, 1]
 
         batch[self.key + "_target"] = target_coords
         batch[self.key + "_noise"] = sigmas * noise_coords
@@ -140,32 +140,11 @@ class Fractional(Noiser):
         """
         t = batch.time        
         r = batch.frac
-        # sigmas = self.sde.var(t)
         sigmas = self.sde.noise_schedule.f(t)
         sigmas_norm = self.distribution.sigma_norm(sigmas)
         pred = batch["pos_score"]
 
-
-        # # series type implementation
-        # pred /= torch.sqrt(sigmas_norm)
-        # std = torch.sqrt(sigmas)
-        # if last:
-        #     w = torch.zeros_like(r)
-        # else:
-        #     w = torch.randn_like(r)
-        # pred = pred * torch.sqrt(sigmas_norm)
-
-        # new_pos = r + delta_t * pred + torch.sqrt(delta_t) * std * w
-
-        # r_norm = torch.norm(r, dim=1).mean()
-        # pred_norm = torch.norm(delta_t * pred, dim=1).mean()
-        # noise_norm = torch.norm(torch.sqrt(delta_t) * std * w, dim=1).mean()
-        # time = batch.time.mean()
-        
-        # print(f"time: {time:.2f}, pred_term_norm: {pred_norm:.3f}, noise_term_norm: {noise_norm:.3f}")
-
-        # SDE type implementation (now it works)
-        r_score = pred * sigmas_norm
+        r_score = pred * torch.sqrt(sigmas_norm) # works better without sqrt using Euler-Mayurama sampler
         drift = self.sde.drift(r, t) # drift is zero for VE, but not for other SDEs
         diffusion = self.sde.diffusion(t)
 
@@ -175,12 +154,11 @@ class Fractional(Noiser):
         else:
             new_pos = r + delta_t * (diffusion**2 * r_score + drift) + torch.sqrt(delta_t) * diffusion * w
 
-        score_norm = torch.norm(delta_t * diffusion**2 * r_score, dim=1).mean()
-        noise_norm = torch.norm(torch.sqrt(delta_t) * diffusion * w, dim=1).mean()
-        time = batch.time.mean()
-        print(f"time: {time:.2f}, score_term_norm: {score_norm:.3f}, noise_term_norm: {noise_norm:.3f}")
+        # score_norm = torch.norm(delta_t * diffusion**2 * r_score, dim=1).mean()
+        # noise_norm = torch.norm(torch.sqrt(delta_t) * diffusion * w, dim=1).mean()
+        # time = batch.time.mean()
+        # print(f"time: {time:.2f}, score_term_norm: {score_norm:.5f}, noise_term_norm: {noise_norm:.4f}, diffusion: {diffusion.mean():.3f}")
             
-
         new_pos = new_pos % 1.0
         batch.frac = new_pos
 
@@ -213,12 +191,18 @@ class Fractional(Noiser):
 
         """
         t = batch.time
-        var = self.sde.var(t)
+        # var = self.sde.var(t)
+        sigmas = self.sde.sigma(t)
+        sigmas_norm = self.distribution.sigma_norm(sigmas)
         r_score = batch["pos_score"]
         r_target = batch[self.key + "_target"]
         r_noise = batch[self.key + "_noise"]
-
         loss_coords = F.mse_loss(r_score, r_target)
+
+        
+        # loss_coords = torch.mean(
+        #     torch.sum((r_target + r_score * var) ** 2, dim=-1, keepdim=True)
+        # )
 
         # loss_coords = torch.mean((r_score - r_target) ** 2)
         
