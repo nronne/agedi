@@ -1,7 +1,20 @@
 import torch
+from ase.build import molecule
+from torch_geometric.data import Batch
 
+from agedi.data import AtomsGraph
 from agedi.diffusion.noisers.types import NoiseSchedule, Types
 from agedi.diffusion.sdes.noise_schedules import DiscreteExponential
+
+
+def _build_mini_batch():
+    """Build a minimal single-graph batch for use in tests."""
+    atoms = molecule("H2O")
+    atoms.set_cell([10, 10, 10])
+    atoms.set_pbc(True)
+    atoms.center()
+    g = AtomsGraph.from_atoms(atoms)
+    return Batch.from_data_list([g])
 
 
 def test_noise_schedule_methods():
@@ -77,17 +90,7 @@ def test_types_noiser_sample_rate():
     x = torch.tensor([1, 2])
     rate = torch.zeros((2, 100))
 
-    # Use a minimal batch-like object (only needed for distribution.sample signature)
-    from agedi.data import AtomsGraph
-    from ase.build import molecule
-    atoms = molecule("H2O")
-    atoms.set_cell([10, 10, 10])
-    atoms.set_pbc(True)
-    atoms.center()
-    from torch_geometric.data import Batch
-    g = AtomsGraph.from_atoms(atoms)
-    mini_batch = Batch.from_data_list([g])
-
+    mini_batch = _build_mini_batch()
     sampled = noiser.sample_rate(x, rate, mini_batch)
 
     assert sampled.shape == x.shape

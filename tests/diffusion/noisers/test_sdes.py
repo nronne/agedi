@@ -40,8 +40,6 @@ def test_SDE_transition_kernel(batch: "Batch") -> None:
     vp = VP()
     x = torch.randn((10, 3))
     t = torch.rand((10,1))
-    mean = vp.mean(t) * x
-    sigma = torch.sqrt(vp.var(t))
     result = vp.transition_kernel(x, t, lambda mu, s: torch.normal(mu, s))
     assert result.shape == x.shape
 
