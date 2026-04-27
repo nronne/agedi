@@ -132,12 +132,12 @@ class SDENoiser(Noiser, ABC):
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised.
+            The atomistic structure (or batch thereof) to be noised.
 
         Returns
         -------
         AtomsGraph
-            The noised atomistic structure (or batch hereof).
+            The noised atomistic structure (or batch thereof).
 
         """
         z = batch[self.key]
@@ -164,7 +164,7 @@ class SDENoiser(Noiser, ABC):
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be denoised.
+            The atomistic structure (or batch thereof) to be denoised.
         delta_t: float
             The time step for the denoising.
         last: bool
@@ -173,7 +173,7 @@ class SDENoiser(Noiser, ABC):
         Returns
         -------
         AtomsGraph
-            The denoised atomistic structure (or batch hereof).
+            The denoised atomistic structure (or batch thereof).
 
         """
         z = batch[self.key]
@@ -209,7 +209,7 @@ class SDENoiser(Noiser, ABC):
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised and denoised.
+            The atomistic structure (or batch thereof) to be noised and denoised.
 
         Returns
         -------

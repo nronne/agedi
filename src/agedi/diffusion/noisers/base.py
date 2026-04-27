@@ -123,12 +123,12 @@ class Noiser(ABC, torch.nn.Module):
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised.
+            The atomistic structure (or batch thereof) to be noised.
 
         Returns
         -------
         AtomsGraph
-            The noised atomistic structure (or batch hereof).
+            The noised atomistic structure (or batch thereof).
 
         """
         pass
@@ -142,7 +142,7 @@ class Noiser(ABC, torch.nn.Module):
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be denoised.
+            The atomistic structure (or batch thereof) to be denoised.
 
         delta_t: float
             The time step to be used for the denoising.
@@ -153,7 +153,7 @@ class Noiser(ABC, torch.nn.Module):
         Returns
         -------
         AtomsGraph
-            The denoised atomistic structure (or batch hereof).
+            The denoised atomistic structure (or batch thereof).
 
         """
         pass
@@ -167,7 +167,7 @@ class Noiser(ABC, torch.nn.Module):
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised and denoised.
+            The atomistic structure (or batch thereof) to be noised and denoised.
 
         Returns
         -------
@@ -189,7 +189,7 @@ class Noiser(ABC, torch.nn.Module):
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be initialised.
+            The atomistic structure (or batch thereof) to be initialised.
 
         """
         if isinstance(self.prior, Prior):

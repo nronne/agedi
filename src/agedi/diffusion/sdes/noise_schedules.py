@@ -40,7 +40,7 @@ class NoiseSchedule(ABC):
             "min": self.min,
             "max": self.max,
         }
-    
+
     @abstractmethod
     def f(self, t: torch.Tensor) -> torch.Tensor:
         """Returns the noise schedule value at time t."""
@@ -62,7 +62,7 @@ class NoiseSchedule(ABC):
         Computed as ``2 * f(t) * f'(t)``.
         """
         return 2 * self.f(t) * self.fprime(t)
-    
+
 
 class Linear(NoiseSchedule):
     """Linear noise schedule: ``f(t) = min + (max - min) * t``."""
@@ -100,11 +100,11 @@ class Cosine(NoiseSchedule):
     def f(self, t: torch.Tensor) -> torch.Tensor:
         """Evaluate the noise schedule at time *t*."""
         return self.min + (self.max - self.min) * (1 - torch.cos(t * math.pi)) / 2
-    
+
     def fprime(self, t: torch.Tensor) -> torch.Tensor:
         """Return the derivative of the noise schedule at time *t*."""
         return (self.max - self.min) * math.pi * torch.sin(t * math.pi) / 2
-    
+
     def fint(self, t: torch.Tensor) -> torch.Tensor:
         """Return the integral of the noise schedule from 0 to *t*."""
         return (self.max - self.min) * (t / 2 - torch.sin(2 * t * math.pi) / (4 * math.pi))
@@ -181,9 +181,5 @@ class DiscreteExponential(Exponential):
         """
         return self.fprime(t)
 
-        
-
-
-    
 
 

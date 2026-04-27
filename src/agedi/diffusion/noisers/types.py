@@ -78,12 +78,12 @@ class Types(Noiser):
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised.
+            The atomistic structure (or batch thereof) to be noised.
 
         Returns
         -------
         AtomsGraph
-            The noised atomistic structure (or batch hereof).
+            The noised atomistic structure (or batch thereof).
 
         """
         time = batch.time
@@ -102,7 +102,7 @@ class Types(Noiser):
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be denoised.
+            The atomistic structure (or batch thereof) to be denoised.
         delta_t: float
             The time step to be used for the denoising.
         last: bool
@@ -111,7 +111,7 @@ class Types(Noiser):
         Returns
         -------
         AtomsGraph
-            The denoised atomistic structure (or batch hereof).
+            The denoised atomistic structure (or batch thereof).
 
         """
         types = batch[self.key]
@@ -151,7 +151,7 @@ class Types(Noiser):
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised and denoised.
+            The atomistic structure (or batch thereof) to be noised and denoised.
 
         Returns
         -------
