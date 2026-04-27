@@ -32,7 +32,9 @@ High-level package layout
 
   - ``Diffusion``: LightningModule orchestrating loss, training, and sampling
   - ``noisers``: forward/reverse diffusion components by variable type
-  - ``distributions`` and ``sdes``: priors, schedules, and stochastic dynamics
+  - ``distributions``: ``Prior`` (initial-state samplers) and ``NoiseSampler`` (step samplers)
+  - ``sdes``: stochastic differential equations (VE, VP) and noise schedules
+    (Linear, Exponential, Cosine, DiscreteExponential)
 
 - ``agedi.functional``
 

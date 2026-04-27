@@ -36,7 +36,7 @@ Choose one of the three position noisers to match your system type:
 
    * - Noiser
      - Prior
-     - Distribution
+     - NoiseSampler
      - Use case
    * - ``Positions``
      - StandardNormal

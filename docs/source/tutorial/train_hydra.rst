@@ -117,7 +117,7 @@ The ``noisers`` list controls what is diffused. Choose based on your system:
 
    * - Noiser
      - Prior
-     - Distribution
+     - NoiseSampler
      - Use case
    * - ``Positions``
      - StandardNormal

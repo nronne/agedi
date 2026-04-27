@@ -27,7 +27,7 @@ Train
 For this surface system with Z-confined adsorbates we use the
 ``ConfinedCellPositions`` noiser, which pairs a
 :class:`~agedi.diffusion.distributions.UniformCellConfined` prior with a
-:class:`~agedi.diffusion.distributions.TruncatedNormal` noise distribution.
+:class:`~agedi.diffusion.distributions.TruncatedNormal` noise sampler.
 
 Using the CLI:
 
