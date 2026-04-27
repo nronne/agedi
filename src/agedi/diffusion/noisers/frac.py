@@ -146,26 +146,39 @@ class Fractional(Noiser):
         pred = batch["pos_score"]
 
 
-        # NEW IMPLEMENTATION
-        std = torch.sqrt(sigmas)
-        if last:
-            w = torch.zeros_like(r)
-        else:
-            w = torch.randn_like(r)
-        pred = pred * torch.sqrt(sigmas_norm)
-
-        new_pos = r + delta_t * pred + torch.sqrt(delta_t) * std * w
-
-        # # OLD
-        # r_score = pred * torch.sqrt(sigmas_norm)
-        # drift = self.sde.drift(r, t)
-        # diffusion = self.sde.diffusion(t)
-
-        # w = torch.randn_like(r)
+        # # series type implementation
+        # pred /= torch.sqrt(sigmas_norm)
+        # std = torch.sqrt(sigmas)
         # if last:
-        #     new_pos = r + delta_t * (diffusion**2 * r_score + drift) 
+        #     w = torch.zeros_like(r)
         # else:
-        #     new_pos = r + delta_t * (diffusion**2 * r_score + drift) + torch.sqrt(delta_t) * diffusion * w
+        #     w = torch.randn_like(r)
+        # pred = pred * torch.sqrt(sigmas_norm)
+
+        # new_pos = r + delta_t * pred + torch.sqrt(delta_t) * std * w
+
+        # r_norm = torch.norm(r, dim=1).mean()
+        # pred_norm = torch.norm(delta_t * pred, dim=1).mean()
+        # noise_norm = torch.norm(torch.sqrt(delta_t) * std * w, dim=1).mean()
+        # time = batch.time.mean()
+        
+        # print(f"time: {time:.2f}, pred_term_norm: {pred_norm:.3f}, noise_term_norm: {noise_norm:.3f}")
+
+        # SDE type implementation (now it works)
+        r_score = pred * sigmas_norm
+        drift = self.sde.drift(r, t) # drift is zero for VE, but not for other SDEs
+        diffusion = self.sde.diffusion(t)
+
+        w = torch.randn_like(r)
+        if last:
+            new_pos = r + delta_t * (diffusion**2 * r_score + drift) 
+        else:
+            new_pos = r + delta_t * (diffusion**2 * r_score + drift) + torch.sqrt(delta_t) * diffusion * w
+
+        score_norm = torch.norm(delta_t * diffusion**2 * r_score, dim=1).mean()
+        noise_norm = torch.norm(torch.sqrt(delta_t) * diffusion * w, dim=1).mean()
+        time = batch.time.mean()
+        print(f"time: {time:.2f}, score_term_norm: {score_norm:.3f}, noise_term_norm: {noise_norm:.3f}")
             
 
         new_pos = new_pos % 1.0
