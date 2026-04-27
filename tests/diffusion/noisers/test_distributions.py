@@ -52,11 +52,10 @@ def test_truncated_normal(batch: "Batch") -> None:
     d = TruncatedNormal()
     mu = batch.pos
     sigma = torch.ones((batch.num_nodes, 3))
-    print(batch.pos[:,2])
-    print(d.sample(batch, mu=mu, sigma=sigma)[:,2])
-    
-    assert (d.sample(batch, mu=mu, sigma=sigma)[:,2] < max_val).all()
-    assert (d.sample(batch, mu=mu, sigma=sigma)[:,2] > min_val).all()
+    noise = d.sample(batch, mu=mu, sigma=sigma)
+    x_t = mu + noise
+    assert (x_t[:,2] < max_val).all()
+    assert (x_t[:,2] > min_val).all()
 
 
 def test_uniform(batch) -> None:
@@ -86,10 +85,11 @@ def test_truncated_normal_out_of_bounds_mu_does_not_raise(batch: "Batch") -> Non
     mu[:, 2] = 100.0
     sigma = torch.ones_like(mu)
 
-    # Should not raise ValueError
-    samples = d.sample(batch, mu=mu, sigma=sigma)
-    assert (samples[~batch.mask, 2] >= z_lo - 1e-4).all()
-    assert (samples[~batch.mask, 2] <= z_hi + 1e-4).all()
+    # Should not raise ValueError; x_t = mu + w should be within bounds
+    noise = d.sample(batch, mu=mu, sigma=sigma)
+    x_t = mu + noise
+    assert (x_t[~batch.mask, 2] >= z_lo - 1e-4).all()
+    assert (x_t[~batch.mask, 2] <= z_hi + 1e-4).all()
 
 
 def test_truncated_normal_samples_within_bounds_near_boundary(batch: "Batch") -> None:
@@ -103,6 +103,7 @@ def test_truncated_normal_samples_within_bounds_near_boundary(batch: "Batch") ->
     mu[:, 2] = z_lo + 1e-5
     sigma = torch.ones_like(mu)
 
-    samples = d.sample(batch, mu=mu, sigma=sigma)
-    assert (samples[~batch.mask, 2] >= z_lo - 1e-4).all()
-    assert (samples[~batch.mask, 2] <= z_hi + 1e-4).all()
+    noise = d.sample(batch, mu=mu, sigma=sigma)
+    x_t = mu + noise
+    assert (x_t[~batch.mask, 2] >= z_lo - 1e-4).all()
+    assert (x_t[~batch.mask, 2] <= z_hi + 1e-4).all()

@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from typing import Dict, Optional
+from typing import Optional
 from agedi.data import AtomsGraph
 from agedi.diffusion.noisers.sde import SDENoiser
 from agedi.diffusion.sdes import SDE, VE
@@ -16,10 +16,10 @@ class Fractional(SDENoiser):
 
     Parameters
     ----------
-    sde_class : SDE
-        The class of the SDE to be used for the noising.
-    sde_kwargs : Dict
-        The keyword arguments to be passed to the SDE class.
+    sde : SDE, optional
+        An already-instantiated SDE object that defines the diffusion style.
+        Defaults to :class:`~agedi.diffusion.sdes.VE` with an
+        :class:`~agedi.diffusion.sdes.noise_schedules.Exponential` schedule.
     distribution : NoiseDistribution
         The noise sampler to be used for the noise.
     prior : PriorDistribution
@@ -40,34 +40,31 @@ class Fractional(SDENoiser):
 
     def __init__(
         self,
-        sde_class: SDE = VE,
-        sde_kwargs: Optional[Dict] = {"noise_schedule": Exponential},
+        sde: Optional[SDE] = None,
         distribution: NoiseDistribution = WrappedNormal(),
         prior: PriorDistribution = UniformCell(),
-        sde: Optional[SDE] = None,
         **kwargs
     ) -> None:
         """Initialize the fractional positions noiser.
 
         Parameters
         ----------
-        sde_class : SDE, optional
-            Class of the SDE to use.  Defaults to :class:`~agedi.diffusion.sdes.VE`.
-        sde_kwargs : dict, optional
-            Keyword arguments forwarded to *sde_class*.
+        sde : SDE, optional
+            Instantiated SDE object.  Defaults to
+            :class:`~agedi.diffusion.sdes.VE` with an
+            :class:`~agedi.diffusion.sdes.noise_schedules.Exponential` schedule.
         distribution : NoiseDistribution, optional
             Noise sampler used during noising and denoising.
             Defaults to :class:`~agedi.diffusion.distributions.normal.WrappedNormal`.
         prior : PriorDistribution, optional
             Prior distribution used to sample starting positions.
             Defaults to :class:`~agedi.diffusion.distributions.UniformCell`.
-        sde : SDE, optional
-            Pre-instantiated SDE object.  When provided, *sde_class* and
-            *sde_kwargs* are ignored.
         **kwargs
             Additional keyword arguments forwarded to :class:`~agedi.diffusion.noisers.sde.SDENoiser`.
         """
-        super().__init__(sde_class, sde_kwargs, distribution, prior, sde, **kwargs)
+        if sde is None:
+            sde = VE(noise_schedule=Exponential)
+        super().__init__(sde=sde, distribution=distribution, prior=prior, **kwargs)
 
     def noise(self, batch: AtomsGraph) -> AtomsGraph:
         """Add noise to the fractional atom coordinates.

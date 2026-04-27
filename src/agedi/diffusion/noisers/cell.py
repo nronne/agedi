@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 
-from typing import Dict
+from typing import Dict, Optional
 from agedi.data import AtomsGraph
 from agedi.diffusion.noisers.sde import SDENoiser
 from agedi.diffusion.sdes import SDE, VP, VE
@@ -13,10 +13,10 @@ class CellNoiser(SDENoiser):
 
     Parameters
     ----------
-    sde_class : SDE
-        The class of the SDE to be used for the noising.
-    sde_kwargs : Dict
-        The keyword arguments to be passed to the SDE class.
+    sde : SDE, optional
+        An already-instantiated SDE object that defines the diffusion style
+        (e.g. ``VE(sigma_max=0.1)``).  Defaults to
+        :class:`~agedi.diffusion.sdes.VE` with ``sigma_max=0.1``.
     distribution : NoiseDistribution
         The noise sampler to be used for the noise.
     prior : PriorDistribution
@@ -37,13 +37,14 @@ class CellNoiser(SDENoiser):
 
     def __init__(
         self,
-        sde_class: SDE = VE,
-        sde_kwargs: Dict = {"sigma_max": 0.1},
+        sde: Optional[SDE] = None,
         distribution: NoiseDistribution = Normal(),
         prior: PriorDistribution = Normal(),
         **kwargs
     ) -> None:
-        super().__init__(sde_class, sde_kwargs, distribution, prior, **kwargs)
+        if sde is None:
+            sde = VE(sigma_max=0.1)
+        super().__init__(sde=sde, distribution=distribution, prior=prior, **kwargs)
 
     def noise(self, batch: AtomsGraph) -> AtomsGraph:
         """Add noise to the cell parameters.
@@ -68,7 +69,8 @@ class CellNoiser(SDENoiser):
 
         mean = self.sde.mean(t) * cellpar
         sigma = torch.sqrt(self.sde.var(t))
-        noised_cellpar = self.distribution.sample(batch, mu=mean, sigma=sigma)
+        w = self.distribution.sample(batch, mu=mean, sigma=sigma)
+        noised_cellpar = mean + w
 
 
         a, b, c, alpha, beta, gamma, V = noised_cellpar.unbind(-1)
@@ -77,7 +79,7 @@ class CellNoiser(SDENoiser):
         
         setattr(batch, self.key, noised_cellpar)
         batch.frac = f
-        batch.add_batch_attr(self.key + "_noise", self.sde.noise(cellpar, noised_cellpar, t), type="graph")
+        batch.add_batch_attr(self.key + "_noise", w / sigma, type="graph")
 
         return batch
 
@@ -122,7 +124,8 @@ class CellNoiser(SDENoiser):
         else:
             mean = c + delta_t * (diffusion**2 * c_score + drift)
             sigma = torch.sqrt(delta_t) * diffusion
-            cellpar = self.distribution.sample(batch, mu=mean, sigma=sigma)
+            w = self.distribution.sample(batch, mu=mean, sigma=sigma)
+            cellpar = mean + w
 
 
         a, b, c, alpha, beta, gamma, V = cellpar.unbind(-1)

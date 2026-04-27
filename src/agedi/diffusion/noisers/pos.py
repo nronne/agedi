@@ -1,13 +1,12 @@
 import warnings
 import torch
 
-from typing import Dict, Optional
+from typing import Optional
 from agedi.data import AtomsGraph
 from agedi.diffusion.noisers import Noiser
 from agedi.diffusion.noisers.sde import SDENoiser
 from agedi.diffusion.sdes import SDE, VE
 from agedi.diffusion.distributions import (
-    Distribution,
     NoiseDistribution,
     PriorDistribution,
     Normal,
@@ -24,18 +23,13 @@ class PositionsNoiser(SDENoiser):
 
     Parameters
     ----------
-    sde_class : SDE
-        The class of the SDE to be used for the noising.
-    sde_kwargs : Dict
-        The keyword arguments to be passed to the SDE class.
+    sde : SDE, optional
+        An already-instantiated SDE object that defines the diffusion style
+        (e.g. ``VE()``, ``VP()``).  Defaults to :class:`~agedi.diffusion.sdes.VE`.
     distribution : NoiseDistribution
         The noise sampler to be used for the noise.
     prior : PriorDistribution
         The prior distribution to be used for the noise.
-    sde : SDE, optional
-        An already-instantiated SDE object.  When provided, *sde_class* and
-        *sde_kwargs* are ignored.  Useful for reconstructing a noiser from
-        saved hyperparameters.
     key : str
         The key to be used for the noising.
     **kwargs
@@ -52,36 +46,29 @@ class PositionsNoiser(SDENoiser):
 
     def __init__(
         self,
-        sde_class: SDE = VE,
-        sde_kwargs: Optional[Dict] = None,
+        sde: Optional[SDE] = None,
         distribution: NoiseDistribution = Normal(),
         prior: PriorDistribution = UniformCell(),
-        sde: Optional[SDE] = None,
         **kwargs
     ) -> None:
         """Initialize the positions noiser.
 
         Parameters
         ----------
-        sde_class : SDE, optional
-            Class of the SDE to use.  Defaults to :class:`~agedi.diffusion.sdes.VE`.
-            Ignored when *sde* is provided.
-        sde_kwargs : dict, optional
-            Keyword arguments forwarded to *sde_class*.
-            Ignored when *sde* is provided.
+        sde : SDE, optional
+            Instantiated SDE object.  Defaults to :class:`~agedi.diffusion.sdes.VE`.
         distribution : NoiseDistribution, optional
             Noise sampler used during noising and denoising.
             Defaults to :class:`~agedi.diffusion.distributions.Normal`.
         prior : PriorDistribution, optional
             Prior distribution used to sample starting positions.
             Defaults to :class:`~agedi.diffusion.distributions.UniformCell`.
-        sde : SDE, optional
-            Pre-instantiated SDE object.  When provided, *sde_class* and
-            *sde_kwargs* are ignored.
         **kwargs
             Additional keyword arguments forwarded to :class:`~agedi.diffusion.noisers.sde.SDENoiser`.
         """
-        super().__init__(sde_class, sde_kwargs, distribution, prior, sde, **kwargs)
+        if sde is None:
+            sde = VE()
+        super().__init__(sde=sde, distribution=distribution, prior=prior, **kwargs)
 
     def noise(self, batch: AtomsGraph) -> AtomsGraph:
         """Add noise to the atom positions.
@@ -104,8 +91,9 @@ class PositionsNoiser(SDENoiser):
 
         mean = self.sde.mean(t) * r
         sigma = torch.sqrt(self.sde.var(t))
-        setattr(batch, self.key, self.distribution.sample(batch, mu=mean, sigma=sigma))
-        batch[self.key + "_noise"] = batch.apply_mask(self.sde.noise(r, batch.pos, t))
+        w = self.distribution.sample(batch, mu=mean, sigma=sigma)
+        setattr(batch, self.key, mean + w)
+        batch[self.key + "_noise"] = batch.apply_mask(w / sigma)
 
         return batch
 
@@ -161,7 +149,8 @@ class PositionsNoiser(SDENoiser):
         else:
             mean = r + delta_t * (diffusion**2 * r_score + drift)
             sigma = torch.sqrt(delta_t) * diffusion
-            new_pos = self.distribution.sample(batch, mu=mean, sigma=sigma)
+            w = self.distribution.sample(batch, mu=mean, sigma=sigma)
+            new_pos = mean + w
         if batch.confinement is not None:
             confinement = batch.confinement[batch.batch]  # (n_atoms, 2)
             mobile = ~batch.mask
@@ -269,15 +258,8 @@ class Positions(PositionsNoiser):
 
     Parameters
     ----------
-    sde_class : SDE, optional
-        Class of the SDE to use.  Defaults to :class:`~agedi.diffusion.sdes.VE`.
-        Ignored when *sde* is provided.
-    sde_kwargs : dict, optional
-        Keyword arguments forwarded to *sde_class*.
-        Ignored when *sde* is provided.
     sde : SDE, optional
-        Pre-instantiated SDE object.  When provided *sde_class* and
-        *sde_kwargs* are ignored.
+        Instantiated SDE object.  Defaults to :class:`~agedi.diffusion.sdes.VE`.
     distribution : NoiseDistribution, optional
         Noise sampler.  Subclasses may supply a different default.
     prior : PriorDistribution, optional
@@ -289,19 +271,15 @@ class Positions(PositionsNoiser):
 
     def __init__(
         self,
-        sde_class: SDE = VE,
-        sde_kwargs: Optional[Dict] = None,
         sde: Optional[SDE] = None,
         distribution: NoiseDistribution = Normal(),
         prior: PriorDistribution = StandardNormal(),
         **kwargs,
     ) -> None:
         super().__init__(
-            sde_class=sde_class,
-            sde_kwargs=sde_kwargs,
+            sde=sde,
             distribution=distribution,
             prior=prior,
-            sde=sde,
             **kwargs,
         )
 
@@ -328,14 +306,8 @@ class CellPositions(Positions):
 
     Parameters
     ----------
-    sde_class : SDE, optional
-        Class of the SDE to use.  Defaults to :class:`~agedi.diffusion.sdes.VE`.
-        Ignored when *sde* is provided.
-    sde_kwargs : dict, optional
-        Keyword arguments forwarded to *sde_class*.
-        Ignored when *sde* is provided.
     sde : SDE, optional
-        Pre-instantiated SDE object.
+        Instantiated SDE object.  Defaults to :class:`~agedi.diffusion.sdes.VE`.
     **kwargs
         Additional keyword arguments forwarded to
         :class:`~agedi.diffusion.noisers.PositionsNoiser`.
@@ -343,17 +315,13 @@ class CellPositions(Positions):
 
     def __init__(
         self,
-        sde_class: SDE = VE,
-        sde_kwargs: Optional[Dict] = None,
         sde: Optional[SDE] = None,
         **kwargs,
     ) -> None:
         super().__init__(
-            sde_class=sde_class,
-            sde_kwargs=sde_kwargs,
+            sde=sde,
             distribution=Normal(),
             prior=UniformCell(),
-            sde=sde,
             **kwargs,
         )
 
@@ -368,14 +336,8 @@ class ConfinedCellPositions(Positions):
 
     Parameters
     ----------
-    sde_class : SDE, optional
-        Class of the SDE to use.  Defaults to :class:`~agedi.diffusion.sdes.VE`.
-        Ignored when *sde* is provided.
-    sde_kwargs : dict, optional
-        Keyword arguments forwarded to *sde_class*.
-        Ignored when *sde* is provided.
     sde : SDE, optional
-        Pre-instantiated SDE object.
+        Instantiated SDE object.  Defaults to :class:`~agedi.diffusion.sdes.VE`.
     **kwargs
         Additional keyword arguments forwarded to
         :class:`~agedi.diffusion.noisers.PositionsNoiser`.
@@ -383,17 +345,13 @@ class ConfinedCellPositions(Positions):
 
     def __init__(
         self,
-        sde_class: SDE = VE,
-        sde_kwargs: Optional[Dict] = None,
         sde: Optional[SDE] = None,
         **kwargs,
     ) -> None:
         super().__init__(
-            sde_class=sde_class,
-            sde_kwargs=sde_kwargs,
+            sde=sde,
             distribution=TruncatedNormal(),
             prior=UniformCellConfined(),
-            sde=sde,
             **kwargs,
         )
 

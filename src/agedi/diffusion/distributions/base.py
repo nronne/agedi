@@ -94,9 +94,9 @@ class NoiseDistribution(Distribution):
     """Abstract base class for noise (step) distributions.
 
     A ``NoiseDistribution`` is used during the forward and reverse diffusion steps.
-    Given a current state ``mu`` and a scale ``sigma``, it returns a perturbed
-    sample.  Unlike :class:`PriorDistribution`, it does not need to know about graph
-    geometry, only the current diffusion step parameters.
+    Given a scale ``sigma``, it returns the *noise contribution* ``w`` such that
+    ``x_t = mean + w``.  The caller (typically :class:`~agedi.diffusion.noisers.sde.SDENoiser`)
+    is responsible for computing the mean and adding the returned noise.
 
     Concrete subclasses include :class:`~agedi.diffusion.distributions.Normal`,
     :class:`~agedi.diffusion.distributions.TruncatedNormal`,
@@ -106,7 +106,7 @@ class NoiseDistribution(Distribution):
 
     @abstractmethod
     def sample(self, batch: AtomsGraph, **kwargs) -> torch.Tensor:
-        """Sample a noised value.
+        """Sample the noise contribution ``w``.
 
         Parameters
         ----------
@@ -114,13 +114,13 @@ class NoiseDistribution(Distribution):
             Batch of atomistic data (may be used by subclasses that need
             geometry-dependent parameters such as confinement bounds).
         **kwargs
-            Distribution-specific parameters (e.g. ``mu``, ``sigma``,
-            ``probs``).
+            Distribution-specific parameters (e.g. ``sigma``, ``mu`` as a
+            shape reference for broadcasting, ``probs``).
 
         Returns
         -------
         torch.Tensor
-            Sampled tensor.
+            Noise tensor ``w`` such that ``x_t = mean + w``.
         """
         pass
 
