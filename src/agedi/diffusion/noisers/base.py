@@ -182,19 +182,12 @@ class Noiser(ABC, torch.nn.Module):
 
         Can be overwritten by subclasses for specific initializations.
 
-        Uses :meth:`~agedi.diffusion.distributions.PriorDistribution.sample` when the
-        prior is a :class:`~agedi.diffusion.distributions.PriorDistribution`, falling back
-        to the legacy ``get_callable`` interface for backward compatibility.
-
         Parameters
         ----------
         batch: AtomsGraph
             The atomistic structure (or batch thereof) to be initialised.
 
         """
-        if isinstance(self.prior, PriorDistribution):
-            value = self.prior.sample(batch)
-        else:
-            value = self.prior.get_callable(batch)()
+        value = self.prior.sample(batch)
         setattr(batch, self.key, value)
 

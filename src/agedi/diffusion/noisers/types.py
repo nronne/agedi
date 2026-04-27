@@ -1,4 +1,4 @@
-from typing import Callable, Dict, Optional
+from typing import Dict, Optional
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -128,16 +128,15 @@ class Types(Noiser):
 
         sigma = self.noise_schedule.total_noise(time)
         dsigma = self.noise_schedule.rate_noise(time)
-        dist = self.distribution.get_callable(batch)
 
         if last:
             stag_score = self.staggered_score(score, sigma)
             probs = stag_score * self.transp_transition(types, sigma)
             probs[:, 0] = 0.0  # no adsorb states
-            new_types = dist(probs)
+            new_types = self.distribution.sample(batch, probs=probs)
         else:
             rev_rate = delta_t * dsigma * self.reverse_rate(types, score)
-            new_types = self.sample_rate(dist, types, rev_rate)
+            new_types = self.sample_rate(types, rev_rate, batch)
 
         batch[self.key] = new_types
         return batch
@@ -283,26 +282,27 @@ class Types(Noiser):
 
         return normalized_rate
 
-    def sample_rate(self, callable: "Callable", x: torch.Tensor, rate: torch.Tensor) -> torch.Tensor:
+    def sample_rate(self, x: torch.Tensor, rate: torch.Tensor, batch: AtomsGraph) -> torch.Tensor:
         """Sample the rate
 
         Explain more...
 
         Parameters
         ----------
-        callable: Callable
-            Callable function defining the categorical distribution
         x: torch.Tensor
             The types
         rate: torch.Tensor
             The rate
+        batch: AtomsGraph
+            The batch of atomistic data, forwarded to the distribution.
 
         Returns
         -------
         torch.Tensor
            The sampled rate
         """
-        return callable(F.one_hot(x, num_classes=self.n_classes).to(rate) + rate)
+        probs = F.one_hot(x, num_classes=self.n_classes).to(rate) + rate
+        return self.distribution.sample(batch, probs=probs)
 
     def staggered_score(self, score: torch.Tensor, dsigma: torch.Tensor) -> torch.Tensor:
         """Computes the staggered score

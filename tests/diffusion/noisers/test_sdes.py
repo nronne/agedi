@@ -2,7 +2,6 @@ import torch
 import pytest
 
 from agedi.diffusion.sdes import SDE, VP, VE
-from agedi.diffusion.distributions import Normal
 
 def test_VP_init():
     vp = VP()
@@ -41,8 +40,10 @@ def test_SDE_transition_kernel(batch: "Batch") -> None:
     vp = VP()
     x = torch.randn((10, 3))
     t = torch.rand((10,1))
-    w = Normal().get_callable(batch)
-    assert vp.transition_kernel(x, t, w).shape == x.shape
+    mean = vp.mean(t) * x
+    sigma = torch.sqrt(vp.var(t))
+    result = vp.transition_kernel(x, t, lambda mu, s: torch.normal(mu, s))
+    assert result.shape == x.shape
 
 def test_noise() -> None:
     vp = VP()

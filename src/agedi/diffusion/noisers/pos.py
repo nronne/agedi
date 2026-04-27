@@ -102,8 +102,9 @@ class PositionsNoiser(SDENoiser):
         r = batch[self.key]
         t = batch.time
 
-        w = self.distribution.get_callable(batch)
-        setattr(batch, self.key, self.sde.transition_kernel(r, t, w))
+        mean = self.sde.mean(t) * r
+        sigma = torch.sqrt(self.sde.var(t))
+        setattr(batch, self.key, self.distribution.sample(batch, mu=mean, sigma=sigma))
         batch[self.key + "_noise"] = batch.apply_mask(self.sde.noise(r, batch.pos, t))
 
         return batch
@@ -155,15 +156,12 @@ class PositionsNoiser(SDENoiser):
         drift = self.sde.drift(r, t)
         diffusion = self.sde.diffusion(t)
 
-        w = self.distribution.get_callable(batch)
-
         if last:
             new_pos = r + delta_t * (diffusion**2 * r_score + drift)
         else:
-            new_pos = w(
-                r + delta_t * (diffusion**2 * r_score + drift),  # mean
-                torch.sqrt(delta_t) * diffusion,  # variance
-            )
+            mean = r + delta_t * (diffusion**2 * r_score + drift)
+            sigma = torch.sqrt(delta_t) * diffusion
+            new_pos = self.distribution.sample(batch, mu=mean, sigma=sigma)
         if batch.confinement is not None:
             confinement = batch.confinement[batch.batch]  # (n_atoms, 2)
             mobile = ~batch.mask

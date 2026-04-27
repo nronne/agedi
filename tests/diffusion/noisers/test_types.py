@@ -76,9 +76,19 @@ def test_types_noiser_sample_rate():
     noiser = Types()
     x = torch.tensor([1, 2])
     rate = torch.zeros((2, 100))
-    sampler = lambda probs: probs.argmax(dim=-1)
 
-    sampled = noiser.sample_rate(sampler, x, rate)
+    # Use a minimal batch-like object (only needed for distribution.sample signature)
+    from agedi.data import AtomsGraph
+    from ase.build import molecule
+    atoms = molecule("H2O")
+    atoms.set_cell([10, 10, 10])
+    atoms.set_pbc(True)
+    atoms.center()
+    from torch_geometric.data import Batch
+    g = AtomsGraph.from_atoms(atoms)
+    mini_batch = Batch.from_data_list([g])
+
+    sampled = noiser.sample_rate(x, rate, mini_batch)
 
     assert sampled.shape == x.shape
 
@@ -96,7 +106,6 @@ def test_types_noiser_noise_loss_and_denoise(batch):
     loss = noiser.loss(noised)
     assert torch.isfinite(loss)
 
-    noiser.distribution.get_callable = lambda _: (lambda probs: probs.argmax(dim=-1))
     denoised_last = noiser.denoise(noised, delta_t=0.01, last=True)
     assert denoised_last.x.shape == original_types.shape
 

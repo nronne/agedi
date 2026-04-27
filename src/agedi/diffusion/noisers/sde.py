@@ -143,8 +143,9 @@ class SDENoiser(Noiser, ABC):
         z = batch[self.key]
         t = batch.time
 
-        w = self.distribution.get_callable(batch)
-        batch[self.key] = self.sde.transition_kernel(z, t, w)
+        mean = self.sde.mean(t) * z
+        sigma = torch.sqrt(self.sde.var(t))
+        batch[self.key] = self.distribution.sample(batch, mu=mean, sigma=sigma)
         batch[self.key + "_noise"] = batch.apply_mask(self.sde.noise(z, batch[self.key], t))
 
         return batch
@@ -183,14 +184,12 @@ class SDENoiser(Noiser, ABC):
         drift = self.sde.drift(z, t)
         diffusion = self.sde.diffusion(t)
 
-        w = self.distribution.get_callable(batch)
         if last:
             batch[self.key] = batch[self.key] + delta_t * (diffusion**2 * z_score + drift)
         else:
-            batch[self.key] = w(
-                batch[self.key] + delta_t * (diffusion**2 * z_score + drift),  # mean
-                torch.sqrt(delta_t) * diffusion,  # variance
-            )
+            mean = batch[self.key] + delta_t * (diffusion**2 * z_score + drift)
+            sigma = torch.sqrt(delta_t) * diffusion
+            batch[self.key] = self.distribution.sample(batch, mu=mean, sigma=sigma)
 
         return batch
 

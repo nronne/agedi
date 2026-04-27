@@ -66,8 +66,9 @@ class CellNoiser(SDENoiser):
         f = batch.frac.clone()
         t = batch.time[batch.ptr[:-1]].reshape(-1, 1)
 
-        w = self.distribution.get_callable(batch)
-        noised_cellpar = self.sde.transition_kernel(cellpar, t, w)
+        mean = self.sde.mean(t) * cellpar
+        sigma = torch.sqrt(self.sde.var(t))
+        noised_cellpar = self.distribution.sample(batch, mu=mean, sigma=sigma)
 
 
         a, b, c, alpha, beta, gamma, V = noised_cellpar.unbind(-1)
@@ -116,14 +117,12 @@ class CellNoiser(SDENoiser):
         drift = self.sde.drift(c, t)
         diffusion = self.sde.diffusion(t)
 
-        w = self.distribution.get_callable(batch)
         if last:
             cellpar = c + delta_t * (diffusion**2 * c_score + drift)
         else:
-            cellpar = w(
-                c + delta_t * (diffusion**2 * c_score + drift),  # mean
-                torch.sqrt(delta_t) * diffusion,  # variance
-            )
+            mean = c + delta_t * (diffusion**2 * c_score + drift)
+            sigma = torch.sqrt(delta_t) * diffusion
+            cellpar = self.distribution.sample(batch, mu=mean, sigma=sigma)
 
 
         a, b, c, alpha, beta, gamma, V = cellpar.unbind(-1)

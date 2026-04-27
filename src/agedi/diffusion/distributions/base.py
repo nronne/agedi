@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Callable, Dict, Optional
+from typing import Dict, Optional
 
 import torch
 
@@ -20,7 +20,7 @@ class Distribution(ABC):
 
     """
 
-    def __init__(self, key:Optional[str] = None, **kwargs):
+    def __init__(self, key: Optional[str] = None, **kwargs):
         """Initialize the distribution"""
         self.key = key
 
@@ -40,63 +40,23 @@ class Distribution(ABC):
         return {"_target_": f"{type(self).__module__}.{type(self).__qualname__}"}
 
     @abstractmethod
-    def _sample(self, **kwargs) -> torch.Tensor:
-        """Sample distribution
-
-        Sample from the distribution and return tensor of shape self.key
+    def sample(self, batch: AtomsGraph, **kwargs) -> torch.Tensor:
+        """Sample from the distribution.
 
         Parameters
         ----------
-        kwargs : dict
-            The parameters of the distribution
+        batch : AtomsGraph
+            Batch of atomistic data.
+        **kwargs
+            Distribution-specific parameters (e.g. ``mu``, ``sigma``,
+            ``probs``).
 
         Returns
         -------
         torch.Tensor
-            Sampled tensor
+            Sampled tensor.
         """
         pass
-
-    def _setup(self, batch: AtomsGraph) -> None:
-        """Prepare distribution
-
-        Prepare the distribution for sampling of the batch
-
-        Parameters
-        ----------
-        batch : AtomsGraph
-            Batch of data
-
-        Returns
-        -------
-        None
-
-        """
-        pass
-
-    def get_callable(self, batch: AtomsGraph) -> Callable:
-        """Get callable function
-
-        Return a callable function that samples from the distribution
-
-        Parameters
-        ----------
-        batch : AtomsGraph
-            Batch of data
-
-        Returns
-        -------
-        Callable
-            Callable function that samples from the distribution
-
-        """
-        self._setup(batch)
-
-        def _sampler(*args, **kwargs):
-            """Call the distribution's ``_sample`` method with the provided arguments."""
-            return self._sample(*args, **kwargs)
-
-        return _sampler
 
 
 class PriorDistribution(Distribution):
@@ -112,7 +72,8 @@ class PriorDistribution(Distribution):
     :class:`~agedi.diffusion.distributions.Constant`.
     """
 
-    def sample(self, batch: AtomsGraph) -> torch.Tensor:
+    @abstractmethod
+    def sample(self, batch: AtomsGraph, **kwargs) -> torch.Tensor:
         """Sample the initial state from the prior.
 
         Parameters
@@ -126,8 +87,7 @@ class PriorDistribution(Distribution):
         torch.Tensor
             Initial state tensor, ready to be assigned to a graph attribute.
         """
-        self._setup(batch)
-        return self._sample()
+        pass
 
 
 class NoiseDistribution(Distribution):
@@ -143,4 +103,24 @@ class NoiseDistribution(Distribution):
     :class:`~agedi.diffusion.distributions.WrappedNormal`, and
     :class:`~agedi.diffusion.distributions.Categorical`.
     """
+
+    @abstractmethod
+    def sample(self, batch: AtomsGraph, **kwargs) -> torch.Tensor:
+        """Sample a noised value.
+
+        Parameters
+        ----------
+        batch : AtomsGraph
+            Batch of atomistic data (may be used by subclasses that need
+            geometry-dependent parameters such as confinement bounds).
+        **kwargs
+            Distribution-specific parameters (e.g. ``mu``, ``sigma``,
+            ``probs``).
+
+        Returns
+        -------
+        torch.Tensor
+            Sampled tensor.
+        """
+        pass
 
