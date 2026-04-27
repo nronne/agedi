@@ -1,10 +1,10 @@
 import torch
 from typing import Dict, Optional
-from agedi.diffusion.distributions import Distribution, Prior
+from agedi.diffusion.distributions import Distribution, PriorDistribution
 from agedi.data import AtomsGraph
 
 
-class Uniform(Prior):
+class Uniform(PriorDistribution):
     """Uniform Distribution
 
     Parameters

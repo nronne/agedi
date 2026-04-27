@@ -8,8 +8,8 @@ from agedi.diffusion.noisers.sde import SDENoiser
 from agedi.diffusion.sdes import SDE, VE
 from agedi.diffusion.distributions import (
     Distribution,
-    NoiseSampler,
-    Prior,
+    NoiseDistribution,
+    PriorDistribution,
     Normal,
     TruncatedNormal,
     StandardNormal,
@@ -28,9 +28,9 @@ class PositionsNoiser(SDENoiser):
         The class of the SDE to be used for the noising.
     sde_kwargs : Dict
         The keyword arguments to be passed to the SDE class.
-    distribution : NoiseSampler
+    distribution : NoiseDistribution
         The noise sampler to be used for the noise.
-    prior : Prior
+    prior : PriorDistribution
         The prior distribution to be used for the noise.
     sde : SDE, optional
         An already-instantiated SDE object.  When provided, *sde_class* and
@@ -54,8 +54,8 @@ class PositionsNoiser(SDENoiser):
         self,
         sde_class: SDE = VE,
         sde_kwargs: Optional[Dict] = None,
-        distribution: NoiseSampler = Normal(),
-        prior: Prior = UniformCell(),
+        distribution: NoiseDistribution = Normal(),
+        prior: PriorDistribution = UniformCell(),
         sde: Optional[SDE] = None,
         **kwargs
     ) -> None:
@@ -69,10 +69,10 @@ class PositionsNoiser(SDENoiser):
         sde_kwargs : dict, optional
             Keyword arguments forwarded to *sde_class*.
             Ignored when *sde* is provided.
-        distribution : NoiseSampler, optional
+        distribution : NoiseDistribution, optional
             Noise sampler used during noising and denoising.
             Defaults to :class:`~agedi.diffusion.distributions.Normal`.
-        prior : Prior, optional
+        prior : PriorDistribution, optional
             Prior distribution used to sample starting positions.
             Defaults to :class:`~agedi.diffusion.distributions.UniformCell`.
         sde : SDE, optional
@@ -280,9 +280,9 @@ class Positions(PositionsNoiser):
     sde : SDE, optional
         Pre-instantiated SDE object.  When provided *sde_class* and
         *sde_kwargs* are ignored.
-    distribution : NoiseSampler, optional
+    distribution : NoiseDistribution, optional
         Noise sampler.  Subclasses may supply a different default.
-    prior : Prior, optional
+    prior : PriorDistribution, optional
         Prior distribution.  Subclasses may supply a different default.
     **kwargs
         Additional keyword arguments forwarded to
@@ -294,8 +294,8 @@ class Positions(PositionsNoiser):
         sde_class: SDE = VE,
         sde_kwargs: Optional[Dict] = None,
         sde: Optional[SDE] = None,
-        distribution: NoiseSampler = Normal(),
-        prior: Prior = StandardNormal(),
+        distribution: NoiseDistribution = Normal(),
+        prior: PriorDistribution = StandardNormal(),
         **kwargs,
     ) -> None:
         super().__init__(

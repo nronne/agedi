@@ -44,9 +44,9 @@ class Types(Noiser):
 
         Parameters
         ----------
-        prior : Prior, optional
+        prior : PriorDistribution, optional
             Prior distribution for atomic types (defaults to absorbing state 0).
-        distribution : NoiseSampler, optional
+        distribution : NoiseDistribution, optional
             Categorical sampler used for sampling during denoising.
         noise_schedule : DiscreteExponential, optional
             Noise schedule controlling the forward corruption rate.

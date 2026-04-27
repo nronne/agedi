@@ -6,7 +6,7 @@ from agedi.data import AtomsGraph
 from agedi.diffusion.noisers import Noiser
 
 from agedi.diffusion.sdes import SDE
-from agedi.diffusion.distributions import Distribution, NoiseSampler, Prior
+from agedi.diffusion.distributions import Distribution, NoiseDistribution, PriorDistribution
 
 
 class SDENoiser(Noiser, ABC):
@@ -28,9 +28,9 @@ class SDENoiser(Noiser, ABC):
         The class of the SDE to be used for the noising.
     sde_kwargs : Dict
         The keyword arguments to be passed to the SDE class.
-    distribution : NoiseSampler
+    distribution : NoiseDistribution
         The noise sampler to be used for the noise.
-    prior : Prior
+    prior : PriorDistribution
         The prior distribution to be used for the noise.
     sde : SDE, optional
         An already-instantiated SDE object.  When provided, *sde_class* and
@@ -53,8 +53,8 @@ class SDENoiser(Noiser, ABC):
         self,
         sde_class: SDE,
         sde_kwargs: Optional[Dict],
-        distribution: NoiseSampler,
-        prior: Prior,
+        distribution: NoiseDistribution,
+        prior: PriorDistribution,
         sde: Optional[SDE] = None,
         **kwargs
     ) -> None:
@@ -66,9 +66,9 @@ class SDENoiser(Noiser, ABC):
             Class of the SDE to use for noising.  Ignored when *sde* is provided.
         sde_kwargs : dict, optional
             Keyword arguments forwarded to *sde_class*.  Ignored when *sde* is provided.
-        distribution : NoiseSampler
+        distribution : NoiseDistribution
             Noise sampler used during noising and denoising.
-        prior : Prior
+        prior : PriorDistribution
             Prior distribution used to sample starting values.
         sde : SDE, optional
             Pre-instantiated SDE object.  When provided, *sde_class* and

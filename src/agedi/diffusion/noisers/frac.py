@@ -5,7 +5,7 @@ from typing import Dict, Optional
 from agedi.data import AtomsGraph
 from agedi.diffusion.noisers.sde import SDENoiser
 from agedi.diffusion.sdes import SDE, VE
-from agedi.diffusion.distributions import NoiseSampler, Prior, StandardNormal, UniformCell
+from agedi.diffusion.distributions import NoiseDistribution, PriorDistribution, StandardNormal, UniformCell
 from agedi.diffusion.distributions.normal import WrappedNormal
 from agedi.diffusion.sdes.noise_schedules import Exponential
 from agedi.utils import OFFSET_LIST
@@ -20,9 +20,9 @@ class Fractional(SDENoiser):
         The class of the SDE to be used for the noising.
     sde_kwargs : Dict
         The keyword arguments to be passed to the SDE class.
-    distribution : NoiseSampler
+    distribution : NoiseDistribution
         The noise sampler to be used for the noise.
-    prior : Prior
+    prior : PriorDistribution
         The prior distribution to be used for the noise.
     key : str
         The key to be used for the noising.
@@ -42,8 +42,8 @@ class Fractional(SDENoiser):
         self,
         sde_class: SDE = VE,
         sde_kwargs: Optional[Dict] = {"noise_schedule": Exponential},
-        distribution: NoiseSampler = WrappedNormal(),
-        prior: Prior = UniformCell(),
+        distribution: NoiseDistribution = WrappedNormal(),
+        prior: PriorDistribution = UniformCell(),
         sde: Optional[SDE] = None,
         **kwargs
     ) -> None:
@@ -55,10 +55,10 @@ class Fractional(SDENoiser):
             Class of the SDE to use.  Defaults to :class:`~agedi.diffusion.sdes.VE`.
         sde_kwargs : dict, optional
             Keyword arguments forwarded to *sde_class*.
-        distribution : NoiseSampler, optional
+        distribution : NoiseDistribution, optional
             Noise sampler used during noising and denoising.
             Defaults to :class:`~agedi.diffusion.distributions.normal.WrappedNormal`.
-        prior : Prior, optional
+        prior : PriorDistribution, optional
             Prior distribution used to sample starting positions.
             Defaults to :class:`~agedi.diffusion.distributions.UniformCell`.
         sde : SDE, optional

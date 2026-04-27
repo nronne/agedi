@@ -99,10 +99,10 @@ class Distribution(ABC):
         return _sampler
 
 
-class Prior(Distribution):
+class PriorDistribution(Distribution):
     """Abstract base class for prior distributions.
 
-    A ``Prior`` is used to initialise the noised state at the start of the
+    A ``PriorDistribution`` is used to initialise the noised state at the start of the
     reverse (generative) trajectory.  It knows only about the :class:`~agedi.data.AtomsGraph`
     batch and returns a complete tensor that is assigned to a graph attribute.
 
@@ -130,12 +130,12 @@ class Prior(Distribution):
         return self._sample()
 
 
-class NoiseSampler(Distribution):
-    """Abstract base class for noise (step) samplers.
+class NoiseDistribution(Distribution):
+    """Abstract base class for noise (step) distributions.
 
-    A ``NoiseSampler`` is used during the forward and reverse diffusion steps.
+    A ``NoiseDistribution`` is used during the forward and reverse diffusion steps.
     Given a current state ``mu`` and a scale ``sigma``, it returns a perturbed
-    sample.  Unlike :class:`Prior`, it does not need to know about graph
+    sample.  Unlike :class:`PriorDistribution`, it does not need to know about graph
     geometry, only the current diffusion step parameters.
 
     Concrete subclasses include :class:`~agedi.diffusion.distributions.Normal`,

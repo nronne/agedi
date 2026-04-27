@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import ClassVar, Dict, Optional, Union
 
-from agedi.diffusion.distributions import Distribution, Prior, NoiseSampler
+from agedi.diffusion.distributions import Distribution, PriorDistribution, NoiseDistribution
 from agedi.data import AtomsGraph
 
 import torch
@@ -14,14 +14,14 @@ class Noiser(ABC, torch.nn.Module):
 
     Parameters
     ----------
-    distribution: NoiseSampler
+    distribution: NoiseDistribution
         The noise sampler used during the forward and reverse diffusion steps.
-        Accepts any :class:`~agedi.diffusion.distributions.NoiseSampler` (or,
+        Accepts any :class:`~agedi.diffusion.distributions.NoiseDistribution` (or,
         for backward compatibility, a plain :class:`~agedi.diffusion.distributions.Distribution`).
-    prior: Prior
+    prior: PriorDistribution
         The prior distribution used to initialise the noised state at the
         start of the reverse trajectory.
-        Accepts any :class:`~agedi.diffusion.distributions.Prior` (or, for
+        Accepts any :class:`~agedi.diffusion.distributions.PriorDistribution` (or, for
         backward compatibility, a plain :class:`~agedi.diffusion.distributions.Distribution`).
     loss_scaling: float
         Scaling factor applied to this noiser's loss contribution.
@@ -41,8 +41,8 @@ class Noiser(ABC, torch.nn.Module):
 
     def __init__(
         self,
-        distribution: Union[NoiseSampler, Distribution],
-        prior: Union[Prior, Distribution],
+        distribution: Union[NoiseDistribution, Distribution],
+        prior: Union[PriorDistribution, Distribution],
         loss_scaling: float = 1.0,
         key: Optional[str] = None,
         **kwargs
@@ -182,8 +182,8 @@ class Noiser(ABC, torch.nn.Module):
 
         Can be overwritten by subclasses for specific initializations.
 
-        Uses :meth:`~agedi.diffusion.distributions.Prior.sample` when the
-        prior is a :class:`~agedi.diffusion.distributions.Prior`, falling back
+        Uses :meth:`~agedi.diffusion.distributions.PriorDistribution.sample` when the
+        prior is a :class:`~agedi.diffusion.distributions.PriorDistribution`, falling back
         to the legacy ``get_callable`` interface for backward compatibility.
 
         Parameters
@@ -192,7 +192,7 @@ class Noiser(ABC, torch.nn.Module):
             The atomistic structure (or batch thereof) to be initialised.
 
         """
-        if isinstance(self.prior, Prior):
+        if isinstance(self.prior, PriorDistribution):
             value = self.prior.sample(batch)
         else:
             value = self.prior.get_callable(batch)()

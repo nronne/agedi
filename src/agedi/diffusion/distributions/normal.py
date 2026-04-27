@@ -1,13 +1,13 @@
 import torch
 from typing import Dict, Optional
-from agedi.diffusion.distributions import Distribution, Prior, NoiseSampler
+from agedi.diffusion.distributions import Distribution, PriorDistribution, NoiseDistribution
 from agedi.data import AtomsGraph
 from agedi.utils import TruncatedNormal as TN
 
 _CONFINEMENT_CLAMP_EPS = 1e-4
 
 
-class StandardNormal(Prior):
+class StandardNormal(PriorDistribution):
     """Standard Normal Distribution"""
 
     def _setup(self, batch: AtomsGraph) -> None:
@@ -45,7 +45,7 @@ class StandardNormal(Prior):
         return torch.normal(0.0, std, size=shape)
 
 
-class Normal(NoiseSampler):
+class Normal(NoiseDistribution):
     """Normal Distribution"""
 
     def _sample(self, mu: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
@@ -66,7 +66,7 @@ class Normal(NoiseSampler):
         return torch.normal(mu, sigma)
 
 
-class TruncatedNormal(NoiseSampler):
+class TruncatedNormal(NoiseDistribution):
     """Truncated Normal Distribution
 
     Parameters
@@ -151,7 +151,7 @@ class TruncatedNormal(NoiseSampler):
         return torch.stack(x, dim=1)
 
 
-class WrappedNormal(NoiseSampler):
+class WrappedNormal(NoiseDistribution):
     """Wrapped Normal Distribution"""
 
     def __init__(self, N: int = 10, T: float = 1.0, **kwargs) -> None:

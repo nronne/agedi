@@ -5,7 +5,7 @@ from typing import Dict
 from agedi.data import AtomsGraph
 from agedi.diffusion.noisers.sde import SDENoiser
 from agedi.diffusion.sdes import SDE, VP, VE
-from agedi.diffusion.distributions import NoiseSampler, Prior, Normal, StandardNormal
+from agedi.diffusion.distributions import NoiseDistribution, PriorDistribution, Normal, StandardNormal
 
 
 class CellNoiser(SDENoiser):
@@ -17,9 +17,9 @@ class CellNoiser(SDENoiser):
         The class of the SDE to be used for the noising.
     sde_kwargs : Dict
         The keyword arguments to be passed to the SDE class.
-    distribution : NoiseSampler
+    distribution : NoiseDistribution
         The noise sampler to be used for the noise.
-    prior : Prior
+    prior : PriorDistribution
         The prior distribution to be used for the noise.
     key : str
         The key to be used for the noising.
@@ -39,8 +39,8 @@ class CellNoiser(SDENoiser):
         self,
         sde_class: SDE = VE,
         sde_kwargs: Dict = {"sigma_max": 0.1},
-        distribution: NoiseSampler = Normal(),
-        prior: Prior = Normal(),
+        distribution: NoiseDistribution = Normal(),
+        prior: PriorDistribution = Normal(),
         **kwargs
     ) -> None:
         super().__init__(sde_class, sde_kwargs, distribution, prior, **kwargs)

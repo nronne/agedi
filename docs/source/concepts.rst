@@ -39,18 +39,18 @@ Each abstraction inside ``agedi.diffusion`` has a single responsibility:
    * - :class:`~agedi.diffusion.sdes.SDE`
      - Encodes *what kind* of noise process is used: drift, diffusion,
        mean, variance, and transition kernel (VE, VP).
-   * - :class:`~agedi.diffusion.distributions.NoiseSampler`
+   * - :class:`~agedi.diffusion.distributions.NoiseDistribution`
      - Controls *how each forward/reverse step is drawn*: samples the next
        state given a location ``mu`` and scale ``sigma``.
        Concrete classes: ``Normal``, ``TruncatedNormal``, ``WrappedNormal``,
        ``Categorical``.
-   * - :class:`~agedi.diffusion.distributions.Prior`
+   * - :class:`~agedi.diffusion.distributions.PriorDistribution`
      - Controls *where sampling starts*: samples an initial state from the
        prior at the beginning of the reverse (generative) trajectory.
        Concrete classes: ``UniformCell``, ``UniformCellConfined``,
        ``StandardNormal``, ``Constant``.
    * - :class:`~agedi.diffusion.noisers.Noiser`
-     - Composes a key, SDE, NoiseSampler, and Prior; implements
+     - Composes a key, SDE, NoiseDistribution, and PriorDistribution; implements
        ``noise`` / ``denoise`` / ``loss``.
 
 Position noisers
@@ -64,8 +64,8 @@ sampler baked in.  Choose based on the physics of your system:
    :widths: 35 25 25 25
 
    * - Class / identifier
-     - Prior
-     - NoiseSampler
+     - PriorDistribution
+     - NoiseDistribution
      - Use case
    * - :class:`~agedi.diffusion.noisers.Positions` / ``"Positions"``
      - :class:`~agedi.diffusion.distributions.StandardNormal`
@@ -80,8 +80,8 @@ sampler baked in.  Choose based on the physics of your system:
      - :class:`~agedi.diffusion.distributions.TruncatedNormal`
      - Surface overlayer/adsorbate
 
-The **prior** samples the initial atomic positions at the start of the
-reverse (generative) process.  The **noise sampler** draws each step
+The **prior distribution** samples the initial atomic positions at the start of the
+reverse (generative) process.  The **noise distribution** draws each step
 during the forward (training) and reverse (sampling) processes.  The SDE
 can still be chosen freely on all three classes (default:
 Variance-Exploding, ``"ve"``).

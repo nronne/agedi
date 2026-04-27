@@ -15,9 +15,9 @@ the model architecture, the diffusion process, and the training loop.
 Position noisers at a glance
 -----------------------------
 
-Each position noiser bundles a fixed :class:`~agedi.diffusion.distributions.Prior`
+Each position noiser bundles a fixed :class:`~agedi.diffusion.distributions.PriorDistribution`
 (used to sample starting positions at inference) and a fixed
-:class:`~agedi.diffusion.distributions.NoiseSampler` (used to draw each
+:class:`~agedi.diffusion.distributions.NoiseDistribution` (used to draw each
 diffusion step during training and sampling).  The SDE can still be swapped
 freely on all classes.
 
@@ -28,8 +28,8 @@ Choose the position noiser that fits your system:
    :widths: 35 25 25 25
 
    * - Class
-     - Prior
-     - NoiseSampler
+     - PriorDistribution
+     - NoiseDistribution
      - Use case
    * - :class:`~agedi.diffusion.noisers.Positions`
      - StandardNormal

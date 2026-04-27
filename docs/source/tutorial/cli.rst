@@ -35,8 +35,8 @@ Choose one of the three position noisers to match your system type:
    :widths: 30 25 25 20
 
    * - Noiser
-     - Prior
-     - NoiseSampler
+     - PriorDistribution
+     - NoiseDistribution
      - Use case
    * - ``Positions``
      - StandardNormal

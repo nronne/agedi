@@ -3,30 +3,30 @@ import torch
 
 from agedi.diffusion.distributions import (
     StandardNormal, Normal, TruncatedNormal, Uniform, UniformCell,
-    Prior, NoiseSampler, UniformCellConfined, Constant,
+    PriorDistribution, NoiseDistribution, UniformCellConfined, Constant,
 )
 from agedi.diffusion.distributions.categorical import Categorical
 from agedi.diffusion.distributions.normal import WrappedNormal
 
 
 # ---------------------------------------------------------------------------
-# Prior / NoiseSampler type hierarchy
+# PriorDistribution / NoiseDistribution type hierarchy
 # ---------------------------------------------------------------------------
 
 def test_prior_subclasses():
-    """Verify that the expected classes are instances of Prior."""
+    """Verify that the expected classes are instances of PriorDistribution."""
     for cls in (StandardNormal, UniformCell, UniformCellConfined, Constant):
-        assert issubclass(cls, Prior), f"{cls.__name__} should be a Prior"
+        assert issubclass(cls, PriorDistribution), f"{cls.__name__} should be a PriorDistribution"
 
 
 def test_noise_sampler_subclasses():
-    """Verify that the expected classes are instances of NoiseSampler."""
+    """Verify that the expected classes are instances of NoiseDistribution."""
     for cls in (Normal, TruncatedNormal, WrappedNormal, Categorical):
-        assert issubclass(cls, NoiseSampler), f"{cls.__name__} should be a NoiseSampler"
+        assert issubclass(cls, NoiseDistribution), f"{cls.__name__} should be a NoiseDistribution"
 
 
 def test_prior_sample_interface(batch):
-    """Prior.sample(batch) should return a tensor of the right shape."""
+    """PriorDistribution.sample(batch) should return a tensor of the right shape."""
     d = UniformCell()
     result = d.sample(batch)
     assert result.shape == batch.pos.shape
