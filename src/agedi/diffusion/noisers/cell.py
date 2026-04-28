@@ -1,3 +1,4 @@
+import math
 import torch
 
 from typing import Optional
@@ -110,8 +111,8 @@ class CellNoiser(SDENoiser):
                 f"{type(self.distribution).__name__}.last_noise() returned None after sample(). "
                 "Distributions used with CellNoiser must cache unit-scale noise in last_noise()."
             )
-        normalised_noise = (noise / sigma) * tril_mask
-        batch.add_batch_attr(self.key + "_noise", normalised_noise, type="graph")
+        normalized_noise = (noise / sigma) * tril_mask
+        batch.add_batch_attr(self.key + "_noise", normalized_noise, type="graph")
 
         return batch
 
@@ -154,7 +155,7 @@ class CellNoiser(SDENoiser):
             new_cell = cell + delta_t * (diffusion**2 * c_score + drift)
         else:
             mean = cell + delta_t * (diffusion**2 * c_score + drift)
-            sigma = torch.sqrt(torch.tensor(delta_t, device=cell.device, dtype=cell.dtype)) * diffusion
+            sigma = math.sqrt(delta_t) * diffusion
             new_cell = self.distribution.sample(batch, mu=mean, sigma=sigma)
 
         new_cell = new_cell * tril_mask

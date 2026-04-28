@@ -4,6 +4,7 @@ import schnetpack.nn as snn
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch_scatter import scatter
 
 import math
 
@@ -315,8 +316,6 @@ class CellScore(Head):
             entries set to zero.
 
         """
-        from torch_scatter import scatter
-
         scalar_representation = batch["scalar_representation"]
         idx_m = batch["_idx_m"]
         n_graphs = int(idx_m.max().item()) + 1
