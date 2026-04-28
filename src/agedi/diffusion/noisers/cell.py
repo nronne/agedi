@@ -78,7 +78,13 @@ class CellNoiser(SDENoiser):
         
         setattr(batch, self.key, noised_cellpar)
         batch.frac = f
-        batch.add_batch_attr(self.key + "_noise", self.distribution.last_noise() / sigma, type="graph")
+        noise = self.distribution.last_noise()
+        if noise is None:
+            raise RuntimeError(
+                f"{type(self.distribution).__name__}.last_noise() returned None after sample(). "
+                "Distributions used with CellNoiser must cache unit-scale noise in last_noise()."
+            )
+        batch.add_batch_attr(self.key + "_noise", noise / sigma, type="graph")
 
         return batch
 

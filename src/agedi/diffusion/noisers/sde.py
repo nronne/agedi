@@ -129,7 +129,13 @@ class SDENoiser(Noiser, ABC):
         mean = self.sde.mean(t) * z
         sigma = torch.sqrt(self.sde.var(t))
         batch[self.key] = self.distribution.sample(batch, mu=mean, sigma=sigma)
-        batch[self.key + "_noise"] = batch.apply_mask(self.distribution.last_noise() / sigma)
+        noise = self.distribution.last_noise()
+        if noise is None:
+            raise RuntimeError(
+                f"{type(self.distribution).__name__}.last_noise() returned None after sample(). "
+                "Distributions used with SDENoiser must cache unit-scale noise in last_noise()."
+            )
+        batch[self.key + "_noise"] = batch.apply_mask(noise / sigma)
 
         return batch
 

@@ -62,7 +62,7 @@ def test_truncated_normal(batch: "Batch") -> None:
     assert (x_t[:,2] > min_val).all()
 
 
-def test_wrapped_normal_last_noise(batch) -> None:
+def test_wrapped_normal_last_noise(batch: "Batch") -> None:
     """WrappedNormal.last_noise() should return the cached epsilon from sample()."""
     d = WrappedNormal()
     mu = batch.pos
