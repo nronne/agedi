@@ -33,10 +33,10 @@ class Normal(NoiseDistribution):
     """Normal Distribution"""
 
     def sample(self, batch: AtomsGraph, sigma: torch.Tensor, mu: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
-        """Sample noise from the normal distribution.
+        """Sample from the normal distribution and return the full noised value.
 
-        Returns the noise contribution ``w = σ · ε`` where ``ε ~ N(0, I)``.
-        The caller is responsible for constructing ``x_t = mean + w``.
+        Draws unit-scale noise ``ε ~ N(0, I)``, caches it, and returns
+        ``mu + σ · ε``.
 
         Parameters
         ----------
@@ -45,17 +45,20 @@ class Normal(NoiseDistribution):
         sigma : torch.Tensor
             Standard deviation of the distribution.
         mu : torch.Tensor, optional
-            Not used for the mean; passed only as a shape reference when
+            Mean of the distribution.  Also used as a shape reference when
             *sigma* broadcasts (e.g. shape ``(N, 1)`` while the target has
-            shape ``(N, D)``).
+            shape ``(N, D)``).  When ``None``, the mean is treated as zero.
 
         Returns
         -------
         torch.Tensor
-            Noise tensor ``σ · ε``.
+            Noised sample ``mu + σ · ε``.
         """
         ref = mu if mu is not None else sigma
-        return sigma * torch.randn_like(ref)
+        epsilon = torch.randn_like(ref)
+        self._last_noise = epsilon
+        mean = mu if mu is not None else torch.zeros_like(sigma)
+        return mean + sigma * epsilon
 
 
 class TruncatedNormal(NoiseDistribution):
@@ -77,12 +80,14 @@ class TruncatedNormal(NoiseDistribution):
         """Return hyperparameters for this distribution."""
         return {**super().get_hparams(), "index": self.index}
 
-    def sample(self, batch: AtomsGraph, mu: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
-        """Sample noise from the truncated normal distribution.
+    def sample(self, batch: AtomsGraph, sigma: torch.Tensor, mu: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+        """Sample from the truncated normal distribution and return the full noised value.
 
-        Returns the noise contribution ``w = x_sampled − mu`` where
-        ``x_sampled`` is drawn from a truncated normal within the confinement
-        bounds.  The caller is responsible for constructing ``x_t = mu + w``.
+        For the confined axis (``self.index``) draws from a truncated normal
+        within the confinement bounds and returns ``x_sampled`` directly.  For
+        all other axes draws ``ε ~ N(0, I)`` and returns ``mu + σ · ε``.
+        The unit-scale noise ``w`` (i.e. ``(x_t - mu) / sigma``) is cached
+        and can be retrieved via :meth:`last_noise`.
 
         Parameters
         ----------
@@ -90,19 +95,21 @@ class TruncatedNormal(NoiseDistribution):
             Batch of atomistic data.  ``batch.confinement`` and ``batch.mask``
             are read directly.
         mu : torch.Tensor
-            Mean of the distribution; used for truncation-bound clamping.
+            Mean of the distribution; used for truncation-bound clamping and
+            as the base for non-confined axes.
         sigma : torch.Tensor
             Standard deviation of the distribution.
 
         Returns
         -------
         torch.Tensor
-            Noise tensor ``x_sampled − mu``.
+            Noised sample ``x_t``.
         """
         batch_idx = batch.batch if batch.batch is not None else torch.zeros(mu.shape[0], dtype=torch.long, device=mu.device)
         confinement = batch.confinement[batch_idx]
         mask = batch.mask if batch.mask is not None else torch.zeros(mu.shape[0], dtype=torch.bool, device=mu.device)
         x = []
+        noise = []
         for i in range(mu.shape[1]):
             if i == self.index:
                 if mu[:, i].isnan().any():
@@ -125,12 +132,18 @@ class TruncatedNormal(NoiseDistribution):
                     z_hi,
                 ).sample()
 
-                xi = torch.zeros_like(mu[:, i])
-                xi[~mask] = sampled - mu[:, i][~mask]
+                xi = mu[:, i].clone()
+                xi[~mask] = sampled
                 x.append(xi)
+
+                ni = torch.zeros_like(mu[:, i])
+                ni[~mask] = (sampled - mu[:, i][~mask]) / sigma[:, 0][~mask]
+                noise.append(ni)
             else:
-                noise_i = sigma[:, 0] * torch.randn_like(mu[:, i])
-                x.append(noise_i)
+                epsilon_i = torch.randn_like(mu[:, i])
+                x.append(mu[:, i] + sigma[:, 0] * epsilon_i)
+                noise.append(epsilon_i)
+        self._last_noise = torch.stack(noise, dim=1)
         return torch.stack(x, dim=1)
 
 
@@ -144,11 +157,11 @@ class WrappedNormal(NoiseDistribution):
         self.T = T
 
     def sample(self, batch: AtomsGraph, sigma: torch.Tensor, mu: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
-        """Sample noise from the wrapped normal distribution.
+        """Sample from the wrapped normal distribution and return the full noised value.
 
-        Returns the noise contribution ``w = σ · ε`` where ``ε ~ N(0, I)``.
-        The caller is responsible for constructing ``x_t = mean + w`` and
-        applying any periodic wrapping.
+        Draws unit-scale noise ``ε ~ N(0, I)``, caches it, and returns
+        ``mu + σ · ε``.  The caller is responsible for applying any periodic
+        wrapping to the returned value.
 
         Parameters
         ----------
@@ -157,16 +170,19 @@ class WrappedNormal(NoiseDistribution):
         sigma : torch.Tensor
             Standard deviation of the distribution.
         mu : torch.Tensor, optional
-            Not used for the mean; passed only as a shape reference when
-            *sigma* broadcasts.
+            Mean of the distribution.  Also used as a shape reference when
+            *sigma* broadcasts.  When ``None``, the mean is treated as zero.
 
         Returns
         -------
         torch.Tensor
-            Noise tensor ``σ · ε``.
+            Noised sample ``mu + σ · ε``.
         """
         ref = mu if mu is not None else sigma
-        return sigma * torch.randn_like(ref)
+        epsilon = torch.randn_like(ref)
+        self._last_noise = epsilon
+        mean = mu if mu is not None else torch.zeros_like(sigma)
+        return mean + sigma * epsilon
 
     def p(self, x: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
         """Calculate the probability density function of the wrapped normal distribution

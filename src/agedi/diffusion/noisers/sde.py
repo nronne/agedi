@@ -128,9 +128,8 @@ class SDENoiser(Noiser, ABC):
 
         mean = self.sde.mean(t) * z
         sigma = torch.sqrt(self.sde.var(t))
-        w = self.distribution.sample(batch, mu=mean, sigma=sigma)
-        batch[self.key] = mean + w
-        batch[self.key + "_noise"] = batch.apply_mask(w / sigma)
+        batch[self.key] = self.distribution.sample(batch, mu=mean, sigma=sigma)
+        batch[self.key + "_noise"] = batch.apply_mask(self.distribution.last_noise() / sigma)
 
         return batch
 
@@ -173,8 +172,7 @@ class SDENoiser(Noiser, ABC):
         else:
             mean = batch[self.key] + delta_t * (diffusion**2 * z_score + drift)
             sigma = torch.sqrt(delta_t) * diffusion
-            w = self.distribution.sample(batch, mu=mean, sigma=sigma)
-            batch[self.key] = mean + w
+            batch[self.key] = self.distribution.sample(batch, mu=mean, sigma=sigma)
 
         return batch
 

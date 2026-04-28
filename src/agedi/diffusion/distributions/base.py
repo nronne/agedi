@@ -23,6 +23,7 @@ class Distribution(ABC):
     def __init__(self, key: Optional[str] = None, **kwargs):
         """Initialize the distribution"""
         self.key = key
+        self._last_noise: Optional[torch.Tensor] = None
 
     def get_hparams(self) -> Dict:
         """Return hyperparameters sufficient to reconstruct this distribution.
@@ -94,9 +95,10 @@ class NoiseDistribution(Distribution):
     """Abstract base class for noise (step) distributions.
 
     A ``NoiseDistribution`` is used during the forward and reverse diffusion steps.
-    Given a scale ``sigma``, it returns the *noise contribution* ``w`` such that
-    ``x_t = mean + w``.  The caller (typically :class:`~agedi.diffusion.noisers.sde.SDENoiser`)
-    is responsible for computing the mean and adding the returned noise.
+    Given a mean ``mu`` and scale ``sigma``, :meth:`sample` returns the full noised
+    sample ``x_t = mu + sigma * w`` where ``w`` is a unit-scale noise draw.
+    The raw noise ``w`` is cached after each :meth:`sample` call and can be
+    retrieved via :meth:`last_noise`.
 
     Concrete subclasses include :class:`~agedi.diffusion.distributions.Normal`,
     :class:`~agedi.diffusion.distributions.TruncatedNormal`,
@@ -106,7 +108,11 @@ class NoiseDistribution(Distribution):
 
     @abstractmethod
     def sample(self, batch: AtomsGraph, **kwargs) -> torch.Tensor:
-        """Sample the noise contribution ``w``.
+        """Sample the noised value ``x_t = mu + sigma * w``.
+
+        Implementations must cache the unit-scale noise ``w`` so that
+        :meth:`last_noise` returns the ``w`` corresponding to the most recent
+        :meth:`sample` call.
 
         Parameters
         ----------
@@ -114,13 +120,29 @@ class NoiseDistribution(Distribution):
             Batch of atomistic data (may be used by subclasses that need
             geometry-dependent parameters such as confinement bounds).
         **kwargs
-            Distribution-specific parameters (e.g. ``sigma``, ``mu`` as a
-            shape reference for broadcasting, ``probs``).
+            Distribution-specific parameters (e.g. ``mu``, ``sigma``,
+            ``probs``).
 
         Returns
         -------
         torch.Tensor
-            Noise tensor ``w`` such that ``x_t = mean + w``.
+            Full noised sample ``x_t = mu + sigma * w``.
         """
         pass
+
+    def last_noise(self) -> Optional[torch.Tensor]:
+        """Return the unit-scale noise ``w`` from the most recent :meth:`sample` call.
+
+        The returned tensor satisfies ``x_t = mu + sigma * w`` where ``x_t``
+        was the value returned by the preceding :meth:`sample` call.  Returns
+        ``None`` if :meth:`sample` has not been called yet, or if the
+        distribution does not produce a separable noise term (e.g.
+        :class:`~agedi.diffusion.distributions.Categorical`).
+
+        Returns
+        -------
+        torch.Tensor or None
+            Cached unit-scale noise ``w``, or ``None``.
+        """
+        return self._last_noise
 
