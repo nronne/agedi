@@ -69,8 +69,7 @@ class CellNoiser(SDENoiser):
 
         mean = self.sde.mean(t) * cellpar
         sigma = torch.sqrt(self.sde.var(t))
-        w = self.distribution.sample(batch, mu=mean, sigma=sigma)
-        noised_cellpar = mean + w
+        noised_cellpar = self.distribution.sample(batch, mu=mean, sigma=sigma)
 
 
         a, b, c, alpha, beta, gamma, V = noised_cellpar.unbind(-1)
@@ -79,7 +78,13 @@ class CellNoiser(SDENoiser):
         
         setattr(batch, self.key, noised_cellpar)
         batch.frac = f
-        batch.add_batch_attr(self.key + "_noise", w / sigma, type="graph")
+        noise = self.distribution.last_noise()
+        if noise is None:
+            raise RuntimeError(
+                f"{type(self.distribution).__name__}.last_noise() returned None after sample(). "
+                "Distributions used with CellNoiser must cache unit-scale noise in last_noise()."
+            )
+        batch.add_batch_attr(self.key + "_noise", noise / sigma, type="graph")
 
         return batch
 
@@ -124,8 +129,7 @@ class CellNoiser(SDENoiser):
         else:
             mean = c + delta_t * (diffusion**2 * c_score + drift)
             sigma = torch.sqrt(delta_t) * diffusion
-            w = self.distribution.sample(batch, mu=mean, sigma=sigma)
-            cellpar = mean + w
+            cellpar = self.distribution.sample(batch, mu=mean, sigma=sigma)
 
 
         a, b, c, alpha, beta, gamma, V = cellpar.unbind(-1)

@@ -91,9 +91,14 @@ class PositionsNoiser(SDENoiser):
 
         mean = self.sde.mean(t) * r
         sigma = torch.sqrt(self.sde.var(t))
-        w = self.distribution.sample(batch, mu=mean, sigma=sigma)
-        setattr(batch, self.key, mean + w)
-        batch[self.key + "_noise"] = batch.apply_mask(w / sigma)
+        setattr(batch, self.key, self.distribution.sample(batch, mu=mean, sigma=sigma))
+        noise = self.distribution.last_noise()
+        if noise is None:
+            raise RuntimeError(
+                f"{type(self.distribution).__name__}.last_noise() returned None after sample(). "
+                "Distributions used with PositionsNoiser must cache unit-scale noise in last_noise()."
+            )
+        batch[self.key + "_noise"] = batch.apply_mask(noise / sigma)
 
         return batch
 
@@ -149,8 +154,7 @@ class PositionsNoiser(SDENoiser):
         else:
             mean = r + delta_t * (diffusion**2 * r_score + drift)
             sigma = torch.sqrt(delta_t) * diffusion
-            w = self.distribution.sample(batch, mu=mean, sigma=sigma)
-            new_pos = mean + w
+            new_pos = self.distribution.sample(batch, mu=mean, sigma=sigma)
         if batch.confinement is not None:
             confinement = batch.confinement[batch.batch]  # (n_atoms, 2)
             mobile = ~batch.mask
