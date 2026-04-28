@@ -1,7 +1,7 @@
 import torch
 
 from abc import ABC, abstractmethod
-from typing import Dict, Optional
+from typing import Dict
 from agedi.data import AtomsGraph
 from agedi.diffusion.noisers import Noiser
 
@@ -12,11 +12,10 @@ from agedi.diffusion.distributions import Distribution, NoiseDistribution, Prior
 class SDENoiser(Noiser, ABC):
     """Base class for SDE-backed noisers.
 
-    Centralises the SDE wiring (``sde_class``/``sde_kwargs``/``sde`` pattern)
-    and provides generic :meth:`noise`, :meth:`denoise`, and :meth:`loss`
-    implementations that are suitable for many continuous-score noisers.
-    Subclasses that need custom forward/reverse logic can override any of
-    those three methods.
+    Centralises the SDE wiring and provides generic :meth:`noise`,
+    :meth:`denoise`, and :meth:`loss` implementations that are suitable for
+    many continuous-score noisers.  Subclasses that need custom forward/reverse
+    logic can override any of those three methods.
 
     Optional hooks :meth:`postprocess_score` and :meth:`postprocess_noise`
     can be overridden to apply per-noiser post-processing inside the generic
@@ -24,17 +23,12 @@ class SDENoiser(Noiser, ABC):
 
     Parameters
     ----------
-    sde_class : SDE
-        The class of the SDE to be used for the noising.
-    sde_kwargs : Dict
-        The keyword arguments to be passed to the SDE class.
+    sde : SDE
+        An already-instantiated SDE object that defines the diffusion process.
     distribution : NoiseDistribution
         The noise sampler to be used for the noise.
     prior : PriorDistribution
         The prior distribution to be used for the noise.
-    sde : SDE, optional
-        An already-instantiated SDE object.  When provided, *sde_class* and
-        *sde_kwargs* are ignored.
     key : str
         The key to be used for the noising.
     **kwargs
@@ -51,38 +45,27 @@ class SDENoiser(Noiser, ABC):
 
     def __init__(
         self,
-        sde_class: SDE,
-        sde_kwargs: Optional[Dict],
+        sde: SDE,
         distribution: NoiseDistribution,
         prior: PriorDistribution,
-        sde: Optional[SDE] = None,
         **kwargs
     ) -> None:
         """Initialize the SDE noiser.
 
         Parameters
         ----------
-        sde_class : SDE
-            Class of the SDE to use for noising.  Ignored when *sde* is provided.
-        sde_kwargs : dict, optional
-            Keyword arguments forwarded to *sde_class*.  Ignored when *sde* is provided.
+        sde : SDE
+            Instantiated SDE object.  Pass e.g. ``VE()`` or ``VP()`` to select
+            the diffusion style.
         distribution : NoiseDistribution
             Noise sampler used during noising and denoising.
         prior : PriorDistribution
             Prior distribution used to sample starting values.
-        sde : SDE, optional
-            Pre-instantiated SDE object.  When provided, *sde_class* and
-            *sde_kwargs* are ignored.
         **kwargs
             Additional keyword arguments forwarded to :class:`~agedi.diffusion.noisers.Noiser`.
         """
         super().__init__(distribution, prior, **kwargs)
-        if sde is not None:
-            self.sde = sde
-        else:
-            if sde_kwargs is None:
-                sde_kwargs = {}
-            self.sde = sde_class(**sde_kwargs)
+        self.sde = sde
 
     def get_hparams(self) -> Dict:
         """Return hyperparameters for this SDE noiser."""
@@ -143,9 +126,11 @@ class SDENoiser(Noiser, ABC):
         z = batch[self.key]
         t = batch.time
 
-        w = self.distribution.get_callable(batch)
-        batch[self.key] = self.sde.transition_kernel(z, t, w)
-        batch[self.key + "_noise"] = batch.apply_mask(self.sde.noise(z, batch[self.key], t))
+        mean = self.sde.mean(t) * z
+        sigma = torch.sqrt(self.sde.var(t))
+        w = self.distribution.sample(batch, mu=mean, sigma=sigma)
+        batch[self.key] = mean + w
+        batch[self.key + "_noise"] = batch.apply_mask(w / sigma)
 
         return batch
 
@@ -183,14 +168,13 @@ class SDENoiser(Noiser, ABC):
         drift = self.sde.drift(z, t)
         diffusion = self.sde.diffusion(t)
 
-        w = self.distribution.get_callable(batch)
         if last:
             batch[self.key] = batch[self.key] + delta_t * (diffusion**2 * z_score + drift)
         else:
-            batch[self.key] = w(
-                batch[self.key] + delta_t * (diffusion**2 * z_score + drift),  # mean
-                torch.sqrt(delta_t) * diffusion,  # variance
-            )
+            mean = batch[self.key] + delta_t * (diffusion**2 * z_score + drift)
+            sigma = torch.sqrt(delta_t) * diffusion
+            w = self.distribution.sample(batch, mu=mean, sigma=sigma)
+            batch[self.key] = mean + w
 
         return batch
 

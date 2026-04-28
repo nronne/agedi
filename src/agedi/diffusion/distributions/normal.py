@@ -10,60 +10,52 @@ _CONFINEMENT_CLAMP_EPS = 1e-4
 class StandardNormal(PriorDistribution):
     """Standard Normal Distribution"""
 
-    def _setup(self, batch: AtomsGraph) -> None:
-        """Prepare the distribution for sampling from *batch*.
-
-        Sets ``self.shape`` to the shape of the target attribute in the batch.
+    def sample(self, batch: AtomsGraph, **kwargs) -> torch.Tensor:
+        """Sample from the standard normal distribution.
 
         Parameters
         ----------
         batch : AtomsGraph
-            Batch of atomistic data.
-        """
-        if self.key is not None:
-            self.shape = batch[self.key].shape
-
-    def _sample(self, shape: Optional[torch.Size] = None, **kwargs) -> torch.Tensor:
-        """Sample from the standard normal distribution
-
-        Parameters
-        ----------
-        mu : torch.Tensor
-            Mean of the distribution
-        sigma : torch.Tensor
-            Standard deviation of the distribution
+            Batch of atomistic data.  The shape is derived from
+            ``batch[self.key]``.
 
         Returns
         -------
         torch.Tensor
-            Sampled tensor
-
+            Sampled tensor.
         """
-        if shape is None:
-            shape = self.shape
-        std = 0.8 * shape[0]**(1/3)
+        shape = batch[self.key].shape
+        std = 0.8 * shape[0] ** (1 / 3)
         return torch.normal(0.0, std, size=shape)
 
 
 class Normal(NoiseDistribution):
     """Normal Distribution"""
 
-    def _sample(self, mu: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
-        """Sample from the normal distribution
+    def sample(self, batch: AtomsGraph, sigma: torch.Tensor, mu: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+        """Sample noise from the normal distribution.
+
+        Returns the noise contribution ``w = σ · ε`` where ``ε ~ N(0, I)``.
+        The caller is responsible for constructing ``x_t = mean + w``.
 
         Parameters
         ----------
-        mu : torch.Tensor
-            Mean of the distribution
+        batch : AtomsGraph
+            Batch of atomistic data (unused, present for interface consistency).
         sigma : torch.Tensor
-            Standard deviation of the distribution
+            Standard deviation of the distribution.
+        mu : torch.Tensor, optional
+            Not used for the mean; passed only as a shape reference when
+            *sigma* broadcasts (e.g. shape ``(N, 1)`` while the target has
+            shape ``(N, D)``).
 
         Returns
         -------
         torch.Tensor
-            Sampled tensor
+            Noise tensor ``σ · ε``.
         """
-        return torch.normal(mu, sigma)
+        ref = mu if mu is not None else sigma
+        return sigma * torch.randn_like(ref)
 
 
 class TruncatedNormal(NoiseDistribution):
@@ -85,41 +77,31 @@ class TruncatedNormal(NoiseDistribution):
         """Return hyperparameters for this distribution."""
         return {**super().get_hparams(), "index": self.index}
 
-    def _setup(self, batch: AtomsGraph) -> None:
-        """Setup the distribution
+    def sample(self, batch: AtomsGraph, mu: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Sample noise from the truncated normal distribution.
 
-        Prepare the distribution for sampling of the batch
+        Returns the noise contribution ``w = x_sampled − mu`` where
+        ``x_sampled`` is drawn from a truncated normal within the confinement
+        bounds.  The caller is responsible for constructing ``x_t = mu + w``.
 
         Parameters
         ----------
         batch : AtomsGraph
-            Batch of data
-
-        Returns
-        -------
-        None
-
-        """
-
-        self.confinement = batch.confinement[batch.batch]
-        self.mask = batch.mask
-
-    def _sample(self, mu: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
-        """Sample from the truncated normal distribution
-
-        Parameters
-        ----------
+            Batch of atomistic data.  ``batch.confinement`` and ``batch.mask``
+            are read directly.
         mu : torch.Tensor
-            Mean of the distribution
+            Mean of the distribution; used for truncation-bound clamping.
         sigma : torch.Tensor
-            Standard deviation of the distribution
+            Standard deviation of the distribution.
 
         Returns
         -------
         torch.Tensor
-            Sampled tensor
-
+            Noise tensor ``x_sampled − mu``.
         """
+        batch_idx = batch.batch if batch.batch is not None else torch.zeros(mu.shape[0], dtype=torch.long, device=mu.device)
+        confinement = batch.confinement[batch_idx]
+        mask = batch.mask if batch.mask is not None else torch.zeros(mu.shape[0], dtype=torch.bool, device=mu.device)
         x = []
         for i in range(mu.shape[1]):
             if i == self.index:
@@ -130,24 +112,25 @@ class TruncatedNormal(NoiseDistribution):
                         + "https://agedi.readthedocs.io/en/latest/troubleshooting.html"
                     )
 
-                z_lo = self.confinement[:, 0][~self.mask]
-                z_hi = self.confinement[:, 1][~self.mask]
-                mu_z = mu[:, i][~self.mask].clamp(
+                z_lo = confinement[:, 0][~mask]
+                z_hi = confinement[:, 1][~mask]
+                mu_z = mu[:, i][~mask].clamp(
                     min=z_lo + _CONFINEMENT_CLAMP_EPS,
                     max=z_hi - _CONFINEMENT_CLAMP_EPS,
                 )
                 sampled = TN(
                     mu_z,
-                    sigma[:, 0][~self.mask],
+                    sigma[:, 0][~mask],
                     z_lo,
                     z_hi,
                 ).sample()
 
                 xi = torch.zeros_like(mu[:, i])
-                xi[~self.mask] = sampled
+                xi[~mask] = sampled - mu[:, i][~mask]
                 x.append(xi)
             else:
-                x.append(torch.normal(mu[:, i], sigma[:, 0]))
+                noise_i = sigma[:, 0] * torch.randn_like(mu[:, i])
+                x.append(noise_i)
         return torch.stack(x, dim=1)
 
 
@@ -160,23 +143,30 @@ class WrappedNormal(NoiseDistribution):
         self.N = N
         self.T = T
 
-    def _sample(self, mu: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
-        """Sample from the wrapped normal distribution
+    def sample(self, batch: AtomsGraph, sigma: torch.Tensor, mu: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor:
+        """Sample noise from the wrapped normal distribution.
+
+        Returns the noise contribution ``w = σ · ε`` where ``ε ~ N(0, I)``.
+        The caller is responsible for constructing ``x_t = mean + w`` and
+        applying any periodic wrapping.
 
         Parameters
         ----------
-        mu : torch.Tensor
-            Mean of the distribution
+        batch : AtomsGraph
+            Batch of atomistic data (unused, present for interface consistency).
         sigma : torch.Tensor
-            Standard deviation of the distribution
+            Standard deviation of the distribution.
+        mu : torch.Tensor, optional
+            Not used for the mean; passed only as a shape reference when
+            *sigma* broadcasts.
 
         Returns
         -------
         torch.Tensor
-            Sampled tensor
-
+            Noise tensor ``σ · ε``.
         """
-        return mu + sigma * torch.randn_like(mu)
+        ref = mu if mu is not None else sigma
+        return sigma * torch.randn_like(ref)
 
     def p(self, x: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
         """Calculate the probability density function of the wrapped normal distribution
