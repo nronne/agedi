@@ -239,32 +239,98 @@ class TypesScore(Head):
 
 
 class CellScore(Head):
-    """Predict cell parameters with simple physical constraints.
-    
-    Ensures:
-    - Three positive numbers for lengths (a, b, c)
-    - Three numbers between 0 and π for angles (α, β, γ)
-    """
-    _key = "cellpar"
+    """Predict the score for the unit cell lower-triangular entries.
 
-    def __init__(self, input_dim_scalar=66, input_dim_vector=64, **kwargs):
+    The network aggregates per-atom scalar representations to a per-graph
+    representation, predicts 6 values corresponding to the 6 lower-triangular
+    entries of the 3×3 canonical cell matrix, and returns the full 3×3 matrix
+    with the upper-triangular entries set to zero.
+
+    Parameters
+    ----------
+    input_dim_scalar : int
+        The dimension of the scalar input representation.
+    input_dim_vector : int
+        The dimension of the vector input representation (unused; kept for
+        API consistency with other heads).
+    **kwargs
+        Additional keyword arguments forwarded to :class:`~agedi.models.head.Head`.
+
+    Returns
+    -------
+    Head
+
+    """
+
+    _key = "cell"
+
+    # Indices of the lower-triangular entries in row-major order:
+    #   (0,0), (1,0), (1,1), (2,0), (2,1), (2,2)
+    _tril_rows = [0, 1, 1, 2, 2, 2]
+    _tril_cols = [0, 0, 1, 0, 1, 2]
+
+    def __init__(self, input_dim_scalar: int = 66, input_dim_vector: int = 64, **kwargs):
+        """Initialise the CellScore head.
+
+        Parameters
+        ----------
+        input_dim_scalar : int, optional
+            Dimension of the per-atom scalar features.
+        input_dim_vector : int, optional
+            Dimension of the per-atom vector features (unused).
+        **kwargs
+            Additional keyword arguments forwarded to
+            :class:`~agedi.models.head.Head`.
+        """
         super().__init__(**kwargs)
-        lattice_dim = 9
+        self.input_dim_scalar = input_dim_scalar
+        self.input_dim_vector = input_dim_vector
         self.net = nn.Sequential(
             nn.Linear(input_dim_scalar, input_dim_scalar, bias=True),
-            nn.ReLU(),
-            nn.Linear(input_dim_scalar, cellpar_dim, bias=False), # bias = False
+            nn.SiLU(),
+            nn.Linear(input_dim_scalar, 6, bias=False),
         )
-        
-    def _score(self, batch):
-        """Predict cell parameters with appropriate physical ranges."""
-        cell = batch["cell"].view(-1, 3, 3)
-        scalar_representation = batch["scalar_representation"]
-        structure_representation = scatter(scalar_representation, batch["_idx_m"], dim=0, reduce="mean")
 
-        # Get raw predictions
-        out = self.net(structure_representation).view(-1, 3, 3)
-        
-        pred = torch.einsum("bij,bjk->bik", out, cell)
-        
-        return pred
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters for this cell score head."""
+        return {
+            **super().get_hparams(),
+            "input_dim_scalar": self.input_dim_scalar,
+            "input_dim_vector": self.input_dim_vector,
+        }
+
+    def _score(self, batch: dict) -> torch.Tensor:
+        """Predict the cell score.
+
+        Parameters
+        ----------
+        batch : dict
+            The translated input batch with ``scalar_representation`` and
+            ``_idx_m`` keys.
+
+        Returns
+        -------
+        torch.Tensor
+            Predicted score of shape ``(n_graphs, 3, 3)`` with upper-triangular
+            entries set to zero.
+
+        """
+        from torch_scatter import scatter
+
+        scalar_representation = batch["scalar_representation"]
+        idx_m = batch["_idx_m"]
+        n_graphs = int(idx_m.max().item()) + 1
+
+        # Aggregate atom features to graph-level: (n_graphs, input_dim_scalar)
+        structure_rep = scatter(scalar_representation, idx_m, dim=0,
+                                dim_size=n_graphs, reduce="mean")
+
+        # Predict 6 lower-triangular entries
+        values = self.net(structure_rep)  # (n_graphs, 6)
+
+        # Assemble 3×3 lower-triangular matrix
+        cell_score = torch.zeros(n_graphs, 3, 3,
+                                 device=values.device, dtype=values.dtype)
+        cell_score[:, self._tril_rows, self._tril_cols] = values
+
+        return cell_score
