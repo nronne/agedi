@@ -99,8 +99,9 @@ class TruncatedNormal(NoiseDistribution):
         torch.Tensor
             Noise tensor ``x_sampled − mu``.
         """
-        confinement = batch.confinement[batch.batch]
-        mask = batch.mask
+        batch_idx = batch.batch if batch.batch is not None else torch.zeros(mu.shape[0], dtype=torch.long, device=mu.device)
+        confinement = batch.confinement[batch_idx]
+        mask = batch.mask if batch.mask is not None else torch.zeros(mu.shape[0], dtype=torch.bool, device=mu.device)
         x = []
         for i in range(mu.shape[1]):
             if i == self.index:
