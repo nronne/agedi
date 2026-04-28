@@ -834,6 +834,7 @@ def create_dataset(
     conditioning_type: str = "scalar",
     repeat: Optional[int] = None,
     canonical_cell: bool = False,
+    regressor_data: Optional[Sequence[Atoms]] = None,
 ) -> Dataset:
     """Create and setup an AGeDi Dataset from ASE Atoms objects."""
     phase_transforms = None
@@ -892,6 +893,10 @@ def create_dataset(
         properties=properties,
         canonical_cell=canonical_cell,
     )
+
+    if regressor_data is not None:
+        dataset.add_regressor_data(list(regressor_data), canonical_cell=canonical_cell)
+
     dataset.setup()
     return dataset
 
@@ -1235,6 +1240,7 @@ def train_from_atoms(
     eps: float = 1e-5,
     guidance_weight: float = -1.0,
     data_path: Optional[str] = None,
+    regressor_data: Optional[Sequence[Atoms]] = None,
     trainer: Optional[Trainer] = None,
     **trainer_kwargs,
 ) -> Tuple[Diffusion, Dataset, Trainer]:
@@ -1270,6 +1276,7 @@ def train_from_atoms(
         conditioning_type=conditioning_type,
         repeat=repeat,
         canonical_cell=canonical_cell,
+        regressor_data=regressor_data,
     )
 
     n_parameters = sum(
@@ -1459,6 +1466,12 @@ def train_from_config(
 
     data = ase_read(str(data_path), ":")
 
+    # Load optional regressor-only dataset.
+    regressor_data = None
+    regressor_data_path = cfg.get("regressor_data_path")
+    if regressor_data_path is not None:
+        regressor_data = ase_read(str(regressor_data_path), ":")
+
     # ------------------------------------------------------------------ #
     # 3. Split config keys between train_from_atoms and create_trainer    #
     # ------------------------------------------------------------------ #
@@ -1466,7 +1479,7 @@ def train_from_config(
     trainer_kwargs: Dict = {k: cfg[k] for k in _TRAINER_KEYS if k in cfg}
 
     # Warn about unrecognised keys (but don't error, for forward compat).
-    known = _TRAIN_FROM_ATOMS_KEYS | _TRAINER_KEYS | {"data_path"}
+    known = _TRAIN_FROM_ATOMS_KEYS | _TRAINER_KEYS | {"data_path", "regressor_data_path"}
     unknown = set(cfg) - known
     if unknown:
         import warnings as _warnings
@@ -1479,6 +1492,86 @@ def train_from_config(
     return train_from_atoms(
         data,
         data_path=str(Path(data_path).resolve()),
+        regressor_data=regressor_data,
         **train_kwargs,
         **trainer_kwargs,
     )
+
+
+def predict(
+    diffusion: Diffusion,
+    structures: Sequence[Atoms],
+    *,
+    batch_size: int = 64,
+    cutoff: Optional[float] = None,
+) -> List[Atoms]:
+    """Predict energies and forces for input structures using a trained force-field.
+
+    The model must have been trained with ``force_field=True`` (i.e. it must
+    have a ``regressor_model`` attached).  The predicted energy and forces are
+    attached to the returned :class:`~ase.Atoms` objects via an
+    :class:`~ase.calculators.singlepoint.SinglePointCalculator`.
+
+    Parameters
+    ----------
+    diffusion:
+        A trained :class:`~agedi.Diffusion` model with a force-field
+        regressor (trained with ``--force_field``).
+    structures:
+        Input ASE :class:`~ase.Atoms` objects to run predictions on.
+    batch_size:
+        Number of structures per inference batch.  Defaults to ``64``.
+    cutoff:
+        Neighbour-list cutoff in Å.  When ``None`` (default), the cutoff is
+        read from the model's representation automatically.
+
+    Returns
+    -------
+    List[Atoms]
+        The input structures with a
+        :class:`~ase.calculators.singlepoint.SinglePointCalculator` attached
+        containing the predicted energy and/or forces.
+
+    Raises
+    ------
+    ValueError
+        If the model does not have a force-field regressor.
+    """
+    from torch_geometric.data import Batch
+
+    if diffusion.regressor_model is None:
+        raise ValueError(
+            "This model does not have a force-field regressor. "
+            "Re-train with force_field=True to enable predictions."
+        )
+
+    if cutoff is None:
+        try:
+            cf = diffusion.score_model.representation.cutoff_fn
+            if hasattr(cf, "cutoff") and cf.cutoff.numel() > 0:
+                cutoff = float(cf.cutoff[0])
+            else:
+                cutoff = 6.0
+        except AttributeError:
+            cutoff = 6.0
+
+    device = next(diffusion.parameters()).device
+
+    graphs = [AtomsGraph.from_atoms(atoms, cutoff=cutoff) for atoms in structures]
+
+    n_structures = len(graphs)
+    console = Console()
+    console.print(f"Running predictions on {n_structures} structure(s) (batch_size={batch_size})...")
+
+    diffusion.eval()
+    results: List[Atoms] = []
+    with torch.no_grad():
+        for i in range(0, n_structures, batch_size):
+            batch_graphs = graphs[i : i + batch_size]
+            batch = Batch.from_data_list(batch_graphs).to(device)
+            batch = diffusion.regressor_model(batch)
+            for graph in batch.to_data_list():
+                results.append(graph.to_atoms())
+
+    console.print(f"[green]✓[/green] Predictions complete for {len(results)} structure(s)")
+    return results

@@ -176,6 +176,31 @@ Building the dataset
    )
    dataset.setup()
 
+**Adding a regressor-only dataset**
+
+To supply non-equilibrium structures that train only the force-field head, call
+:meth:`~agedi.data.Dataset.add_regressor_data` before :meth:`~agedi.data.Dataset.setup`:
+
+.. code-block:: python
+
+   from ase.io import read
+   from agedi.data import Dataset
+
+   raw = read("training_data.traj", ":")
+   nonequilibrium = read("nonequilibrium.traj", ":")
+
+   dataset = Dataset(cutoff=6.0, batch_size=64, n_train=0.9, n_val=0.1)
+   dataset.add_atoms_data(list(raw), mask_method="MaskFixed", confinement=(2.0, 10.0))
+   dataset.add_regressor_data(list(nonequilibrium))
+   dataset.setup()
+
+Each structure in ``nonequilibrium`` should have an ASE calculator attached
+with energy and forces available.  When a regressor dataset is present,
+:meth:`~agedi.data.Dataset.train_dataloader` returns a
+:class:`~lightning.pytorch.utilities.CombinedLoader` that delivers both a
+``"main"`` batch (diffusion + regressor loss) and a ``"regressor"`` batch
+(regressor loss only) to each training step.
+
 Training with Lightning
 -----------------------
 

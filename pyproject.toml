@@ -1,6 +1,6 @@
 [project]
 name = "AGeDi"
-version = "0.0.1"
+version = "0.0.2"
 description = "Atomistic Generative Diffusion software package"
 readme = "README.md"
 requires-python = ">=3.10"

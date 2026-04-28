@@ -15,6 +15,7 @@ Main commands
 
 - ``agedi train``: train a diffusion model from a trajectory file or YAML config
 - ``agedi sample``: sample structures from a saved training run
+- ``agedi predict``: predict energies and forces for input structures (requires ``--force_field`` training)
 - ``agedi inspect``: print ``hparams.yaml`` from a run directory
 
 To get information about options for each use
@@ -23,7 +24,7 @@ To get information about options for each use
 
    agedi train --help
 
-for ``train`` and likewise for ``sample`` and ``inspect``.
+for ``train`` and likewise for ``sample``, ``predict``, and ``inspect``.
 
 Training
 --------
@@ -77,7 +78,7 @@ Minimal training example for a **gas-phase cluster**:
 
 Important options:
 
-- ``--max_time/-t`` or ``--epochs/-e``: stopping criteria
+- ``--max_time_minutes/-t`` or ``--epochs/-e``: stopping criteria (use ``-T`` to specify time in hours instead of minutes)
 - ``--noisers``: ``CellPositions`` (default), ``ConfinedCellPositions``, ``Positions``, ``Types``.
   Accepts a comma-separated list to specify multiple noisers in one flag (e.g. ``--noisers ConfinedCellPositions,Types``),
   or repeat the flag (e.g. ``--noisers ConfinedCellPositions --noisers Types``).
@@ -118,6 +119,38 @@ and total energy (e.g. loaded from a
 VASP/GPAW calculation via ASE).  The force field is trained jointly with the
 diffusion score.
 
+**Regressor-only dataset**
+
+You can optionally supply a second dataset that is used *exclusively* to train
+the force-field head — its structures are never passed through the diffusion
+loss.  This is useful when you have non-equilibrium structures (e.g. from MD
+or NEB calculations) that would be unsuitable as diffusion training targets
+but contain valuable force/energy information for the regressor:
+
+.. code-block:: console
+
+   agedi train --noisers ConfinedCellPositions --mask MaskFixed --confinement 2 10 --force_field training_data.traj
+
+and in ``train.yaml``:
+
+.. code-block:: yaml
+
+   data_path: training_data.traj
+   force_field: true
+   regressor_data_path: nonequilibrium_data.traj
+
+Or from Python:
+
+.. code-block:: python
+
+   from agedi import train_from_atoms
+
+   diffusion, dataset, trainer = train_from_atoms(
+       equilibrium_structures,
+       force_field=True,
+       regressor_data=nonequilibrium_structures,
+   )
+
 Once training is complete, force-field guidance can be used during sampling
 via the ``--ff_guidance`` option:
 
@@ -144,6 +177,39 @@ In Python this is equivalent to:
        formula="Pd2O2",
        ff_guidance=ForcefieldGuidanceConfig(guidance=5.0, zeta=3.0),
    )
+
+Predicting energies and forces
+-------------------------------
+
+When the model has been trained with ``--force_field``, you can run energy
+and force predictions on existing structures with ``agedi predict``:
+
+.. code-block:: console
+
+   agedi predict logs/version_0 structures.traj
+
+This reads all structures from ``structures.traj``, runs the force-field
+regressor, and writes the results (with predicted energies and forces
+attached as an ASE ``SinglePointCalculator``) to ``predicted.traj`` in
+the current directory.
+
+Important options:
+
+- ``-o/--output``: directory to save the output file (default: ``.``)
+- ``--name``: base name for the output file (default: ``predicted``)
+- ``-b/--batch_size``: number of structures per inference batch (default: ``64``)
+
+In Python this is equivalent to:
+
+.. code-block:: python
+
+   from ase.io import read, write
+   from agedi import load_diffusion, predict
+
+   diffusion = load_diffusion("logs/version_0")
+   structures = read("structures.traj", index=":")
+   predicted = predict(diffusion, structures)
+   write("predicted.traj", predicted)
 
 Inspect run metadata
 --------------------

@@ -57,6 +57,47 @@ Here we show the same example as with the CLI, using
        log_dir="logs",
    )
 
+Force-field training with a regressor dataset
+----------------------------------------------
+
+To train a force-field head alongside the diffusion model, pass
+``force_field=True``.  You can additionally supply a separate
+``regressor_data`` sequence of :class:`~ase.Atoms` objects that will be used
+*only* to train the force-field head (not the diffusion score).  This is
+useful for non-equilibrium structures that carry informative forces but would
+be unsuitable as diffusion training targets:
+
+.. code-block:: python
+
+   from ase.io import read
+   from agedi import train_from_atoms
+
+   equilibrium = read("training_data.traj", ":")
+   nonequilibrium = read("nonequilibrium.traj", ":")
+
+   diffusion, dataset, trainer = train_from_atoms(
+       equilibrium,
+       force_field=True,
+       regressor_data=nonequilibrium,
+       noisers=("ConfinedCellPositions",),
+       mask="MaskFixed",
+       confinement=(2.0, 10.0),
+   )
+
+Using :func:`~agedi.functional.create_dataset` directly:
+
+.. code-block:: python
+
+   from ase.io import read
+   from agedi import create_dataset
+
+   dataset = create_dataset(
+       read("training_data.traj", ":"),
+       mask="MaskFixed",
+       confinement=(2.0, 10.0),
+       regressor_data=read("nonequilibrium.traj", ":"),
+   )
+
 More detailed workflow
 -----------------------
 
@@ -117,6 +158,52 @@ Similar to the CLI, this samples using the ``last_model.ckpt`` checkpoint found 
 specify the exact path to it when calling :func:`~agedi.functional.load_diffusion`.
 
 
+Force-field training and prediction
+-------------------------------------
+
+To train a forces prediction head alongside the diffusion model, pass
+``force_field=True`` to :func:`~agedi.functional.train_from_atoms`.  The
+training data must include per-atom forces and total energy (e.g. from a
+DFT calculation loaded via ASE):
+
+.. code-block:: python
+
+   from ase.io import read
+   from agedi import train_from_atoms
+
+   data = read("training_data.traj", ":")  # must contain forces and energy
+
+   diffusion, dataset, trainer = train_from_atoms(
+       data,
+       noisers=("ConfinedCellPositions",),
+       mask="MaskFixed",
+       confinement=(2.0, 10.0),
+       force_field=True,
+       max_time=2,
+   )
+
+Once trained, use :func:`~agedi.functional.predict` to run energy and force
+predictions on existing structures.  The results are returned as ASE
+:class:`~ase.Atoms` objects with a
+:class:`~ase.calculators.singlepoint.SinglePointCalculator` attached:
+
+.. code-block:: python
+
+   from ase.io import read, write
+   from agedi import load_diffusion, predict
+
+   diffusion = load_diffusion("logs/version_0")
+
+   structures = read("structures.traj", index=":")
+   predicted = predict(diffusion, structures)
+
+   # Access predictions on the first structure
+   print(predicted[0].get_potential_energy())  # eV
+   print(predicted[0].get_forces())            # eV/Å
+
+   write("predicted.traj", predicted)
+
+
 Core public functions
 ----------------------
 
@@ -126,4 +213,5 @@ Core public functions
 - :func:`~agedi.functional.train`
 - :func:`~agedi.functional.train_from_atoms`
 - :func:`~agedi.functional.load_diffusion`
+- :func:`~agedi.functional.predict`
 - :func:`~agedi.functional.sample`

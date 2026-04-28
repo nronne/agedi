@@ -489,15 +489,29 @@ class Diffusion(LightningModule):
         # self.offsets = torch.tensor(OFFSET_LIST).float().to(self.device)
         self.score_model.training_mode()
     
-    def training_step(self, batch: AtomsGraph, batch_idx: torch.Tensor) -> torch.Tensor:
+    def training_step(self, batch, batch_idx: torch.Tensor) -> torch.Tensor:
         """Performs a training step.
 
         Computes the combined diffusion + regressor loss (see :meth:`loss`).
 
+        When the :class:`~agedi.data.Dataset` was set up with a dedicated
+        regressor dataset (via :meth:`~agedi.data.Dataset.add_regressor_data`),
+        ``batch`` is a dict with two keys:
+
+        * ``"main"`` – a regular training batch used for both the diffusion
+          and regressor loss.
+        * ``"regressor"`` – a regressor-only batch whose structures are *only*
+          forwarded through the regressor loss (not the diffusion loss).
+
+        When no regressor dataset is present ``batch`` is a plain
+        :class:`~agedi.data.AtomsGraph` batch and the behaviour is identical
+        to the pre-existing implementation.
+
         Parameters
         ----------
-        batch: AtomsGraph
-            A batch of AtomsGraph data.
+        batch: AtomsGraph or dict
+            A batch of AtomsGraph data, or a dict with ``"main"`` and
+            ``"regressor"`` keys when a dedicated regressor dataset is used.
         batch_idx: torch.Tensor
             The index of the batch.
 
@@ -507,10 +521,37 @@ class Diffusion(LightningModule):
             The loss of the training step.
 
         """
-        losses = self.loss(batch, batch_idx)
+        if isinstance(batch, dict):
+            main_batch = batch["main"]
+            regressor_batch = batch["regressor"]
+
+            # Diffusion loss only on the main (equilibrium) batch.
+            losses = self.diffusion_loss(main_batch, batch_idx)
+
+            # Regressor loss on both batches whenever forces are available.
+            if self.regressor_model is not None:
+                reg_loss_total = torch.tensor(0.0, device=self.device)
+                n_reg_batches = 0
+
+                for b in (main_batch, regressor_batch):
+                    if hasattr(b, "forces"):
+                        reg_losses = self.regressor_loss(b, batch_idx)
+                        reg_loss_total = reg_loss_total + reg_losses["loss"]
+                        n_reg_batches += 1
+
+                if n_reg_batches > 0:
+                    reg_loss_avg = reg_loss_total / n_reg_batches
+                    losses["loss"] = losses["loss"] + self.regressor_loss_weight * reg_loss_avg
+                    losses["regressor_loss"] = reg_loss_avg
+
+            total_batch_size = main_batch.num_graphs + regressor_batch.num_graphs
+        else:
+            losses = self.loss(batch, batch_idx)
+            total_batch_size = batch.num_graphs
+
         for k, v in losses.items():
             name = "train_loss" if k == "loss" else f"train/{k}"
-            self.log(name, v, on_step=True, on_epoch=True, batch_size=batch.num_graphs)
+            self.log(name, v, on_step=True, on_epoch=True, batch_size=total_batch_size)
         return losses["loss"]
 
     def validation_step(

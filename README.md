@@ -69,6 +69,9 @@ agedi inspect logs/version_0
 
 # Sample structures
 agedi sample logs/version_0 -f Pd2O2 --template_path template.traj --confinement 2 10
+
+# Predict energies and forces (requires model trained with --force_field)
+agedi predict logs/version_0 structures.traj
 ```
 
 ## Quickstart (Python API)
@@ -89,6 +92,21 @@ diffusion, dataset, trainer = train_from_atoms(
 
 template = AtomsGraph.from_atoms(read("template.traj"), confinement=(2.0, 10.0))
 structures = sample(diffusion, n_samples=8, formula="Pd2O2", template=template)
+```
+
+To additionally train a force-field and run predictions:
+
+```python
+from ase.io import read, write
+from agedi import train_from_atoms, load_diffusion, predict
+
+data = read("PdO_training_data.traj", ":")  # must contain forces and energy
+diffusion, _, _ = train_from_atoms(data, noisers=("CellPositions",), force_field=True)
+
+# Later, predict on new structures
+diffusion = load_diffusion("logs/version_0")
+predicted = predict(diffusion, read("structures.traj", index=":"))
+write("predicted.traj", predicted)
 ```
 
 ## Documentation map

@@ -5,6 +5,7 @@ from .functional import (
     create_diffusion as create_diffusion,
     create_trainer as create_trainer,
     load_diffusion as load_diffusion,
+    predict as predict,
     register_model as register_model,
     sample as sample,
     train as train,
@@ -24,5 +25,6 @@ __all__ = [
     "train_from_atoms",
     "train_from_config",
     "load_diffusion",
+    "predict",
     "sample",
 ]

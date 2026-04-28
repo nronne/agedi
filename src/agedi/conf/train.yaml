@@ -8,6 +8,13 @@
 # ---------------------------------------------------------------------------
 data_path: /path/to/train.traj   # Required – ASE-readable file
 
+# Optional separate dataset used exclusively for regressor (force-field) training.
+# Structures here are only forwarded through the regressor loss, never the diffusion
+# loss.  Useful for adding non-equilibrium structures (e.g. from MD or NEB) that
+# would be unsuitable as diffusion training targets.
+# Set to null to disable (default).
+regressor_data_path: null        # Optional – ASE-readable file
+
 # ---------------------------------------------------------------------------
 # Score-model architecture
 # ---------------------------------------------------------------------------

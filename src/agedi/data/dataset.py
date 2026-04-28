@@ -71,6 +71,9 @@ class Dataset(LightningDataModule):
         self.phase_transforms = phase_transforms
         self.num_workers = num_workers
 
+        self.regressor_dataset = None
+        self.regressor_train_loader = None
+
     def add_atoms_data(self, data: List[Atoms], mask_method: Optional[str] = None, confinement: Optional[Tuple[float, float]] = None, properties: Optional[List[Dict]] = None, canonical_cell: bool = False) -> None:
         """Add ASE data to the dataset
 
@@ -162,6 +165,48 @@ class Dataset(LightningDataModule):
         else:
             self.dataset.extend(data)
 
+    def add_regressor_data(self, data: List[Atoms], canonical_cell: bool = False) -> None:
+        """Add atoms data that will be used exclusively for regressor training.
+
+        Structures in this dataset are only used to train the regressor model
+        (e.g. force-field heads) and are never passed through the diffusion
+        loss.  This allows the regressor to learn from non-equilibrium
+        structures that would be unsuitable as diffusion training targets.
+
+        Energy and forces are read from the ASE calculator attached to each
+        :class:`~ase.Atoms` object when available.
+
+        Parameters
+        ----------
+        data : List[Atoms]
+            A list of ASE :class:`~ase.Atoms` objects, each with an attached
+            calculator that provides energy and forces.
+        canonical_cell : bool, optional
+            When ``True``, cells are stored in canonical lower-triangular form.
+            Defaults to ``False``.
+
+        Returns
+        -------
+        None
+
+        """
+        dataset = []
+        for d in data:
+            ag = AtomsGraph.from_atoms(d, cutoff=self.cutoff, canonical_cell=canonical_cell)
+
+            has_E, has_F = self._has_energy_forces(d)
+            if has_E:
+                ag.energy = torch.tensor(d.get_potential_energy(), dtype=torch.float32)
+            if has_F:
+                ag.forces = torch.tensor(d.get_forces(apply_constraint=False), dtype=torch.float32)
+
+            dataset.append(ag)
+
+        if self.regressor_dataset is None:
+            self.regressor_dataset = dataset
+        else:
+            self.regressor_dataset.extend(dataset)
+
     def setup(self, stage: Optional[str] = None) -> None:
         """Set up train/validation/test splits and initialise data loaders.
 
@@ -188,13 +233,23 @@ class Dataset(LightningDataModule):
     def train_dataloader(self) -> DataLoader:
         """Get the training DataLoader
 
-        Returns a DataLoader for the training dataset
+        Returns a DataLoader for the training dataset.  When a separate
+        regressor dataset has been added via :meth:`add_regressor_data`, a
+        :class:`~lightning.pytorch.utilities.CombinedLoader` is returned so
+        that each training step receives both a regular batch (key
+        ``"main"``) and a regressor-only batch (key ``"regressor"``).
 
         Returns
         -------
-        DataLoader
+        DataLoader or CombinedLoader
 
         """
+        if self.regressor_train_loader is not None:
+            from lightning.pytorch.utilities import CombinedLoader
+            return CombinedLoader(
+                {"main": self.train_loader, "regressor": self.regressor_train_loader},
+                mode="max_size_cycle",
+            )
         return self.train_loader
 
     def val_dataloader(self) -> DataLoader:
@@ -267,6 +322,17 @@ class Dataset(LightningDataModule):
             num_workers=self.num_workers,
             persistent_workers=self.num_workers > 0,
         )
+
+        if self.regressor_dataset is not None:
+            self.regressor_train_loader = DataLoader(
+                self.regressor_dataset,
+                batch_size=self.batch_size,
+                shuffle=True,
+                num_workers=self.num_workers,
+                persistent_workers=self.num_workers > 0,
+            )
+        else:
+            self.regressor_train_loader = None
 
     def _check_confinement(self, dataset: List["AtomsGraph"], confinement: Tuple[float, float]) -> None:
         """Check that all unmasked atoms in *dataset* lie within *confinement*.

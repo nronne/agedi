@@ -35,6 +35,11 @@ default so you only need to set the values that differ from those defaults.
    # ---------------------------------------------------------------------------
    data_path: /path/to/train.traj   # Required – ASE-readable file
 
+   # Optional separate dataset used exclusively for regressor (force-field) training.
+   # Structures here are only forwarded through the regressor loss, never the diffusion
+   # loss.  Useful for non-equilibrium structures (e.g. from MD or NEB).
+   regressor_data_path: null        # Optional – ASE-readable file
+
    # ---------------------------------------------------------------------------
    # Score-model architecture
    # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ click.rich_click.OPTION_GROUPS.update(
                 "options": [
                     "--epochs",
                     "--max_time",
+                    "--max_time_minutes",
                     "--lr",
                     "--batch_size",
                     "--lr_patience",
@@ -155,11 +156,19 @@ _DEFAULT_NOISER = "CellPositions"
 )
 @click.option(
     "--max_time",
+    "-T",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Maximum training time in hours (use -t/--max_time_minutes for minutes)",
+)
+@click.option(
+    "--max_time_minutes",
     "-t",
     type=int,
-    default=24,
+    default=5,
     show_default=True,
-    help="Maximum training time in hours",
+    help="Additional minutes to add to the maximum training time (combined with --max_time)",
 )
 @click.option("--lr", type=float, default=1e-4, show_default=True, help="Learning rate")
 @click.option(
@@ -322,6 +331,12 @@ def train(**params) -> None:
         data_path = str(input_path.resolve())
         data = read(data_path, ":")
 
+        max_time_minutes = params["max_time_minutes"]
+        if max_time_minutes > 0:
+            max_time = {"hours": params["max_time"], "minutes": max_time_minutes}
+        else:
+            max_time = params["max_time"]
+
         train_from_atoms(
             data,
             model=params["model"],
@@ -343,7 +358,7 @@ def train(**params) -> None:
             lr_patience=params["lr_patience"],
             data_path=data_path,
             epochs=params["epochs"],
-            max_time=params["max_time"],
+            max_time=max_time,
             logger=params["logger"],
             log_dir=params["log_dir"],
             project=params["project"],
