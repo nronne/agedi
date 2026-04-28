@@ -125,7 +125,7 @@ class TruncatedNormal(NoiseDistribution):
                 ).sample()
 
                 xi = torch.zeros_like(mu[:, i])
-                xi[~mask] = sampled - mu_z
+                xi[~mask] = sampled - mu[:, i][~mask]
                 x.append(xi)
             else:
                 noise_i = sigma[:, 0] * torch.randn_like(mu[:, i])

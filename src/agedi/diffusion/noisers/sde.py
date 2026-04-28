@@ -1,6 +1,7 @@
 import torch
 
 from abc import ABC, abstractmethod
+from typing import Dict
 from agedi.data import AtomsGraph
 from agedi.diffusion.noisers import Noiser
 

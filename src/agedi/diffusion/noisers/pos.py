@@ -1,7 +1,7 @@
 import warnings
 import torch
 
-from typing import Optional
+from typing import Dict, Optional
 from agedi.data import AtomsGraph
 from agedi.diffusion.noisers import Noiser
 from agedi.diffusion.noisers.sde import SDENoiser
