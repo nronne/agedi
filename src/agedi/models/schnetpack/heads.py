@@ -1,4 +1,4 @@
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 import schnetpack.nn as snn
 import torch
@@ -84,6 +84,66 @@ def build_gated_equivariant_mlp(
     # put all layers together to make the network
     out_net = nn.Sequential(*layers)
     return out_net
+
+def _broadcast(src: torch.Tensor, other: torch.Tensor, dim: int):
+    if dim < 0:
+        dim = other.dim() + dim
+    if src.dim() == 1:
+        for _ in range(0, dim):
+            src = src.unsqueeze(0)
+    for _ in range(src.dim(), other.dim()):
+        src = src.unsqueeze(-1)
+    src = src.expand_as(other)
+    return src
+
+def scatter_sum(
+    src: torch.Tensor,
+    index: torch.Tensor,
+    dim: int = -1,
+    out: Optional[torch.Tensor] = None,
+    dim_size: Optional[int] = None,
+    reduce: str = "sum",
+) -> torch.Tensor:
+    assert reduce == "sum"  # for now, TODO
+    index = _broadcast(index, src, dim)
+    if out is None:
+        size = list(src.size())
+        if dim_size is not None:
+            size[dim] = dim_size
+        elif index.numel() == 0:
+            size[dim] = 0
+        else:
+            size[dim] = int(index.max()) + 1
+        out = torch.zeros(size, dtype=src.dtype, device=src.device)
+        return out.scatter_add_(dim, index, src)
+    else:
+        return out.scatter_add_(dim, index, src)
+
+def scatter_mean(
+    src: torch.Tensor,
+    index: torch.Tensor,
+    dim: int = -1,
+    out: Optional[torch.Tensor] = None,
+    dim_size: Optional[int] = None,
+) -> torch.Tensor:
+    out = scatter_sum(src, index, dim, out, dim_size)
+    dim_size = out.size(dim)
+
+    index_dim = dim
+    if index_dim < 0:
+        index_dim = index_dim + src.dim()
+    if index.dim() <= index_dim:
+        index_dim = index.dim() - 1
+
+    ones = torch.ones(index.size(), dtype=src.dtype, device=src.device)
+    count = scatter_sum(ones, index, index_dim, None, dim_size)
+    count[count < 1] = 1
+    count = _broadcast(count, out, dim)
+    if out.is_floating_point():
+        out.true_divide_(count)
+    else:
+        out.div_(count, rounding_mode="floor")
+    return out
 
 
 class PositionsScore(Head):
@@ -268,7 +328,7 @@ class CellScore(Head):
     _tril_rows = [0, 1, 1, 2, 2, 2]
     _tril_cols = [0, 0, 1, 0, 1, 2]
 
-    def __init__(self, input_dim_scalar: int = 66, input_dim_vector: int = 64, ip=True, **kwargs):
+    def __init__(self, input_dim_scalar: int = 66, input_dim_vector: int = 64, ip: bool = True, **kwargs):
         """Initialise the CellScore head.
 
         Parameters
@@ -285,11 +345,12 @@ class CellScore(Head):
         self.input_dim_scalar = input_dim_scalar
         self.input_dim_vector = input_dim_vector
         self.ip = ip
-        self.net = nn.Sequential(
-            nn.Linear(input_dim_scalar, input_dim_scalar, bias=True),
-            nn.SiLU(),
-            nn.Linear(input_dim_scalar, 6, bias=False),
-        )
+        # self.net = nn.Sequential(
+        #     nn.Linear(input_dim_scalar, input_dim_scalar, bias=True),
+        #     nn.SiLU(),
+        #     nn.Linear(input_dim_scalar, 6, bias=False),
+        # )
+        self.net = nn.Linear(input_dim_scalar, 9, bias=False)
 
     def get_hparams(self) -> Dict:
         """Return hyperparameters for this cell score head."""
@@ -299,6 +360,11 @@ class CellScore(Head):
             "input_dim_vector": self.input_dim_vector,
         }
 
+    @staticmethod
+    def _tril_mask(device: torch.device) -> torch.Tensor:
+        """Return a lower-triangular boolean mask of shape ``(3, 3)``."""
+        return torch.ones(3, 3, dtype=torch.bool, device=device).tril()
+    
     def _score(self, batch: dict) -> torch.Tensor:
         """Predict the cell score.
 
@@ -320,24 +386,28 @@ class CellScore(Head):
         n_graphs = int(idx_m.max().item()) + 1
 
         # Aggregate atom features to graph-level: (n_graphs, input_dim_scalar)
-        structure_rep = torch.zeros(n_graphs, scalar_representation.size(1),
-                                    device=scalar_representation.device,
-                                    dtype=scalar_representation.dtype)
-        structure_rep.index_add_(0, idx_m, scalar_representation)
-        counts = idx_m.bincount(minlength=n_graphs).to(dtype=scalar_representation.dtype).unsqueeze(-1)
-        structure_rep = structure_rep / counts
+        # structure_rep = torch.zeros(n_graphs, scalar_representation.size(1),
+        #                             device=scalar_representation.device,
+        #                             dtype=scalar_representation.dtype)
+        # structure_rep.index_add_(0, idx_m, scalar_representation)
+        # counts = idx_m.bincount(minlength=n_graphs).to(dtype=scalar_representation.dtype).unsqueeze(-1)
+        # structure_rep = structure_rep / counts
+
+        structure_rep = scatter_mean(scalar_representation, idx_m, dim=0)
+        
 
         # Predict 6 lower-triangular entries
         values = self.net(structure_rep)  # (n_graphs, 6)
 
         # Assemble 3×3 lower-triangular matrix
-        cell_score = torch.zeros(n_graphs, 3, 3,
-                                 device=values.device, dtype=values.dtype)
-        cell_score[:, self._tril_rows, self._tril_cols] = values
+        # cell_score = torch.zeros(n_graphs, 3, 3,
+        #                          device=values.device, dtype=values.dtype)
+        # cell_score[:, self._tril_rows, self._tril_cols] = values
+
+        cell_score = values.view(-1, 3, 3) * self._tril_mask(values.device)
 
         # if self.ip:
         #     cell = batch["_cell"].view(-1, 3, 3)
         #     cell_score = torch.einsum("nij,njk->nik", cell_score, cell)
         
-
         return cell_score

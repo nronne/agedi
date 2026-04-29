@@ -51,7 +51,7 @@ class Cell(SDENoiser):
         **kwargs
     ) -> None:
         if sde is None:
-            sde = VP(beta_min=1e-1, beta_max=20.0)
+            sde = VP(beta_min=1e-2, beta_max=5.0)
             # sde = VE(sigma_min=0.1, sigma_max=10.0)
         super().__init__(sde=sde, distribution=distribution, prior=prior, **kwargs)
         self.limit_density = limit_density
@@ -124,7 +124,8 @@ class Cell(SDENoiser):
         t = batch.time[batch.ptr[:-1]].reshape(-1, 1, 1)
         H0 = self._target_cell_mean(batch)
 
-        mean = self.sde.mean(t) * cell + (1 - self.sde.mean(t)) * H0
+        mean_t = self.sde.mean(t)
+        mean = mean_t * cell + (1 - mean_t) * H0
         sigma = torch.sqrt(self.sde.var(t))
         noised_cell = self.distribution.sample(batch, mu=mean, sigma=sigma)
 
@@ -142,8 +143,9 @@ class Cell(SDENoiser):
                 f"{type(self.distribution).__name__}.last_noise() returned None after sample(). "
                 "Distributions used with Cell must cache unit-scale noise in last_noise()."
             )
-        normalized_noise = noise * tril_mask
-        batch.add_batch_attr(self.key + "_noise", normalized_noise, type="graph")
+        noise = (noised_cell - cell)/sigma
+        #noise * tril_mask 
+        batch.add_batch_attr(self.key + "_noise", noise, type="graph")
 
         return batch
 
@@ -177,7 +179,7 @@ class Cell(SDENoiser):
         t = batch.time[batch.ptr[:-1]].reshape(-1, 1, 1)
         H0 = self._target_cell_mean(batch)        
 
-        drift = self.sde.drift(H0 - cell, t)
+        drift = self.sde.drift(cell-H0, t)
         diffusion = self.sde.diffusion(t)
 
         tril_mask = self._tril_mask(cell.device)
