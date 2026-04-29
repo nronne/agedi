@@ -45,7 +45,7 @@ def test_make_graph_pbc(atoms: "Atoms") -> None:
     assert edge_index.shape[1] == shift_vectors.shape[0]
     assert shift_vectors.shape[1] == 3
     # No self-edges (same atom with zero shift)
-    assert not (edge_index[0] == edge_index[1]).all()
+    assert not ((edge_index[0] == edge_index[1]) & (shift_vectors == 0).all(dim=1)).any()
 
 
 def test_make_graph_pbc_small_cell() -> None:

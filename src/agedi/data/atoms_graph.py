@@ -576,14 +576,16 @@ class AtomsGraph(Data):
         rep_a3 = int(torch.ceil(cutoff / min_dist_a3).item())
 
         # Generate all integer cell-offset triples within the required range.
-        r1 = torch.arange(-rep_a1, rep_a1 + 1, device=device, dtype=dtype)
-        r2 = torch.arange(-rep_a2, rep_a2 + 1, device=device, dtype=dtype)
-        r3 = torch.arange(-rep_a3, rep_a3 + 1, device=device, dtype=dtype)
+        # Use torch.long for exact integer arithmetic; convert to dtype only
+        # when computing Cartesian shifts via matrix multiplication.
+        r1 = torch.arange(-rep_a1, rep_a1 + 1, device=device, dtype=torch.long)
+        r2 = torch.arange(-rep_a2, rep_a2 + 1, device=device, dtype=torch.long)
+        r3 = torch.arange(-rep_a3, rep_a3 + 1, device=device, dtype=torch.long)
         grid = torch.meshgrid(r1, r2, r3, indexing="ij")
         int_offsets = torch.stack(
             [g.reshape(-1) for g in grid], dim=-1
-        )  # (n_offsets, 3)
-        cell_shifts = int_offsets @ cell  # Cartesian shift vectors (n_offsets, 3)
+        )  # (n_offsets, 3) integer offsets
+        cell_shifts = int_offsets.to(dtype) @ cell  # Cartesian shift vectors (n_offsets, 3)
         n_offsets = int_offsets.shape[0]
 
         # All (center, neighbour) atom-index pairs, including self-pairs which
