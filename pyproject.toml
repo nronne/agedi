@@ -19,7 +19,6 @@ dependencies = [
 [project.optional-dependencies]
 full = [
     "schnetpack",
-    "torch-scatter",
 ]
 test = [
     "pytest",

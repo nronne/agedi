@@ -4,8 +4,6 @@ import schnetpack.nn as snn
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_scatter import scatter
-
 import math
 
 from agedi.models.head import Head
@@ -321,8 +319,12 @@ class CellScore(Head):
         n_graphs = int(idx_m.max().item()) + 1
 
         # Aggregate atom features to graph-level: (n_graphs, input_dim_scalar)
-        structure_rep = scatter(scalar_representation, idx_m, dim=0,
-                                dim_size=n_graphs, reduce="mean")
+        structure_rep = torch.zeros(n_graphs, scalar_representation.size(1),
+                                    device=scalar_representation.device,
+                                    dtype=scalar_representation.dtype)
+        structure_rep.index_add_(0, idx_m, scalar_representation)
+        counts = idx_m.bincount(minlength=n_graphs).to(dtype=scalar_representation.dtype).unsqueeze(-1)
+        structure_rep = structure_rep / counts
 
         # Predict 6 lower-triangular entries
         values = self.net(structure_rep)  # (n_graphs, 6)
