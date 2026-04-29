@@ -3,7 +3,7 @@ from .sde import SDENoiser
 from .pos import PositionsNoiser, Positions, CellPositions, ConfinedCellPositions
 from .frac import Fractional
 from .types import Types, TypesNoiser
-from .cell import CellNoiser
+from .cell import Cell, CellNoiser
 
 # ---------------------------------------------------------------------------
 # Built-in noiser registry entries
@@ -20,14 +20,14 @@ Noiser.register("CellPositions", lambda sde: CellPositions(sde=sde))
 Noiser.register("ConfinedCellPositions", lambda sde: ConfinedCellPositions(sde=sde))
 Noiser.register("Types", lambda sde: Types())
 Noiser.register("Fractional", lambda sde: Fractional(sde=sde))
-Noiser.register("Cell", lambda sde: CellNoiser(sde=sde))
+Noiser.register("Cell", lambda sde: Cell(sde=sde))
 
 # snake_case aliases for backwards compatibility
 Noiser.register("positions", lambda sde: Positions(sde=sde))
 Noiser.register("cell_positions", lambda sde: CellPositions(sde=sde))
 Noiser.register("confined_cell_positions", lambda sde: ConfinedCellPositions(sde=sde))
 Noiser.register("types", lambda sde: Types())
-Noiser.register("cell", lambda sde: CellNoiser(sde=sde))
+Noiser.register("cell", lambda sde: Cell(sde=sde))
 
 __all__ = [
     "Noiser",
@@ -39,5 +39,6 @@ __all__ = [
     "Types",
     "TypesNoiser",
     "Fractional",
+    "Cell",
     "CellNoiser",
 ]

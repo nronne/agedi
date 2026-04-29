@@ -135,7 +135,7 @@ def _build_noisers(
           (UniformCellConfined prior + TruncatedNormal distribution, for
           Z-confined surfaces/porous materials).
         * ``"Types"`` – :class:`~agedi.diffusion.noisers.Types`.
-        * ``"Cell"`` – :class:`~agedi.diffusion.noisers.CellNoiser`.
+        * ``"Cell"`` – :class:`~agedi.diffusion.noisers.Cell`.
 
     sde : str, SDE, or None, optional
         Stochastic differential equation to override for all string-resolved
@@ -143,7 +143,7 @@ def _build_noisers(
         already-instantiated :class:`~agedi.diffusion.sdes.SDE` object.
         When ``None`` (default) each noiser class uses its own default SDE
         (e.g. :class:`~agedi.diffusion.sdes.VE` for position noisers,
-        :class:`~agedi.diffusion.sdes.VP` for :class:`~agedi.diffusion.noisers.CellNoiser`).
+        :class:`~agedi.diffusion.sdes.VP` for :class:`~agedi.diffusion.noisers.Cell`).
 
     Returns
     -------
@@ -743,7 +743,7 @@ def create_diffusion(
           :class:`~agedi.diffusion.noisers.ConfinedCellPositions`
           (UniformCellConfined prior + TruncatedNormal, for Z-confined systems).
         * ``"Types"`` / ``"types"`` – :class:`~agedi.diffusion.noisers.Types`.
-        * ``"Cell"`` / ``"cell"`` – :class:`~agedi.diffusion.noisers.CellNoiser`
+        * ``"Cell"`` / ``"cell"`` – :class:`~agedi.diffusion.noisers.Cell`
           (VP SDE, lower-triangular cell matrix diffusion).
 
     sde : str, SDE, or None, optional
@@ -752,7 +752,7 @@ def create_diffusion(
         for full control.  When ``None`` (default) each noiser class uses its
         own default SDE (e.g. :class:`~agedi.diffusion.sdes.VE` for position
         noisers, :class:`~agedi.diffusion.sdes.VP` for
-        :class:`~agedi.diffusion.noisers.CellNoiser`).
+        :class:`~agedi.diffusion.noisers.Cell`).
     conditioning : str, optional
         Property to condition on, or ``"none"`` for time-only
         conditioning.  Defaults to ``"none"``.
