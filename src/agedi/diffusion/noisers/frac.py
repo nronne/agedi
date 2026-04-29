@@ -84,23 +84,18 @@ class Fractional(SDENoiser):
 
         """
         t = batch.time
-        sigmas = self.sde.sigma(t)
+        frac = batch.frac
+        
+        sigmas = torch.sqrt(self.sde.var(t)) #self.sde.sigma(t)
+        
         sigmas_norm = self.distribution.sigma_norm(sigmas)
+        noise = self.distribution.sample(batch, sigma=sigmas, mu=frac)
+        loss_target = self.distribution.d_log_p(noise, sigmas)/torch.sqrt(sigmas_norm)  # [B_n, 1]
+
+        batch[self.key + "_target"] = loss_target
+        batch[self.key + "_noise"] = noise/sigmas
         
-
-        # mean is 1
-        frac_coords = batch.frac
-        noise_coords = torch.randn_like(frac_coords)
-
-        # NEW IMPLEMENTATION
-        target_coords = self.distribution.d_log_p(sigmas * noise_coords, sigmas)/torch.sqrt(sigmas_norm)  # [B_n, 1]
-
-        batch[self.key + "_target"] = target_coords
-        batch[self.key + "_noise"] = sigmas * noise_coords
-        
-        x_t_coords = (frac_coords + sigmas*noise_coords) % 1.0
-
-        batch.frac = x_t_coords
+        batch.frac = frac + noise
         
         return batch
 
@@ -132,22 +127,24 @@ class Fractional(SDENoiser):
 
         """
         t = batch.time        
-        r = batch.frac
-        sigmas = self.sde.noise_schedule.f(t)
+        frac = batch.frac
+        pred = batch.pos_score
+        
+        sigmas = torch.sqrt(self.sde.var(t)) #self.sde.noise_schedule.f(t)
+        
         sigmas_norm = self.distribution.sigma_norm(sigmas)
-        pred = batch["pos_score"]
+        frac_score = pred * torch.sqrt(sigmas_norm)
 
-        r_score = pred * torch.sqrt(sigmas_norm)
+
         drift = self.sde.drift(r, t)
         diffusion = self.sde.diffusion(t)
 
-        w = torch.randn_like(r)
         if last:
-            new_pos = r + delta_t * (diffusion**2 * r_score + drift) 
+            new_frac = frac + delta_t * (diffusion**2 * frac_score + drift) 
         else:
-            new_pos = r + delta_t * (diffusion**2 * r_score + drift) + torch.sqrt(delta_t) * diffusion * w
+            w = torch.distribution(batch, sigma=torch.sqrt(delta_t) * diffusion, mu=frac)
+            new_frac = frac + delta_t * (diffusion**2 * frac_score + drift) + w
             
-        new_pos = new_pos % 1.0
         batch.frac = new_pos
 
         return batch
@@ -170,13 +167,13 @@ class Fractional(SDENoiser):
 
         """
         t = batch.time
-        sigmas = self.sde.sigma(t)
+        sigmas = torch.sqrt(self.sde.var(t)) #self.sde.sigma(t)
         sigmas_norm = self.distribution.sigma_norm(sigmas)
-        r_score = batch["pos_score"]
-        r_target = batch[self.key + "_target"]
-        loss_coords = F.mse_loss(r_score, r_target)
-
-        loss = loss_coords
+        
+        score = batch.pos_score
+        target = batch[self.key + "_target"]
+        
+        loss = F.mse_loss(score, target)
 
         return loss
 
