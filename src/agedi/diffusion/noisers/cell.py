@@ -8,7 +8,7 @@ from agedi.diffusion.sdes import SDE, VP
 from agedi.diffusion.distributions import NoiseDistribution, PriorDistribution, Normal, StandardNormal
 
 
-class CellNoiser(SDENoiser):
+class Cell(SDENoiser):
     """Implements noising of the unit cell using VP diffusion.
 
     The cell is represented as a 3×3 lower-triangular matrix (canonical form).
@@ -109,7 +109,7 @@ class CellNoiser(SDENoiser):
         if noise is None:
             raise RuntimeError(
                 f"{type(self.distribution).__name__}.last_noise() returned None after sample(). "
-                "Distributions used with CellNoiser must cache unit-scale noise in last_noise()."
+                "Distributions used with Cell must cache unit-scale noise in last_noise()."
             )
         normalized_noise = (noise / sigma) * tril_mask
         batch.add_batch_attr(self.key + "_noise", normalized_noise, type="graph")
@@ -202,3 +202,6 @@ class CellNoiser(SDENoiser):
 
         return loss
 
+
+#: Backward-compatible alias for :class:`Cell`.
+CellNoiser = Cell
