@@ -35,6 +35,58 @@ def test_make_graph(atoms: "Atoms") -> None:
     assert edge_index.shape[1] == shift_vectors.shape[0]
     assert shift_vectors.shape[1] == 3
 
+def test_make_graph_pbc(atoms: "Atoms") -> None:
+    edge_index, shift_vectors = AtomsGraph.make_graph_pbc(
+        torch.tensor(atoms.positions),
+        torch.tensor(np.array(atoms.cell)),
+        6.0,
+    )
+    assert edge_index.shape[0] == 2
+    assert edge_index.shape[1] == shift_vectors.shape[0]
+    assert shift_vectors.shape[1] == 3
+    # No self-edges (same atom with zero shift)
+    assert not ((edge_index[0] == edge_index[1]) & (shift_vectors == 0).all(dim=1)).any()
+
+
+def test_make_graph_pbc_small_cell() -> None:
+    """make_graph_pbc should work correctly for small unit cells where
+    multiple periodic image repetitions are required."""
+    from ase.build import bulk
+    atoms = bulk("Cu", "fcc", a=1.8)  # very small cell
+    positions = torch.tensor(atoms.positions)
+    cell = torch.tensor(np.array(atoms.cell))
+    cutoff = 4.0
+
+    edge_index, shift_vectors = AtomsGraph.make_graph_pbc(
+        positions, cell, cutoff
+    )
+    assert edge_index.shape[0] == 2
+    assert edge_index.shape[1] == shift_vectors.shape[0]
+    assert shift_vectors.shape[1] == 3
+    # Verify all reported edges are actually within the cutoff
+    n_atoms = positions.shape[0]
+    for k in range(edge_index.shape[1]):
+        i, j = edge_index[0, k].item(), edge_index[1, k].item()
+        disp = positions[j] + shift_vectors[k] - positions[i]
+        assert disp.norm().item() <= cutoff + 1e-5
+
+
+def test_make_graph_pbc_max_neighbors() -> None:
+    """max_num_neighbors cap should be respected."""
+    from ase.build import bulk
+    atoms = bulk("Cu", "fcc", a=3.6, cubic=True)
+    positions = torch.tensor(atoms.positions)
+    cell = torch.tensor(np.array(atoms.cell))
+
+    max_nn = 5
+    edge_index, shift_vectors = AtomsGraph.make_graph_pbc(
+        positions, cell, cutoff=6.0, max_num_neighbors=max_nn
+    )
+    n_atoms = positions.shape[0]
+    counts = torch.bincount(edge_index[0], minlength=n_atoms)
+    assert (counts <= max_nn).all()
+
+
 def test_clear_graph(graph: AtomsGraph) -> None:
     graph.clear_graph()
 

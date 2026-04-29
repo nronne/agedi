@@ -49,7 +49,7 @@ class Cell(SDENoiser):
         **kwargs
     ) -> None:
         if sde is None:
-            sde = VP()
+            sde = VP(beta_min=1e-2, beta_max=0.5)
         super().__init__(sde=sde, distribution=distribution, prior=prior, **kwargs)
 
     @staticmethod
@@ -111,7 +111,7 @@ class Cell(SDENoiser):
                 f"{type(self.distribution).__name__}.last_noise() returned None after sample(). "
                 "Distributions used with Cell must cache unit-scale noise in last_noise()."
             )
-        normalized_noise = (noise / sigma) * tril_mask
+        normalized_noise = noise * tril_mask
         batch.add_batch_attr(self.key + "_noise", normalized_noise, type="graph")
 
         return batch
