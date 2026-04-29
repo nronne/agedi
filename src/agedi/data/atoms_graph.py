@@ -590,6 +590,10 @@ class AtomsGraph(Data):
         rep_a2 = int(torch.ceil(cutoff / min_dist_a2).item())
         rep_a3 = int(torch.ceil(cutoff / min_dist_a3).item())
 
+        rep_a1 = min(rep_a1, max_num_neighbors)
+        rep_a2 = min(rep_a2, max_num_neighbors)
+        rep_a3 = min(rep_a3, max_num_neighbors)
+
         # Generate all integer cell-offset triples within the required range.
         # Use torch.long for exact integer arithmetic; convert to dtype only
         # when computing Cartesian shifts via matrix multiplication.
