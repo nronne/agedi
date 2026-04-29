@@ -553,6 +553,7 @@ class AtomsGraph(Data):
         if dtype is None:
             dtype = positions.dtype
 
+        max_num_neighbors = int(max_num_neighbors)
         n_atoms = positions.shape[0]
         device = positions.device
         cell = cell.to(dtype)
