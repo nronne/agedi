@@ -95,7 +95,7 @@ class Fractional(SDENoiser):
         loss_target = self.distribution.d_log_p(sigmas*noise, sigmas)/torch.sqrt(sigmas_norm)  # [B_n, 1]
 
         batch[self.key + "_target"] = loss_target
-        batch[self.key + "_noise"] = noise#/sigmas
+        batch[self.key + "_noise"] = noise
 
 
         batch.frac = frac# + noise

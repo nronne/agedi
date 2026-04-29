@@ -25,8 +25,7 @@ class StandardNormal(PriorDistribution):
             Sampled tensor.
         """
         shape = batch[self.key].shape
-        std = 0.8 * shape[0] ** (1 / 3)
-        return torch.normal(0.0, std, size=shape)
+        return torch.normal(0.0, 1.0, size=shape)
 
 
 class Normal(NoiseDistribution):

@@ -4,7 +4,7 @@ import torch
 from typing import Optional
 from agedi.data import AtomsGraph
 from agedi.diffusion.noisers.sde import SDENoiser
-from agedi.diffusion.sdes import SDE, VP
+from agedi.diffusion.sdes import SDE, VP, VE
 from agedi.diffusion.distributions import NoiseDistribution, PriorDistribution, Normal, StandardNormal
 
 
@@ -45,12 +45,17 @@ class Cell(SDENoiser):
         self,
         sde: Optional[SDE] = None,
         distribution: NoiseDistribution = Normal(),
-        prior: PriorDistribution = StandardNormal(),
+        prior: PriorDistribution = StandardNormal(key="cell"),
+        limit_density: float = 0.05,
+        limit_var_scaling: float = 0.25,
         **kwargs
     ) -> None:
         if sde is None:
-            sde = VP(beta_min=1e-2, beta_max=0.5)
+            sde = VP(beta_min=1e-1, beta_max=20.0)
+            # sde = VE(sigma_min=0.1, sigma_max=10.0)
         super().__init__(sde=sde, distribution=distribution, prior=prior, **kwargs)
+        self.limit_density = limit_density
+        self.limit_var_scaling = limit_var_scaling
 
     @staticmethod
     def _tril_mask(device: torch.device) -> torch.Tensor:
@@ -69,10 +74,34 @@ class Cell(SDENoiser):
             The atomistic structure (or batch thereof) to be initialised.
 
         """
-        cell = self.prior.sample(batch)
-        tril_mask = self._tril_mask(cell.device)
-        cell = cell.view(-1, 3, 3) * tril_mask
-        batch._store["cell"] = cell.reshape(-1, 3)
+        noise = self.prior.sample(batch)
+        tril_mask = self._tril_mask(noise.device)
+        noise = noise.view(-1, 3, 3) * tril_mask
+
+        H0_mean = self._target_cell_mean(batch)
+        H0_sigma = torch.sqrt(self._target_cell_var(batch))
+        H0_sigma = torch.ones_like(H0_mean)
+        
+        init_cell = H0_mean + H0_sigma * noise
+        
+        batch.cell = init_cell.reshape(-1, 3)
+
+
+    def _target_cell_mean(self, batch) -> torch.Tensor:
+        eye = torch.eye(3, device=batch.cell.device, dtype=batch.cell.dtype)
+        H0 = eye.expand(batch.n_atoms.shape[0], 3, 3)
+        H0 = H0 * batch.n_atoms[:, None] / self.limit_density
+        H0 = torch.pow(H0, 1.0 / 3)
+        return H0
+
+
+    def _target_cell_var(self, batch) -> torch.Tensor:
+        eye = torch.eye(3, device=batch.cell.device, dtype=batch.cell.dtype)
+        H0 = torch.ones(batch.n_atoms.shape[0], 3, 3)
+        H0 *= batch.n_atoms[:, None]
+        H0 = torch.pow(H0, 1.0 / 3)
+        var = H0**2 * self.limit_var_scaling
+        return var
 
     def noise(self, batch: AtomsGraph) -> AtomsGraph:
         """Add noise to the cell.
@@ -93,8 +122,9 @@ class Cell(SDENoiser):
         """
         cell = batch.cell.view(-1, 3, 3)  # (n_graphs, 3, 3)
         t = batch.time[batch.ptr[:-1]].reshape(-1, 1, 1)
+        H0 = self._target_cell_mean(batch)
 
-        mean = self.sde.mean(t) * cell
+        mean = self.sde.mean(t) * cell + (1 - self.sde.mean(t)) * H0
         sigma = torch.sqrt(self.sde.var(t))
         noised_cell = self.distribution.sample(batch, mu=mean, sigma=sigma)
 
@@ -145,8 +175,9 @@ class Cell(SDENoiser):
         cell = batch.cell.view(-1, 3, 3)  # (n_graphs, 3, 3)
         c_score = batch[self.key + "_score"].view(-1, 3, 3)  # (n_graphs, 3, 3)
         t = batch.time[batch.ptr[:-1]].reshape(-1, 1, 1)
+        H0 = self._target_cell_mean(batch)        
 
-        drift = self.sde.drift(cell, t)
+        drift = self.sde.drift(H0 - cell, t)
         diffusion = self.sde.diffusion(t)
 
         tril_mask = self._tril_mask(cell.device)
@@ -154,11 +185,11 @@ class Cell(SDENoiser):
         if last:
             new_cell = cell + delta_t * (diffusion**2 * c_score + drift)
         else:
-            mean = cell + delta_t * (diffusion**2 * c_score + drift)
+            mean = cell + delta_t * (diffusion**2 * c_score + drift )
             sigma = math.sqrt(delta_t) * diffusion
             new_cell = self.distribution.sample(batch, mu=mean, sigma=sigma)
 
-        new_cell = new_cell * tril_mask
+        new_cell *= tril_mask
 
         # Use the property setter so that Cartesian positions are updated to
         # preserve fractional coordinates when the cell changes.
@@ -192,10 +223,10 @@ class Cell(SDENoiser):
 
         """
         t = batch.time[batch.ptr[:-1]].reshape(-1, 1, 1)
+        var = self.sde.var(t)
+        
         c_score = batch[self.key + "_score"].view(-1, 3, 3)
         c_noise = batch[self.key + "_noise"].view(-1, 3, 3)
-
-        var = self.sde.var(t)
 
         loss = torch.mean(
             torch.sum((c_noise + c_score * var) ** 2, dim=(-2, -1), keepdim=True)

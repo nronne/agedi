@@ -268,7 +268,7 @@ class CellScore(Head):
     _tril_rows = [0, 1, 1, 2, 2, 2]
     _tril_cols = [0, 0, 1, 0, 1, 2]
 
-    def __init__(self, input_dim_scalar: int = 66, input_dim_vector: int = 64, **kwargs):
+    def __init__(self, input_dim_scalar: int = 66, input_dim_vector: int = 64, ip=True, **kwargs):
         """Initialise the CellScore head.
 
         Parameters
@@ -284,6 +284,7 @@ class CellScore(Head):
         super().__init__(**kwargs)
         self.input_dim_scalar = input_dim_scalar
         self.input_dim_vector = input_dim_vector
+        self.ip = ip
         self.net = nn.Sequential(
             nn.Linear(input_dim_scalar, input_dim_scalar, bias=True),
             nn.SiLU(),
@@ -333,5 +334,10 @@ class CellScore(Head):
         cell_score = torch.zeros(n_graphs, 3, 3,
                                  device=values.device, dtype=values.dtype)
         cell_score[:, self._tril_rows, self._tril_cols] = values
+
+        # if self.ip:
+        #     cell = batch["_cell"].view(-1, 3, 3)
+        #     cell_score = torch.einsum("nij,njk->nik", cell_score, cell)
+        
 
         return cell_score

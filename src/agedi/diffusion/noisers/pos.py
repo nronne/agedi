@@ -98,7 +98,7 @@ class PositionsNoiser(SDENoiser):
                 f"{type(self.distribution).__name__}.last_noise() returned None after sample(). "
                 "Distributions used with PositionsNoiser must cache unit-scale noise in last_noise()."
             )
-        batch[self.key + "_noise"] = batch.apply_mask(noise / sigma)
+        batch[self.key + "_noise"] = batch.apply_mask(noise)
 
         return batch
 
