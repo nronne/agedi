@@ -207,7 +207,6 @@ class WrappedNormal(NoiseDistribution):
             p_ += torch.exp(-((x + self.T * i) ** 2) / 2 / sigma**2)
         return p_
         
-        
     def d_log_p(self, x: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
         """Calculate the gradient of the log probability density function of the wrapped normal distribution
 

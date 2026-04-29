@@ -89,14 +89,16 @@ class Fractional(SDENoiser):
         sigmas = torch.sqrt(self.sde.var(t)) #self.sde.sigma(t)
         
         sigmas_norm = self.distribution.sigma_norm(sigmas)
-        noise = self.distribution.sample(batch, sigma=sigmas, mu=frac)
-        loss_target = self.distribution.d_log_p(noise, sigmas)/torch.sqrt(sigmas_norm)  # [B_n, 1]
+        frac = self.distribution.sample(batch, mu=frac, sigma=sigmas)
+        noise = self.distribution.last_noise()
+        
+        loss_target = self.distribution.d_log_p(sigmas*noise, sigmas)/torch.sqrt(sigmas_norm)  # [B_n, 1]
 
         batch[self.key + "_target"] = loss_target
-        batch[self.key + "_noise"] = noise/sigmas
-        
-        batch.frac = frac + noise
-        
+        batch[self.key + "_noise"] = noise#/sigmas
+
+
+        batch.frac = frac# + noise
         return batch
 
     def denoise(self, batch: AtomsGraph, delta_t: float, last: bool) -> AtomsGraph:
@@ -136,16 +138,20 @@ class Fractional(SDENoiser):
         frac_score = pred * torch.sqrt(sigmas_norm)
 
 
-        drift = self.sde.drift(r, t)
+        drift = self.sde.drift(frac, t)
         diffusion = self.sde.diffusion(t)
 
         if last:
             new_frac = frac + delta_t * (diffusion**2 * frac_score + drift) 
         else:
-            w = torch.distribution(batch, sigma=torch.sqrt(delta_t) * diffusion, mu=frac)
-            new_frac = frac + delta_t * (diffusion**2 * frac_score + drift) + w
+            move = self.distribution.sample(
+                batch,
+                mu=delta_t * (diffusion**2 * frac_score + drift),
+                sigma=torch.sqrt(delta_t) * diffusion)
             
-        batch.frac = new_pos
+            new_frac = frac + move
+            
+        batch.frac = new_frac
 
         return batch
 
@@ -167,12 +173,12 @@ class Fractional(SDENoiser):
 
         """
         t = batch.time
-        sigmas = torch.sqrt(self.sde.var(t)) #self.sde.sigma(t)
-        sigmas_norm = self.distribution.sigma_norm(sigmas)
+        # sigmas = torch.sqrt(self.sde.var(t)) #self.sde.sigma(t)
+        # sigmas_norm = self.distribution.sigma_norm(sigmas)
         
         score = batch.pos_score
         target = batch[self.key + "_target"]
-        
+
         loss = F.mse_loss(score, target)
 
         return loss
