@@ -58,7 +58,10 @@ class Cell(SDENoiser):
         return torch.ones(3, 3, dtype=torch.bool, device=device).tril()
 
     def initialize_graph(self, batch: AtomsGraph) -> None:
-        """Initialise the cell from a standard-normal lower-triangular prior.
+        """Initialise the cell from the prior distribution.
+
+        Samples from ``self.prior`` and enforces the lower-triangular
+        canonical form before storing the result.
 
         Parameters
         ----------
@@ -66,11 +69,9 @@ class Cell(SDENoiser):
             The atomistic structure (or batch thereof) to be initialised.
 
         """
-        n_graphs = batch.cell.view(-1, 3, 3).shape[0]
-        device = batch.cell.device
-        dtype = batch.cell.dtype
-        cell = torch.randn(n_graphs, 3, 3, device=device, dtype=dtype)
-        cell = cell * self._tril_mask(device)
+        cell = self.prior.sample(batch)
+        tril_mask = self._tril_mask(cell.device)
+        cell = cell.view(-1, 3, 3) * tril_mask
         batch._store["cell"] = cell.reshape(-1, 3)
 
     def noise(self, batch: AtomsGraph) -> AtomsGraph:
@@ -91,7 +92,6 @@ class Cell(SDENoiser):
 
         """
         cell = batch.cell.view(-1, 3, 3)  # (n_graphs, 3, 3)
-        f = batch.frac.clone()
         t = batch.time[batch.ptr[:-1]].reshape(-1, 1, 1)
 
         mean = self.sde.mean(t) * cell
@@ -102,8 +102,9 @@ class Cell(SDENoiser):
         tril_mask = self._tril_mask(cell.device)
         noised_cell = noised_cell * tril_mask
 
-        batch._store["cell"] = noised_cell.reshape(-1, 3)
-        batch.frac = f
+        # Use the property setter so that Cartesian positions are updated to
+        # preserve fractional coordinates when the cell changes.
+        batch.cell = noised_cell.reshape(-1, 3)
 
         noise = self.distribution.last_noise()
         if noise is None:
@@ -142,7 +143,6 @@ class Cell(SDENoiser):
 
         """
         cell = batch.cell.view(-1, 3, 3)  # (n_graphs, 3, 3)
-        f = batch.frac.clone()
         c_score = batch[self.key + "_score"].view(-1, 3, 3)  # (n_graphs, 3, 3)
         t = batch.time[batch.ptr[:-1]].reshape(-1, 1, 1)
 
@@ -160,8 +160,9 @@ class Cell(SDENoiser):
 
         new_cell = new_cell * tril_mask
 
-        batch._store["cell"] = new_cell.reshape(-1, 3)
-        batch.frac = f
+        # Use the property setter so that Cartesian positions are updated to
+        # preserve fractional coordinates when the cell changes.
+        batch.cell = new_cell.reshape(-1, 3)
 
         return batch
 
