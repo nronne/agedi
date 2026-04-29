@@ -258,6 +258,7 @@ def _painn_factory(cutoff: float, heads: Sequence[str], feature_size: int, n_blo
     from agedi.models.schnetpack import (
         PositionsScore,
         TypesScore,
+        CellScore,
         SchNetPackTranslator,
     )
 
@@ -287,7 +288,6 @@ def _painn_factory(cutoff: float, heads: Sequence[str], feature_size: int, n_blo
             case "Types" | "types":
                 h.append(TypesScore(input_dim_scalar=head_dim))
             case "Cell" | "cell":
-                from agedi.models.schnetpack.heads import CellScore
                 h.append(CellScore(input_dim_scalar=head_dim))
             case _ if hasattr(head, "_key") and head._key == "positions":
                 h.append(PositionsScore(input_dim_scalar=head_dim))
@@ -295,7 +295,6 @@ def _painn_factory(cutoff: float, heads: Sequence[str], feature_size: int, n_blo
                 n_classes = getattr(head, "n_classes", 100)
                 h.append(TypesScore(input_dim_scalar=head_dim, n_classes=n_classes))
             case _ if hasattr(head, "_key") and head._key == "cell":
-                from agedi.models.schnetpack.heads import CellScore
                 h.append(CellScore(input_dim_scalar=head_dim))
             case _:
                 raise ValueError(f"Unknown head '{head}'")
