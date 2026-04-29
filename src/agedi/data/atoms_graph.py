@@ -266,6 +266,7 @@ class AtomsGraph(Data):
         initialize_mask: Optional[bool] = None,
         confinement: Optional[Tuple[float, float]] = None,
         canonical_cell: bool = False,
+        use_pbc_graph: bool = True,
     ) -> "AtomsGraph":
         """Create a graph from an ASE Atoms object.
 
@@ -294,6 +295,13 @@ class AtomsGraph(Data):
             fractional coordinates and a warning is printed.  Set to
             ``False`` to store the cell exactly as provided by ASE (no
             rotation or recomputation is performed).
+        use_pbc_graph: bool
+            When ``True`` (the default) and all periodic boundary conditions
+            are enabled, :meth:`make_graph_pbc` is used to build the graph
+            instead of the matscipy-based :meth:`make_graph`.
+            :meth:`make_graph_pbc` is more robust for small or highly
+            non-orthorhombic unit cells.  Set to ``False`` to always use
+            :meth:`make_graph`.
 
         Returns
         -------
@@ -307,6 +315,7 @@ class AtomsGraph(Data):
         # Nodes: The initial node features are just the atomic numbers.
         kwargs = {
             "cutoff": cutoff,
+            "use_pbc_graph": use_pbc_graph,
         }
 
         kwargs["x"] = torch.tensor(
@@ -346,9 +355,14 @@ class AtomsGraph(Data):
         kwargs["cell"] = final_cell_f64.to(dtype)
         kwargs["pbc"] = torch.tensor(atoms.get_pbc())
 
-        edge_index, shift_vectors = cls.make_graph(
-            kwargs["pos"], kwargs["cell"], cutoff, kwargs["pbc"]
-        )
+        if use_pbc_graph and kwargs["pbc"].all():
+            edge_index, shift_vectors = cls.make_graph_pbc(
+                kwargs["pos"], kwargs["cell"], cutoff
+            )
+        else:
+            edge_index, shift_vectors = cls.make_graph(
+                kwargs["pos"], kwargs["cell"], cutoff, kwargs["pbc"]
+            )
         kwargs["edge_index"] = edge_index
         kwargs["shift_vectors"] = shift_vectors
 
@@ -657,12 +671,21 @@ class AtomsGraph(Data):
         )
 
         device = self.pos.device
-        edge_index, shift_vectors = self.make_graph(
-            self.pos.detach().cpu(),
-            self.cell.detach().cpu(),
-            cutoff,
-            self.pbc.detach().cpu(),
-        )
+        use_pbc = getattr(self, "use_pbc_graph", True)
+        pbc = self.pbc.detach().cpu()
+        if use_pbc and pbc.all():
+            edge_index, shift_vectors = self.make_graph_pbc(
+                self.pos.detach().cpu(),
+                self.cell.detach().cpu(),
+                cutoff,
+            )
+        else:
+            edge_index, shift_vectors = self.make_graph(
+                self.pos.detach().cpu(),
+                self.cell.detach().cpu(),
+                cutoff,
+                pbc,
+            )
         self.edge_index = edge_index.to(device)
         self.shift_vectors = shift_vectors.to(device)
 
