@@ -11,7 +11,7 @@ click.rich_click.OPTION_GROUPS.update(
             },
             {
                 "name": "Diffusion Model Options",
-                "options": ["--noisers", "--sde", "--conditioning", "--conditioning_type", "--force_field"],
+                "options": ["--noisers", "--conditioning", "--conditioning_type", "--force_field"],
             },
             {
                 "name": "Training Options",
@@ -58,10 +58,12 @@ _VALID_NOISERS = {
     "CellPositions",
     "ConfinedCellPositions",
     "Types",
+    "Cell",
     "positions",
     "cell_positions",
     "confined_cell_positions",
     "types",
+    "cell",
 }
 _DEFAULT_NOISER = "CellPositions"
 
@@ -69,13 +71,6 @@ _DEFAULT_NOISER = "CellPositions"
 @click.command()
 @click.argument("input", type=click.Path(exists=True))
 @click.argument("overrides", nargs=-1, metavar="[KEY=VALUE ...]")
-@click.option(
-    "--sde",
-    type=click.Choice(["ve", "vp"]),
-    default="ve",
-    show_default=True,
-    help="SDE to use for position noisers",
-)
 @click.option(
     "--model",
     "-m",
@@ -116,7 +111,7 @@ _DEFAULT_NOISER = "CellPositions"
     show_default=True,
     help=(
         "Noiser(s) to use for diffusion. "
-        "Valid values: Positions, CellPositions, ConfinedCellPositions, Types "
+        "Valid values: Positions, CellPositions, ConfinedCellPositions, Types, Cell "
         "(snake_case aliases also accepted). "
         "Use a comma-separated list to specify multiple noisers in a single flag "
         "(e.g. '--noisers ConfinedCellPositions,Types'), "
@@ -360,7 +355,6 @@ def train(**params) -> None:
             feature_size=params["feature_size"],
             n_blocks=params["n_blocks"],
             noisers=noisers,
-            sde=params["sde"],
             conditioning=params["conditioning"],
             conditioning_type=params["conditioning_type"],
             force_field=params["force_field"],

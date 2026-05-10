@@ -9,6 +9,8 @@ the CLI.
 Position noisers
 ----------------
 
+Each position noiser bundles a fixed :class:`~agedi.diffusion.distributions.PriorDistribution`
+and a fixed :class:`~agedi.diffusion.distributions.NoiseDistribution`.
 Choose the noiser that matches your system type:
 
 .. list-table:: Position noisers
@@ -16,8 +18,8 @@ Choose the noiser that matches your system type:
    :widths: 35 25 25 25
 
    * - Noiser string / class
-     - Prior
-     - Distribution
+     - PriorDistribution
+     - NoiseDistribution
      - Use case
    * - ``"Positions"`` / :class:`~agedi.diffusion.noisers.Positions`
      - StandardNormal

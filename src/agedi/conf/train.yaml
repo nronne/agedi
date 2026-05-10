@@ -45,11 +45,13 @@ noisers:
                       #   CellPositions           : UniformCell prior + Normal (periodic bulk/surface)
                       #   ConfinedCellPositions   : UniformCellConfined prior + TruncatedNormal (Z-confined)
                       #   Types                   : discrete atom-type diffusion
+                      #   Cell                    : VP diffusion of the unit-cell matrix
 
-# SDE for position noisers.
-#   ve : Variance-Exploding SDE (default)
+# SDE override (advanced, optional).  When omitted each noiser uses its own default SDE.
+# Position noisers default to VE; CellNoiser defaults to VP.
+#   ve : Variance-Exploding SDE
 #   vp : Variance-Preserving SDE
-sde: ve
+# sde: ve
 
 # Property conditioning (optional).  Set to "none" to disable.
 conditioning: none

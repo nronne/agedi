@@ -113,7 +113,7 @@ def _resolve_sde(alias: Union[str, "SDE"]) -> "SDE":
 
 def _build_noisers(
     noisers: Sequence[Union[str, "Noiser"]],
-    sde: Union[str, "SDE"] = "ve",
+    sde: Optional[Union[str, "SDE"]] = None,
 ) -> List["Noiser"]:
     """Build a list of Noiser objects from a sequence of noiser names or objects.
 
@@ -135,11 +135,15 @@ def _build_noisers(
           (UniformCellConfined prior + TruncatedNormal distribution, for
           Z-confined surfaces/porous materials).
         * ``"Types"`` – :class:`~agedi.diffusion.noisers.Types`.
+        * ``"Cell"`` – :class:`~agedi.diffusion.noisers.Cell`.
 
-    sde : str or SDE, optional
-        Stochastic differential equation to use for position noisers.  Either a
-        short alias (``"ve"``, ``"vp"``) or an already-instantiated
-        :class:`~agedi.diffusion.sdes.SDE` object.  Defaults to ``"ve"``.
+    sde : str, SDE, or None, optional
+        Stochastic differential equation to override for all string-resolved
+        noisers.  Either a short alias (``"ve"``, ``"vp"``) or an
+        already-instantiated :class:`~agedi.diffusion.sdes.SDE` object.
+        When ``None`` (default) each noiser class uses its own default SDE
+        (e.g. :class:`~agedi.diffusion.sdes.VE` for position noisers,
+        :class:`~agedi.diffusion.sdes.VP` for :class:`~agedi.diffusion.noisers.Cell`).
 
     Returns
     -------
@@ -148,7 +152,7 @@ def _build_noisers(
     """
     from agedi.diffusion.noisers import Noiser
 
-    resolved_sde = _resolve_sde(sde)
+    resolved_sde = _resolve_sde(sde) if sde is not None else None
     noiser_list = []
     for noiser in noisers:
         if isinstance(noiser, Noiser):
@@ -254,6 +258,7 @@ def _painn_factory(cutoff: float, heads: Sequence[str], feature_size: int, n_blo
     from agedi.models.schnetpack import (
         PositionsScore,
         TypesScore,
+        CellScore,
         SchNetPackTranslator,
     )
 
@@ -275,17 +280,22 @@ def _painn_factory(cutoff: float, heads: Sequence[str], feature_size: int, n_blo
                 | "CellPositions"
                 | "ConfinedCellPositions"
                 | "positions"
+                | "Fractional"
                 | "cell_positions"
                 | "confined_cell_positions"
             ):
                 h.append(PositionsScore(input_dim_scalar=head_dim))
             case "Types" | "types":
                 h.append(TypesScore(input_dim_scalar=head_dim))
+            case "Cell" | "cell":
+                h.append(CellScore(input_dim_scalar=head_dim))
             case _ if hasattr(head, "_key") and head._key == "positions":
                 h.append(PositionsScore(input_dim_scalar=head_dim))
             case _ if hasattr(head, "_key") and head._key == "x":
                 n_classes = getattr(head, "n_classes", 100)
                 h.append(TypesScore(input_dim_scalar=head_dim, n_classes=n_classes))
+            case _ if hasattr(head, "_key") and head._key == "cell":
+                h.append(CellScore(input_dim_scalar=head_dim))
             case _:
                 raise ValueError(f"Unknown head '{head}'")
 
@@ -691,7 +701,7 @@ def create_diffusion(
     n_blocks: int = 4,
     n_rbf: int = 30,
     noisers: Sequence[Union[str, "Noiser"]] = ("CellPositions",),
-    sde: Union[str, "SDE"] = "ve",
+    sde: Optional[Union[str, "SDE"]] = None,
     conditioning: str = "none",
     conditioning_type: str = "scalar",
     confinement: Optional[Tuple[float, float]] = None,
@@ -733,11 +743,16 @@ def create_diffusion(
           :class:`~agedi.diffusion.noisers.ConfinedCellPositions`
           (UniformCellConfined prior + TruncatedNormal, for Z-confined systems).
         * ``"Types"`` / ``"types"`` – :class:`~agedi.diffusion.noisers.Types`.
+        * ``"Cell"`` / ``"cell"`` – :class:`~agedi.diffusion.noisers.Cell`
+          (VP SDE, lower-triangular cell matrix diffusion).
 
-    sde : str or SDE, optional
-        SDE for position noisers.  Short aliases: ``"ve"`` (default),
-        ``"vp"``.  Pass an instantiated
-        :class:`~agedi.diffusion.sdes.SDE` for full control.
+    sde : str, SDE, or None, optional
+        Override SDE for all string-resolved noisers.  Short aliases: ``"ve"``,
+        ``"vp"``.  Pass an instantiated :class:`~agedi.diffusion.sdes.SDE`
+        for full control.  When ``None`` (default) each noiser class uses its
+        own default SDE (e.g. :class:`~agedi.diffusion.sdes.VE` for position
+        noisers, :class:`~agedi.diffusion.sdes.VP` for
+        :class:`~agedi.diffusion.noisers.Cell`).
     conditioning : str, optional
         Property to condition on, or ``"none"`` for time-only
         conditioning.  Defaults to ``"none"``.
@@ -1244,7 +1259,7 @@ def train_from_atoms(
     n_blocks: int = 4,
     n_rbf: int = 30,
     noisers: Sequence[str] = ("CellPositions",),
-    sde: Union[str, "SDE"] = "ve",
+    sde: Optional[Union[str, "SDE"]] = None,
     conditioning: str = "none",
     conditioning_type: str = "scalar",
     mask: str = "none",
@@ -1344,7 +1359,7 @@ def train_from_atoms(
         "diffusion": diffusion.get_hparams(),
         # Metadata — not needed for model reconstruction, but useful for display.
         "noisers": list(noisers),
-        "sde": sde if isinstance(sde, str) else type(sde).__name__,
+        "sde": sde if isinstance(sde, str) else (type(sde).__name__ if sde is not None else None),
         "conditioning": conditioning,
         "conditioning_type": conditioning_type,
         "confinement": list(confinement) if confinement is not None else None,

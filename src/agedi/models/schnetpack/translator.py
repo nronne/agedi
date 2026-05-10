@@ -113,7 +113,7 @@ class SchNetPackTranslator(Translator):
             idx_m: batch.batch,
             idx_i: batch.edge_index[0],
             idx_j: batch.edge_index[1],
-            'cellpar': batch.cellpar,
+            # 'cellpar': batch.cellpar,
         }
 
         if hasattr(batch, "energy"):

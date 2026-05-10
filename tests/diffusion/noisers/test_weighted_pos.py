@@ -10,7 +10,7 @@ def test_weighted_positions_noiser_loss_matches_manual(batch):
     batch.pos_noise = torch.randn_like(batch.pos)
     batch.weight = torch.arange(1, batch.num_graphs + 1, dtype=torch.float)
 
-    loss = noiser._loss(batch)
+    loss = noiser.loss(batch)
 
     weights = batch.weight.repeat_interleave(batch.n_atoms.view(-1), dim=0)
     var = noiser.sde.var(batch.time)

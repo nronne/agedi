@@ -23,8 +23,7 @@ class ConcreteSDE(SDENoiser):
 @pytest.fixture
 def sde_noiser():
     return ConcreteSDE(
-        sde_class=VE,
-        sde_kwargs={},
+        sde=VE(),
         distribution=Normal(),
         prior=Normal(),
     )

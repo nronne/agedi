@@ -266,6 +266,7 @@ class AtomsGraph(Data):
         initialize_mask: Optional[bool] = None,
         confinement: Optional[Tuple[float, float]] = None,
         canonical_cell: bool = False,
+        use_pbc_graph: bool = True,
     ) -> "AtomsGraph":
         """Create a graph from an ASE Atoms object.
 
@@ -294,6 +295,13 @@ class AtomsGraph(Data):
             fractional coordinates and a warning is printed.  Set to
             ``False`` to store the cell exactly as provided by ASE (no
             rotation or recomputation is performed).
+        use_pbc_graph: bool
+            When ``True`` (the default) and all periodic boundary conditions
+            are enabled, :meth:`make_graph_pbc` is used to build the graph
+            instead of the matscipy-based :meth:`make_graph`.
+            :meth:`make_graph_pbc` is more robust for small or highly
+            non-orthorhombic unit cells.  Set to ``False`` to always use
+            :meth:`make_graph`.
 
         Returns
         -------
@@ -307,6 +315,7 @@ class AtomsGraph(Data):
         # Nodes: The initial node features are just the atomic numbers.
         kwargs = {
             "cutoff": cutoff,
+            "use_pbc_graph": use_pbc_graph,
         }
 
         kwargs["x"] = torch.tensor(
@@ -346,9 +355,14 @@ class AtomsGraph(Data):
         kwargs["cell"] = final_cell_f64.to(dtype)
         kwargs["pbc"] = torch.tensor(atoms.get_pbc())
 
-        edge_index, shift_vectors = cls.make_graph(
-            kwargs["pos"], kwargs["cell"], cutoff, kwargs["pbc"]
-        )
+        if use_pbc_graph and kwargs["pbc"].all():
+            edge_index, shift_vectors = cls.make_graph_pbc(
+                kwargs["pos"], kwargs["cell"], cutoff
+            )
+        else:
+            edge_index, shift_vectors = cls.make_graph(
+                kwargs["pos"], kwargs["cell"], cutoff, kwargs["pbc"]
+            )
         kwargs["edge_index"] = edge_index
         kwargs["shift_vectors"] = shift_vectors
 
@@ -503,6 +517,147 @@ class AtomsGraph(Data):
 
         return edge_index, shift_vectors
 
+    @staticmethod
+    def make_graph_pbc(
+        positions: torch.Tensor,
+        cell: torch.Tensor,
+        cutoff: float,
+        max_num_neighbors: int = 20,
+        dtype: torch.dtype = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Create graph edges for a periodic structure, robust to small/odd cells.
+
+        Unlike :meth:`make_graph` (which delegates to matscipy's
+        ``neighbour_list``), this method explicitly computes the number of
+        periodic-image repetitions required in each direction from the cell
+        geometry and the cutoff radius.  This makes it work correctly for
+        small or highly non-orthorhombic unit cells where neighbour-list
+        libraries may behave unexpectedly or run indefinitely.
+
+        A hard cap on the number of neighbours per atom (``max_num_neighbors``)
+        is applied, retaining only the closest neighbours.  This bounds the
+        output size and ensures the method terminates for any input cell.
+
+        Parameters
+        ----------
+        positions : torch.Tensor
+            Cartesian atom positions, shape ``(n_atoms, 3)``.
+        cell : torch.Tensor
+            Cell matrix of shape ``(3, 3)`` where **row** ``i`` is lattice
+            vector :math:`\\mathbf{a}_i`.
+        cutoff : float
+            Edge cutoff radius in Ångström.
+        max_num_neighbors : int
+            Maximum number of neighbours kept per atom (closest first).
+            Defaults to 20.
+        dtype : torch.dtype, optional
+            Output tensor dtype.  Defaults to ``positions.dtype``.
+
+        Returns
+        -------
+        edge_index : torch.Tensor
+            Shape ``(2, n_edges)``.  ``edge_index[0]`` contains the indices of
+            center atoms and ``edge_index[1]`` contains neighbour indices,
+            matching the convention of :meth:`make_graph`.
+        shift_vectors : torch.Tensor
+            Cartesian shift vectors of shape ``(n_edges, 3)``.  Adding
+            ``shift_vectors[k]`` to ``positions[edge_index[1, k]]`` gives the
+            Cartesian position of the neighbour in the periodic image.
+        """
+        if dtype is None:
+            dtype = positions.dtype
+
+        max_num_neighbors = int(max_num_neighbors)
+        n_atoms = positions.shape[0]
+        device = positions.device
+        cell = cell.to(dtype)
+        positions = positions.to(dtype)
+
+        # Compute interplanar distances to determine the number of unit-cell
+        # repetitions needed in each direction to fully cover the cutoff sphere.
+        # The minimum distance between planes whose normal is a_j x a_k equals
+        # the cell volume divided by the area of that face.
+        cross_a2a3 = torch.linalg.cross(cell[1], cell[2])
+        cross_a3a1 = torch.linalg.cross(cell[2], cell[0])
+        cross_a1a2 = torch.linalg.cross(cell[0], cell[1])
+        cell_vol = torch.abs(torch.dot(cell[0], cross_a2a3))
+
+        min_dist_a1 = cell_vol / torch.norm(cross_a2a3)
+        min_dist_a2 = cell_vol / torch.norm(cross_a3a1)
+        min_dist_a3 = cell_vol / torch.norm(cross_a1a2)
+
+        rep_a1 = int(torch.ceil(cutoff / min_dist_a1).item())
+        rep_a2 = int(torch.ceil(cutoff / min_dist_a2).item())
+        rep_a3 = int(torch.ceil(cutoff / min_dist_a3).item())
+
+        rep_a1 = min(rep_a1, max_num_neighbors)
+        rep_a2 = min(rep_a2, max_num_neighbors)
+        rep_a3 = min(rep_a3, max_num_neighbors)
+
+        # Generate all integer cell-offset triples within the required range.
+        # Use torch.long for exact integer arithmetic; convert to dtype only
+        # when computing Cartesian shifts via matrix multiplication.
+        r1 = torch.arange(-rep_a1, rep_a1 + 1, device=device, dtype=torch.long)
+        r2 = torch.arange(-rep_a2, rep_a2 + 1, device=device, dtype=torch.long)
+        r3 = torch.arange(-rep_a3, rep_a3 + 1, device=device, dtype=torch.long)
+        grid = torch.meshgrid(r1, r2, r3, indexing="ij")
+        int_offsets = torch.stack(
+            [g.reshape(-1) for g in grid], dim=-1
+        )  # (n_offsets, 3) integer offsets
+        cell_shifts = int_offsets.to(dtype) @ cell  # Cartesian shift vectors (n_offsets, 3)
+        n_offsets = int_offsets.shape[0]
+
+        # All (center, neighbour) atom-index pairs, including self-pairs which
+        # are removed afterwards via the distance mask.
+        idx_i = torch.arange(n_atoms, device=device).repeat_interleave(n_atoms)
+        idx_j = torch.arange(n_atoms, device=device).repeat(n_atoms)
+        n_pairs = n_atoms * n_atoms
+
+        # Expand each pair over every cell offset.
+        idx_i_exp = idx_i.repeat_interleave(n_offsets)  # (n_pairs * n_offsets,)
+        idx_j_exp = idx_j.repeat_interleave(n_offsets)
+        shifts_exp = cell_shifts.repeat(n_pairs, 1)  # (n_pairs * n_offsets, 3)
+
+        # Displacement from center atom i to image of atom j.
+        disp = positions[idx_j_exp] + shifts_exp - positions[idx_i_exp]
+        dist_sq = (disp * disp).sum(dim=-1)
+
+        # Keep only pairs within the cutoff; remove strict self-interactions
+        # (same atom, zero shift → dist² ≈ 0).
+        mask = (dist_sq <= cutoff * cutoff) & (dist_sq > 1e-8)
+        idx_i_exp = idx_i_exp[mask]
+        idx_j_exp = idx_j_exp[mask]
+        dist_sq = dist_sq[mask]
+        shifts_exp = shifts_exp[mask]
+
+        # Sort by distance, then stable-sort by center-atom index so that
+        # within each group edges are ordered nearest-first.
+        perm = torch.argsort(dist_sq)
+        idx_i_exp = idx_i_exp[perm]
+        idx_j_exp = idx_j_exp[perm]
+        dist_sq = dist_sq[perm]
+        shifts_exp = shifts_exp[perm]
+
+        perm2 = torch.argsort(idx_i_exp, stable=True)
+        idx_i_exp = idx_i_exp[perm2]
+        idx_j_exp = idx_j_exp[perm2]
+        shifts_exp = shifts_exp[perm2]
+
+        # Compute within-group rank and apply the max_num_neighbors cap.
+        counts = torch.bincount(idx_i_exp, minlength=n_atoms)
+        group_start = torch.zeros(n_atoms + 1, dtype=torch.long, device=device)
+        group_start[1:] = counts.cumsum(0)
+        within_rank = (
+            torch.arange(idx_i_exp.shape[0], device=device)
+            - group_start[idx_i_exp]
+        )
+        keep = within_rank < max_num_neighbors
+
+        edge_index = torch.stack([idx_i_exp[keep], idx_j_exp[keep]], dim=0)
+        shift_vectors = shifts_exp[keep].to(dtype)
+
+        return edge_index, shift_vectors
+
     @batched(update_keys=["edge_index", "shift_vectors"])
     def update_graph(self) -> None:
         """Update the graph with new edges
@@ -520,12 +675,21 @@ class AtomsGraph(Data):
         )
 
         device = self.pos.device
-        edge_index, shift_vectors = self.make_graph(
-            self.pos.detach().cpu(),
-            self.cell.detach().cpu(),
-            cutoff,
-            self.pbc.detach().cpu(),
-        )
+        use_pbc = getattr(self, "use_pbc_graph", True)
+        pbc = self.pbc.detach().cpu()
+        if use_pbc and pbc.all():
+            edge_index, shift_vectors = self.make_graph_pbc(
+                self.pos.detach().cpu(),
+                self.cell.detach().cpu(),
+                cutoff,
+            )
+        else:
+            edge_index, shift_vectors = self.make_graph(
+                self.pos.detach().cpu(),
+                self.cell.detach().cpu(),
+                cutoff,
+                pbc,
+            )
         self.edge_index = edge_index.to(device)
         self.shift_vectors = shift_vectors.to(device)
 
@@ -667,7 +831,7 @@ class AtomsGraph(Data):
         None
 
         """
-        frac %= 1
+        frac %= 1.0
         if "frac" in self._store:
             self.clear_graph()
         if "mask" in self._store:

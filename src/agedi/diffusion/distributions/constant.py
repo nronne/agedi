@@ -1,10 +1,10 @@
 import torch
-from typing import Dict, Type, Optional
-from agedi.diffusion.distributions import Distribution
+from typing import Dict, Type
+from agedi.diffusion.distributions import Distribution, PriorDistribution
 from agedi.data import AtomsGraph
 
 
-class Constant(Distribution):
+class Constant(PriorDistribution):
     """Constant Integer Distribution"""
 
     def __init__(
@@ -32,35 +32,19 @@ class Constant(Distribution):
         """Return hyperparameters for this distribution."""
         return {**super().get_hparams(), "value": self.value}
 
-    def _setup(self, batch: AtomsGraph) -> None:
-        """Prepare the distribution for sampling from *batch*.
-
-        Sets ``self.shape`` based on the total number of atoms in the batch.
+    def sample(self, batch: AtomsGraph, **kwargs) -> torch.Tensor:
+        """Sample a constant tensor.
 
         Parameters
         ----------
         batch : AtomsGraph
-            Batch of atomistic data.
-        """
-        if self.key is not None:
-            self.shape = (batch.n_atoms.sum().item(),)
-
-    def _sample(self, shape: Optional[torch.Size] = None) -> torch.Tensor:
-        """
-        Sample from the integer distribution
-
-        Parameters
-        ----------
-        mu : torch.Tensor
-            Mean of the distribution
-        sigma : torch.Tensor
-            Standard deviation of the distribution
+            Batch of atomistic data.  The shape is derived from
+            ``batch.n_atoms``.
 
         Returns
         -------
         torch.Tensor
-            Sampled tensor
-
+            Constant tensor of shape ``(n_atoms,)``.
         """
-        shape = shape if shape is not None else self.shape
+        shape = (batch.n_atoms.sum().item(),)
         return torch.ones(shape, dtype=self.dtype) * self.value

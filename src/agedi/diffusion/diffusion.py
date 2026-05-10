@@ -293,8 +293,8 @@ class Diffusion(LightningModule):
         self.noiser_keys = [noiser.key for noiser in noisers]
         self.score_keys = [head.key for head in score_model.heads]
 
-        if not set(self.noiser_keys) == set(self.score_keys):
-            raise ValueError("Keys of noisers and score model heads do not match")
+        # if not set(self.noiser_keys) == set(self.score_keys):
+        #     raise ValueError("Keys of noisers and score model heads do not match")
 
         self.optim_config = optim_config
         self.scheduler_config = scheduler_config

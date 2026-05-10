@@ -1,4 +1,4 @@
-from typing import Callable, Dict, Optional
+from typing import Dict, Optional
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -6,97 +6,12 @@ import numpy as np
 from agedi.data import AtomsGraph
 from agedi.diffusion.noisers import Noiser
 from agedi.diffusion.distributions import Constant, Categorical
+from agedi.diffusion.sdes.noise_schedules import DiscreteExponential
 
-
-class NoiseSchedule:
-    """Noise schedule for the discrete type diffusion model (Q matrix).
-
-    Implements an exponential noise schedule parameterised by *beta_min* and
-    *beta_max*, following the score-entropy discrete diffusion formulation.
-    """
-
-    def __init__(self, beta_min: float, beta_max: float) -> None:
-        """The noise schedule for the type noiser Q
-
-        Parameters
-        ----------
-        beta_min : float
-            The minimum beta value
-        beta_max : float
-            The maximum beta value
-
-        """
-        self.beta_min = beta_min
-        self.beta_max = beta_max
-
-    def get_hparams(self) -> Dict:
-        """Return hyperparameters sufficient to reconstruct this noise schedule.
-
-        Returns
-        -------
-        dict
-            Hyperparameter dictionary with ``_target_``, ``beta_min``, and
-            ``beta_max``.
-        """
-        return {
-            "_target_": f"{type(self).__module__}.{type(self).__qualname__}",
-            "beta_min": self.beta_min,
-            "beta_max": self.beta_max,
-        }
-
-    def _beta_t(self, time: torch.Tensor) -> torch.Tensor:
-        """Beta function for the type noiser Q
-
-        Parameters
-        ----------
-        time : torch.Tensor
-            Diffusion time
-
-        Returns
-        -------
-        torch.Tensor
-            The beta value for the given time
-        
-        """
-        return self.beta_min + (self.beta_max - self.beta_min) * time
-
-    def rate_noise(self, time: torch.Tensor) -> torch.Tensor:
-        """The rate of change of the noise i.e. g(t)
-
-        Parameters
-        ----------
-        time : torch.Tensor
-            The diffusion time
-
-        Returns
-        -------
-        torch.Tensor
-           The rate of change of the noise
-        """
-        return (
-            self.beta_min ** (1 - time)
-            * self.beta_max**time
-            * (np.log(self.beta_max) - np.log(self.beta_min))
-        )
-
-    def total_noise(self, time: torch.Tensor) -> torch.Tensor:
-        """Total noise at time t
-
-        Given as the integral of the rate of change of the noise i.e.
-        \int_0^t g(t) dt + g(0)
-
-        Parameters
-        ----------
-        time : torch.Tensor
-            The diffusion time
-
-        Returns
-        -------
-        torch.Tensor
-            The total noise at time t
-        
-        """
-        return self.beta_min ** (1 - time) * self.beta_max**time
+#: Backward-compatible alias: ``NoiseSchedule`` was a private class defined
+#: inside this module in earlier versions.  New code should import
+#: :class:`~agedi.diffusion.sdes.noise_schedules.DiscreteExponential` directly.
+NoiseSchedule = DiscreteExponential
 
 
 class Transition:
@@ -120,7 +35,7 @@ class Types(Noiser):
         self,
         prior=Constant(0),
         distribution=Categorical(),
-        noise_schedule: NoiseSchedule = NoiseSchedule(0.01, 3.0),
+        noise_schedule: DiscreteExponential = DiscreteExponential(0.01, 3.0),
         sampling_mask: Optional[torch.Tensor] = None,
         n_classes: int = 100,
         **kwargs
@@ -129,11 +44,11 @@ class Types(Noiser):
 
         Parameters
         ----------
-        prior : Distribution, optional
+        prior : PriorDistribution, optional
             Prior distribution for atomic types (defaults to absorbing state 0).
-        distribution : Distribution, optional
-            Categorical distribution used for sampling during denoising.
-        noise_schedule : NoiseSchedule, optional
+        distribution : NoiseDistribution, optional
+            Categorical sampler used for sampling during denoising.
+        noise_schedule : DiscreteExponential, optional
             Noise schedule controlling the forward corruption rate.
         sampling_mask : torch.Tensor, optional
             Boolean mask restricting which element types can be sampled.
@@ -157,20 +72,18 @@ class Types(Noiser):
             "n_classes": self.n_classes,
         }
 
-    def _noise(self, batch: AtomsGraph) -> AtomsGraph:
-        """Noises the attribute of the atomistic structure.
-
-        Performs the noising of the atomic types.
+    def noise(self, batch: AtomsGraph) -> AtomsGraph:
+        """Noise the atomic types.
 
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised.
+            The atomistic structure (or batch thereof) to be noised.
 
         Returns
         -------
         AtomsGraph
-            The noised atomistic structure (or bach hereof).
+            The noised atomistic structure (or batch thereof).
 
         """
         time = batch.time
@@ -183,26 +96,22 @@ class Types(Noiser):
 
         return batch
 
-    def _denoise(self, batch: AtomsGraph, delta_t: float, last: bool) -> AtomsGraph:
-        """Denoises the attribute of the atomistic structure.
-
-        Denoisis the atomic types.
+    def denoise(self, batch: AtomsGraph, delta_t: float, last: bool) -> AtomsGraph:
+        """Denoise the atomic types.
 
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be denoised.
+            The atomistic structure (or batch thereof) to be denoised.
         delta_t: float
             The time step to be used for the denoising.
         last: bool
-            If the last denoising step is performed.
+            Whether this is the final denoising step.
 
         Returns
         -------
         AtomsGraph
-            The denoised atomistic structure (or bach hereof).
-
-
+            The denoised atomistic structure (or batch thereof).
 
         """
         types = batch[self.key]
@@ -219,41 +128,39 @@ class Types(Noiser):
 
         sigma = self.noise_schedule.total_noise(time)
         dsigma = self.noise_schedule.rate_noise(time)
-        dist = self.distribution.get_callable(batch)
 
         if last:
             stag_score = self.staggered_score(score, sigma)
             probs = stag_score * self.transp_transition(types, sigma)
             probs[:, 0] = 0.0  # no adsorb states
-            new_types = dist(probs)
+            new_types = self.distribution.sample(batch, probs=probs)
         else:
             rev_rate = delta_t * dsigma * self.reverse_rate(types, score)
-            new_types = self.sample_rate(dist, types, rev_rate)
+            new_types = self.sample_rate(types, rev_rate, batch)
 
         batch[self.key] = new_types
         return batch
 
-    def _loss(self, batch: AtomsGraph) -> torch.Tensor:
-        """Computes the training loss.
+    def loss(self, batch: AtomsGraph) -> torch.Tensor:
+        """Compute the types noiser training loss.
 
-        The score is with score entropy training as thus given as score=log(s) and then
-        for sampling should be used as a concrete score i.e. exp(score)!
+        The score is trained with score entropy, so ``score = log(s)`` and
+        during sampling it must be used as ``exp(score)``.
 
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised and denoised.
+            The atomistic structure (or batch thereof) to be noised and denoised.
 
         Returns
         -------
-        float
+        torch.Tensor
             The loss of the noised and denoised atomistic structure.
-
 
         """
         types = batch[self.key] - batch[self.key + "_noise"]
         noised_types = batch[self.key]
-        score = batch[self.key + "_score"]  # am I missing a exp here?
+        score = batch[self.key + "_score"]
 
         time = batch.time
         sigma = self.noise_schedule.total_noise(time)
@@ -375,26 +282,27 @@ class Types(Noiser):
 
         return normalized_rate
 
-    def sample_rate(self, callable: "Callable", x: torch.Tensor, rate: torch.Tensor) -> torch.Tensor:
+    def sample_rate(self, x: torch.Tensor, rate: torch.Tensor, batch: AtomsGraph) -> torch.Tensor:
         """Sample the rate
 
         Explain more...
 
         Parameters
         ----------
-        callable: Callable
-            Callable function defining the categorical distribution
         x: torch.Tensor
             The types
         rate: torch.Tensor
             The rate
+        batch: AtomsGraph
+            The batch of atomistic data, forwarded to the distribution.
 
         Returns
         -------
         torch.Tensor
            The sampled rate
         """
-        return callable(F.one_hot(x, num_classes=self.n_classes).to(rate) + rate)
+        probs = F.one_hot(x, num_classes=self.n_classes).to(rate) + rate
+        return self.distribution.sample(batch, probs=probs)
 
     def staggered_score(self, score: torch.Tensor, dsigma: torch.Tensor) -> torch.Tensor:
         """Computes the staggered score
@@ -445,3 +353,4 @@ class Types(Noiser):
 
 #: Backward-compatible alias for :class:`Types`.
 TypesNoiser = Types
+

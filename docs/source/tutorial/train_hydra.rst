@@ -121,8 +121,8 @@ The ``noisers`` list controls what is diffused. Choose based on your system:
    :widths: 35 25 25 25
 
    * - Noiser
-     - Prior
-     - Distribution
+     - PriorDistribution
+     - NoiseDistribution
      - Use case
    * - ``Positions``
      - StandardNormal

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
-from typing import ClassVar, Dict, Optional
+from typing import ClassVar, Dict, Optional, Union
 
-from agedi.diffusion.distributions import Distribution
+from agedi.diffusion.distributions import Distribution, PriorDistribution, NoiseDistribution
 from agedi.data import AtomsGraph
 
 import torch
@@ -10,14 +10,19 @@ import torch
 class Noiser(ABC, torch.nn.Module):
     """Noiser Base class
 
-    Impments a noiser that can noise and denoise a atomistic structure attribute.
+    Implements a noiser that can noise and denoise a atomistic structure attribute.
 
     Parameters
     ----------
-    distribution: Distribution
-        The distribution to be used for the noising.
-    prior: Distribution
-        The prior to be used for the denoising.
+    distribution: NoiseDistribution
+        The noise sampler used during the forward and reverse diffusion steps.
+        Accepts any :class:`~agedi.diffusion.distributions.NoiseDistribution` (or,
+        for backward compatibility, a plain :class:`~agedi.diffusion.distributions.Distribution`).
+    prior: PriorDistribution
+        The prior distribution used to initialise the noised state at the
+        start of the reverse trajectory.
+        Accepts any :class:`~agedi.diffusion.distributions.PriorDistribution` (or, for
+        backward compatibility, a plain :class:`~agedi.diffusion.distributions.Distribution`).
     loss_scaling: float
         Scaling factor applied to this noiser's loss contribution.
     key: str, optional
@@ -36,8 +41,8 @@ class Noiser(ABC, torch.nn.Module):
 
     def __init__(
         self,
-        distribution: Distribution,
-        prior: Distribution,
+        distribution: Union[NoiseDistribution, Distribution],
+        prior: Union[PriorDistribution, Distribution],
         loss_scaling: float = 1.0,
         key: Optional[str] = None,
         **kwargs
@@ -49,8 +54,6 @@ class Noiser(ABC, torch.nn.Module):
             self._key = key
 
         self.distribution = distribution
-        self.distribution.key = self.key
-
         self.prior = prior
         self.prior.key = self.key
 
@@ -112,108 +115,59 @@ class Noiser(ABC, torch.nn.Module):
         return self._key
 
     @abstractmethod
-    def _noise(self, batch: AtomsGraph) -> AtomsGraph:
-        """Noises the attribute of the atomistic structure.
-
-        Must be implemented by the subclass.
-
-        Parameters
-        ----------
-        batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised.
-
-        Returns
-        -------
-        AtomsGraph
-            The noised atomistic structure (or bach hereof).
-
-        """
-        pass
-
-    @abstractmethod
-    def _denoise(self, batch: AtomsGraph, delta_t: float, last: bool) -> AtomsGraph:
-        """Denoises the attribute of the atomistic structure.
-
-        Must be implemented by the subclass.
-
-        Parameters
-        ----------
-        batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be denoised.
-
-        delta_t: float
-            The time step to be used for the denoising.
-
-        Returns
-        -------
-        AtomsGraph
-            The denoised atomistic structure (or bach hereof).
-
-        """
-        pass
-
-    @abstractmethod
-    def _loss(self, batch: AtomsGraph) -> float:
-        """Computes the training loss.
-
-        Must be implemented by the subclass.
-
-        Parameters
-        ----------
-        batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised and denoised.
-
-        Returns
-        -------
-        float
-            The loss of the noised and denoised atomistic structure.
-
-        """
-        pass
-
     def noise(self, batch: AtomsGraph) -> AtomsGraph:
-        """Noises the attribute of the atomistic structure.
+        """Noise the attribute of the atomistic structure.
+
+        Must be implemented by the subclass.
 
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised.
+            The atomistic structure (or batch thereof) to be noised.
 
         Returns
         -------
         AtomsGraph
-            The noised atomistic structure (or bach hereof).
+            The noised atomistic structure (or batch thereof).
 
         """
-        return self._noise(batch)
+        pass
 
+    @abstractmethod
     def denoise(self, batch: AtomsGraph, delta_t: float, last: bool) -> AtomsGraph:
-        """Denoises the attribute of the atomistic structure.
+        """Denoise the attribute of the atomistic structure.
+
+        Must be implemented by the subclass.
 
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be denoised.
+            The atomistic structure (or batch thereof) to be denoised.
+
         delta_t: float
             The time step to be used for the denoising.
+
         last: bool
-            If the denoising is the last step of the denoising.
+            Whether this is the final denoising step.
 
         Returns
         -------
         AtomsGraph
-            The denoised atomistic structure (or bach hereof).
+            The denoised atomistic structure (or batch thereof).
 
         """
-        return self._denoise(batch, delta_t, last)
+        pass
 
+    @abstractmethod
     def loss(self, batch: AtomsGraph) -> float:
         """Compute the training loss.
 
+        Must be implemented by the subclass.
+
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised and denoised.
+            The atomistic structure (or batch thereof) to be noised and denoised.
 
         Returns
         -------
@@ -221,21 +175,19 @@ class Noiser(ABC, torch.nn.Module):
             The loss of the noised and denoised atomistic structure.
 
         """
-        return self._loss(batch)
+        pass
 
     def initialize_graph(self, batch: AtomsGraph) -> None:
-        """Initializes the graph with the prior distribution.
+        """Initialise the graph attribute from the prior distribution.
 
         Can be overwritten by subclasses for specific initializations.
 
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised and denoised.
+            The atomistic structure (or batch thereof) to be initialised.
 
         """
-        setattr(
-            batch,
-            self.key,
-            self.prior.get_callable(batch)(),
-        )
+        value = self.prior.sample(batch)
+        setattr(batch, self.key, value)
+

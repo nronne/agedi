@@ -19,39 +19,36 @@ def _build_single_graph():
 # ── Constant ─────────────────────────────────────────────────────────────────
 
 class TestConstant:
-    def test_sample_with_explicit_shape(self):
-        d = Constant(value=5, dtype=torch.int64)
-        out = d._sample(shape=(4,))
-        assert out.shape == (4,)
-        assert (out == 5).all()
-
-    def test_sample_with_batch_setup(self, batch):
+    def test_sample_with_batch(self, batch):
         d = Constant(value=0, key="x")
-        callable_fn = d.get_callable(batch)
-        out = callable_fn()
+        out = d.sample(batch)
         assert out.shape[0] == batch.num_nodes
         assert (out == 0).all()
 
-    def test_default_value_is_zero(self):
+    def test_default_value_is_zero(self, batch):
         d = Constant()
-        out = d._sample(shape=(10,))
+        out = d.sample(batch)
         assert (out == 0).all()
+
+    def test_sample_with_nonzero_value(self, batch):
+        d = Constant(value=5, dtype=torch.int64)
+        out = d.sample(batch)
+        assert (out == 5).all()
 
 
 # ── Uniform ──────────────────────────────────────────────────────────────────
 
 class TestUniform:
-    def test_sample_explicit_shape(self):
-        d = Uniform(low=2.0, high=5.0)
-        out = d._sample(shape=(8, 3))
-        assert out.shape == (8, 3)
+    def test_sample_within_bounds(self, batch):
+        d = Uniform(low=2.0, high=5.0, key="pos")
+        out = d.sample(batch)
+        assert out.shape == batch.pos.shape
         assert (out >= 2.0).all()
         assert (out <= 5.0).all()
 
-    def test_sample_uses_stored_shape(self, batch):
+    def test_sample_shape_matches_key(self, batch):
         d = Uniform(key="x")
-        c = d.get_callable(batch)
-        out = c()
+        out = d.sample(batch)
         assert out.shape == batch.x.shape
 
 
@@ -64,8 +61,7 @@ class TestUniformCellNonBatch:
         # non-batch: graph.batch is None
         graph_batch = graph.clone()
         object.__setattr__(graph_batch, "batch", None)
-        d._setup(graph_batch)
-        out = d._sample()
+        out = d.sample(graph_batch)
         n_atoms = graph.n_atoms.item()
         assert out.shape == (n_atoms, 3)
 
@@ -73,28 +69,30 @@ class TestUniformCellNonBatch:
 # ── UniformCellConfined ───────────────────────────────────────────────────────
 
 class TestUniformCellConfined:
-    def test_setup_adjusts_cell_and_corner(self):
+    def test_sample_adjusts_cell_and_corner(self):
         graph = _build_single_graph()
         graph.confinement = torch.tensor([[1.0, 7.0]])
         # Non-batch path
         object.__setattr__(graph, "batch", None)
         d = UniformCellConfined()
-        d._setup(graph)
-        assert d.corner[0, 2].item() == pytest.approx(1.0)
-        assert d.cell[2, 2].item() == pytest.approx(6.0)
+        out = d.sample(graph)
+        n_atoms = graph.n_atoms.item()
+        assert out.shape == (n_atoms, 3)
+        assert (out[:, 2] >= 1.0 - 1e-6).all()
+        assert (out[:, 2] <= 7.0 + 1e-6).all()
 
-    def test_setup_raises_when_confinement_is_none(self, batch):
+    def test_raises_when_confinement_is_none(self, batch):
         batch.confinement = None
         d = UniformCellConfined()
         with pytest.raises(ValueError, match="confinement"):
-            d._setup(batch)
+            d.sample(batch)
 
-    def test_setup_raises_when_confinement_wrong_shape(self, batch):
+    def test_raises_when_confinement_wrong_shape(self, batch):
         # Provide only 1 row regardless of how many graphs are in the batch
         batch.confinement = torch.tensor([[1.0, 7.0]])
         d = UniformCellConfined()
         with pytest.raises(ValueError, match="confinement"):
-            d._setup(batch)
+            d.sample(batch)
 
     def test_batched_samples_within_bounds(self, batch):
         """Batched UniformCellConfined should produce z-coordinates in per-graph bounds."""
@@ -105,8 +103,7 @@ class TestUniformCellConfined:
         batch.confinement = torch.stack([z_lo, z_hi], dim=1)
 
         d = UniformCellConfined()
-        sampler = d.get_callable(batch)
-        samples = sampler()  # (n_atoms, 3)
+        samples = d.sample(batch)  # (n_atoms, 3)
 
         # Check every atom's z is within its graph's bounds
         for g in range(n_graphs):
@@ -133,8 +130,7 @@ class TestUniformCellConfined:
         batched = Batch.from_data_list([graph, graph2])
 
         d_batch = UniformCellConfined()
-        sampler = d_batch.get_callable(batched)
-        samples = sampler()
+        samples = d_batch.sample(batched)
 
         # All z values for both graphs must be within [z_lo, z_hi]
         assert (samples[:, 2] >= z_lo - 1e-6).all()
@@ -143,7 +139,6 @@ class TestUniformCellConfined:
         # Single-graph path should also be within bounds
         object.__setattr__(graph, "batch", None)
         d_single = UniformCellConfined()
-        d_single._setup(graph)
-        s_single = d_single._sample()
+        s_single = d_single.sample(graph)
         assert (s_single[:, 2] >= z_lo - 1e-6).all()
         assert (s_single[:, 2] <= z_hi + 1e-6).all()

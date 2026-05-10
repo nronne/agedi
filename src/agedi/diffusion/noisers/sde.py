@@ -1,30 +1,34 @@
 import torch
 
 from abc import ABC, abstractmethod
-from typing import Dict, Optional
+from typing import Dict
 from agedi.data import AtomsGraph
 from agedi.diffusion.noisers import Noiser
 
 from agedi.diffusion.sdes import SDE
-from agedi.diffusion.distributions import Distribution
+from agedi.diffusion.distributions import Distribution, NoiseDistribution, PriorDistribution
 
 
 class SDENoiser(Noiser, ABC):
-    """Implements a SDE base class that can be inherited by other classes.
+    """Base class for SDE-backed noisers.
+
+    Centralises the SDE wiring and provides generic :meth:`noise`,
+    :meth:`denoise`, and :meth:`loss` implementations that are suitable for
+    many continuous-score noisers.  Subclasses that need custom forward/reverse
+    logic can override any of those three methods.
+
+    Optional hooks :meth:`postprocess_score` and :meth:`postprocess_noise`
+    can be overridden to apply per-noiser post-processing inside the generic
+    ``loss`` implementation (default: identity).
 
     Parameters
     ----------
-    sde_class : SDE
-        The class of the SDE to be used for the noising.
-    sde_kwargs : Dict
-        The keyword arguments to be passed to the SDE class.
-    distribution : Distribution
-        The distribution to be used for the noise.
-    prior : Distribution
+    sde : SDE
+        An already-instantiated SDE object that defines the diffusion process.
+    distribution : NoiseDistribution
+        The noise sampler to be used for the noise.
+    prior : PriorDistribution
         The prior distribution to be used for the noise.
-    sde : SDE, optional
-        An already-instantiated SDE object.  When provided, *sde_class* and
-        *sde_kwargs* are ignored.
     key : str
         The key to be used for the noising.
     **kwargs
@@ -41,47 +45,37 @@ class SDENoiser(Noiser, ABC):
 
     def __init__(
         self,
-        sde_class: SDE,
-        sde_kwargs: Optional[Dict],
-        distribution: Distribution,
-        prior: Distribution,
-        sde: Optional[SDE] = None,
+        sde: SDE,
+        distribution: NoiseDistribution,
+        prior: PriorDistribution,
         **kwargs
     ) -> None:
         """Initialize the SDE noiser.
 
         Parameters
         ----------
-        sde_class : SDE
-            Class of the SDE to use for noising.  Ignored when *sde* is provided.
-        sde_kwargs : dict, optional
-            Keyword arguments forwarded to *sde_class*.  Ignored when *sde* is provided.
-        distribution : Distribution
-            Noise distribution used during noising and denoising.
-        prior : Distribution
+        sde : SDE
+            Instantiated SDE object.  Pass e.g. ``VE()`` or ``VP()`` to select
+            the diffusion style.
+        distribution : NoiseDistribution
+            Noise sampler used during noising and denoising.
+        prior : PriorDistribution
             Prior distribution used to sample starting values.
-        sde : SDE, optional
-            Pre-instantiated SDE object.  When provided, *sde_class* and
-            *sde_kwargs* are ignored.
         **kwargs
             Additional keyword arguments forwarded to :class:`~agedi.diffusion.noisers.Noiser`.
         """
         super().__init__(distribution, prior, **kwargs)
-        if sde is not None:
-            self.sde = sde
-        else:
-            if sde_kwargs is None:
-                sde_kwargs = {}
-            self.sde = sde_class(**sde_kwargs)
+        self.sde = sde
 
     def get_hparams(self) -> Dict:
         """Return hyperparameters for this SDE noiser."""
         return {**super().get_hparams(), "sde": self.sde.get_hparams()}
 
-
-    @abstractmethod
     def postprocess_score(self, score: torch.Tensor) -> torch.Tensor:
-        """Post-process the predicted score before computing the loss.
+        """Post-process the predicted score before computing the generic loss.
+
+        The default implementation is the identity.  Override in subclasses
+        that need e.g. masking or re-weighting.
 
         Parameters
         ----------
@@ -93,10 +87,13 @@ class SDENoiser(Noiser, ABC):
         torch.Tensor
             Post-processed score tensor.
         """
+        return score
 
-    @abstractmethod
     def postprocess_noise(self, noise: torch.Tensor) -> torch.Tensor:
-        """Post-process the noise tensor before computing the loss.
+        """Post-process the noise tensor before computing the generic loss.
+
+        The default implementation is the identity.  Override in subclasses
+        that need e.g. periodic corrections.
 
         Parameters
         ----------
@@ -108,57 +105,65 @@ class SDENoiser(Noiser, ABC):
         torch.Tensor
             Post-processed noise tensor.
         """
+        return noise
 
-    def _noise(self, batch: AtomsGraph) -> AtomsGraph:
-        """Adds noise to the atomistic structure.
+    def noise(self, batch: AtomsGraph) -> AtomsGraph:
+        """Add noise to the atomistic structure.
 
-        Added noise is stored in the self.key+"_noise".
+        Added noise is stored in the ``self.key + "_noise"`` attribute.
 
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised.
+            The atomistic structure (or batch thereof) to be noised.
 
         Returns
         -------
         AtomsGraph
-            The noised atomistic structure (or bach hereof).
+            The noised atomistic structure (or batch thereof).
 
         """
         z = batch[self.key]
         t = batch.time
 
-        w = self.distribution.get_callable(batch)
-        batch[self.key] = self.sde.transition_kernel(z, t, w)
-        batch[self.key + "_noise"] = batch.apply_mask(self.sde.noise(z, batch[self.key], t))
+        mean = self.sde.mean(t) * z
+        sigma = torch.sqrt(self.sde.var(t))
+        batch[self.key] = self.distribution.sample(batch, mu=mean, sigma=sigma)
+        noise = self.distribution.last_noise()
+        if noise is None:
+            raise RuntimeError(
+                f"{type(self.distribution).__name__}.last_noise() returned None after sample(). "
+                "Distributions used with SDENoiser must cache unit-scale noise in last_noise()."
+            )
+        batch[self.key + "_noise"] = batch.apply_mask(noise / sigma)
 
         return batch
 
-    def _denoise(self, batch: AtomsGraph, delta_t: float, last: bool) -> AtomsGraph:
-        """Denoises the positions of the atomistic structure.
+    def denoise(self, batch: AtomsGraph, delta_t: float, last: bool) -> AtomsGraph:
+        """Denoise the atomistic structure using the Euler-Maruyama scheme.
 
-        The denoising follows the Euler-Maruyama scheme.
-        ::math::
-        R_i+1 = R_i +
-                \Delta t (f(R_i, t) + g(t)**2 * s(R_i, t)) +
-                \sqrt{\Delta t} g(t) * w
+        The update rule is:
 
-        The used score is expected to be stored in the self.key+"_score".
+        .. math::
 
+            R_{i+1} = R_i + \\Delta t (f(R_i, t) + g(t)^2 s(R_i, t))
+                      + \\sqrt{\\Delta t} g(t) w
+
+        The score is expected to be stored in ``self.key + "_score"``.
 
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be denoised.
+            The atomistic structure (or batch thereof) to be denoised.
         delta_t: float
             The time step for the denoising.
         last: bool
-            If the denoising is the last step of the denoising.
+            Whether this is the final denoising step.
 
         Returns
         -------
         AtomsGraph
-            The denoised atomistic structure (or bach hereof).
+            The denoised atomistic structure (or batch thereof).
 
         """
         z = batch[self.key]
@@ -168,38 +173,35 @@ class SDENoiser(Noiser, ABC):
         drift = self.sde.drift(z, t)
         diffusion = self.sde.diffusion(t)
 
-        w = self.distribution.get_callable(batch)
         if last:
             batch[self.key] = batch[self.key] + delta_t * (diffusion**2 * z_score + drift)
         else:
-            batch[self.key] = w(
-                batch[self.key] + delta_t * (diffusion**2 * z_score + drift),  # mean
-                torch.sqrt(delta_t) * diffusion,  # variance
-            )
+            mean = batch[self.key] + delta_t * (diffusion**2 * z_score + drift)
+            sigma = torch.sqrt(delta_t) * diffusion
+            batch[self.key] = self.distribution.sample(batch, mu=mean, sigma=sigma)
 
         return batch
 
-    def _loss(self, batch: AtomsGraph) -> torch.Tensor:
+    def loss(self, batch: AtomsGraph) -> torch.Tensor:
         """Compute the noiser loss.
 
-        Computes the loss of the diffusion model SDE noiser
+        The score-matching loss is:
 
-        Expects the total added noise to be stored in the self.key+"_noise",
-        and the predicted score to be stored in the
-        self.key+"_score".
+        .. math::
 
-        The loss is computed as
-        ::math::
-        L = \sum_i ||\sigma_t w_i + \sigma_t^2 s(R_i)||^2
+            L = \\sum_i \\|\\sigma_t w_i + \\sigma_t^2 s(R_i)\\|^2
+
+        The score is expected in ``self.key + "_score"`` and the noise in
+        ``self.key + "_noise"``.
 
         Parameters
         ----------
         batch: AtomsGraph
-            The atomistic structure (or batch hereof) to be noised and denoised.
+            The atomistic structure (or batch thereof) to be noised and denoised.
 
         Returns
         -------
-        float
+        torch.Tensor
             The loss of the noised and denoised atomistic structure.
 
         """
@@ -209,11 +211,10 @@ class SDENoiser(Noiser, ABC):
 
         var = self.sde.var(t)
 
-        z_score = self.postprocess_score(z_score) #batch.apply_mask(r_score)
+        z_score = self.postprocess_score(z_score)
         z_noise = self.postprocess_noise(z_noise)
-        # r_noise = self.periodic_distance(batch.pos, r_noise, batch.cell, batch.batch)
 
-        lt = 1.0  # /var.sqrt()
+        lt = 1.0
 
         loss = torch.mean(
             lt * torch.sum((z_noise + z_score * var) ** 2, dim=-1, keepdim=True)
