@@ -90,8 +90,11 @@ class ScoreModel(LightningModule):
             The output batch containing the scores.
 
         """
-        translated_batch = self.translator(batch)
+        # Step 1: translate input features (no representation yet).
+        translated_batch = self.translator.translate_input(batch)
+        # Step 2: run the backbone to obtain the representation.
         rep = self.representation(translated_batch)
+        # Step 3: store the representation on the batch.
         batch = self.translator.add_representation(batch, rep)
 
         if self.sample:
@@ -103,9 +106,12 @@ class ScoreModel(LightningModule):
                 if self.guidance:
                     batch_cond = conditioning(batch_cond, empty=False)
 
-            translated_batch = self.translator(batch)
+            # Step 4: translate again, this time injecting the conditioned
+            # representation.  translate_with_representation is unconditional
+            # (no Python None-check), keeping the compiled graph intact.
+            translated_batch = self.translator.translate_with_representation(batch)
             if self.guidance:
-                translated_batch_cond = self.translator(batch_cond)
+                translated_batch_cond = self.translator.translate_with_representation(batch_cond)
             scores = {}
             for head in self.heads:
                 if self.guidance:
@@ -123,7 +129,7 @@ class ScoreModel(LightningModule):
         else:
             for conditioning in self.conditionings:
                 batch = conditioning(batch, empty=False)
-            translated_batch = self.translator(batch)
+            translated_batch = self.translator.translate_with_representation(batch)
             
             scores = {}
             for head in self.heads:

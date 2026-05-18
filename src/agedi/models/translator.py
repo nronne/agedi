@@ -172,6 +172,69 @@ class Translator(ABC):
             
         return out
 
+    def translate_input(self, batch: "AtomsGraph") -> Any:
+        """Translate the batch without injecting any representation.
+
+        This is the first half of the two-step translation used in the
+        compiled score-model forward pass.  It performs the same work as
+        :meth:`__call__` but *never* calls
+        :meth:`_translate_representation`, so Dynamo does not see the
+        Python ``if representation is not None`` guard that would otherwise
+        force a graph break or recompilation.
+
+        Parameters
+        ----------
+        batch : AtomsGraph
+            The input batch.
+
+        Returns
+        -------
+        Any
+            The translated batch (format depends on the concrete translator
+            subclass, e.g. a ``dict`` for :class:`SchNetPackTranslator`).
+        """
+        if not isinstance(batch, AtomsGraph):
+            raise ValueError("Batch must be of type AtomsGraph")
+
+        out = self._translate(batch)
+        for module in self.input_modules:
+            out = module(out)
+        return out
+
+    def translate_with_representation(self, batch: "AtomsGraph") -> Any:
+        """Translate the batch and unconditionally inject the stored representation.
+
+        This is the second half of the two-step translation.  It must only
+        be called *after* :meth:`add_representation` has stored
+        ``repr_scalar`` (and optionally ``repr_vector``) on ``batch``.
+        Because the representation injection is now unconditional, Dynamo
+        never needs to evaluate a Python ``None``-check and can trace the
+        entire forward pass as a single graph.
+
+        Parameters
+        ----------
+        batch : AtomsGraph
+            The input batch.  Must already have ``repr_scalar`` set.
+
+        Returns
+        -------
+        Any
+            The translated batch with representation keys injected.
+        """
+        if not isinstance(batch, AtomsGraph):
+            raise ValueError("Batch must be of type AtomsGraph")
+
+        out = self._translate(batch)
+        for module in self.input_modules:
+            out = module(out)
+        # Read scalar (always present) and vector (present for PaiNN-style models)
+        # directly from _store to avoid any Python-object wrapper overhead.
+        rep = Representation(scalar=batch.repr_scalar)
+        if "repr_vector" in batch._store:
+            rep = Representation(scalar=batch.repr_scalar, vector=batch.repr_vector)
+        out = self._translate_representation(rep, out)
+        return out
+
     def add_representation(self, batch: "AtomsGraph", out: Any) -> "AtomsGraph":
         """Adds the representation given by the model to the original batch of data.
 

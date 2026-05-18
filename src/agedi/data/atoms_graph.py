@@ -1058,21 +1058,37 @@ class AtomsGraph(Data):
     def representation(self) -> Representation:
         """Return the representation of the graph.
 
+        Tensors are stored directly under ``repr_scalar`` and ``repr_vector``
+        keys in ``_store`` to avoid the ``.item()`` calls that
+        ``Representation.from_tensor`` would require, keeping the hot path
+        free of graph breaks when the score model is compiled with
+        ``torch.compile``.
+
         Returns
         -------
         representation: Representation
-            The representation of the graph.
+            The representation of the graph, or ``None`` when not yet set.
 
         """
-        return (
-            Representation.from_tensor(self.repr, self.repr_slices, self.repr_ls)
-            if "repr" in self._store
-            else None
-        )
+        if "repr_scalar" in self._store:
+            kwargs: dict = {"scalar": self._store["repr_scalar"]}
+            if "repr_vector" in self._store:
+                kwargs["vector"] = self._store["repr_vector"]
+            return Representation(**kwargs)
+        # Backward-compatibility: batches serialised with the old format store
+        # repr/repr_slices/repr_ls and require from_tensor to reconstruct.
+        if "repr" in self._store:
+            return Representation.from_tensor(self.repr, self.repr_slices, self.repr_ls)
+        return None
 
     @representation.setter
     def representation(self, representation: Representation) -> None:
         """Set the representation of the graph.
+
+        Stores the scalar and vector tensors directly in ``_store`` without
+        any serialisation roundtrip, so that the getter and the conditioning
+        ``concatenate`` method can access them as plain tensors without
+        triggering ``.item()`` calls.
 
         Parameters
         ----------
@@ -1084,16 +1100,9 @@ class AtomsGraph(Data):
         None
 
         """
-        n_graphs = self.num_graphs if "num_graphs" in self._store else 1
-        tensor, slices, ls = representation.to_tensor(n_graphs)
-
-        self.add_batch_attr("repr", tensor, type="node")
-        self.add_batch_attr(
-            "repr_slices", slices.repeat(self.n_atoms.shape[0], 1), type="graph"
-        )
-        self.add_batch_attr(
-            "repr_ls", ls.repeat(self.n_atoms.shape[0], 1), type="graph"
-        )
+        self._store["repr_scalar"] = representation.scalar
+        if "l1" in representation._tensors:
+            self._store["repr_vector"] = representation.vector
 
     def wrap_positions(self) -> None:
         """Wrap the positions of the atoms to the unit cell.

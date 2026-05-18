@@ -155,8 +155,11 @@ class Conditioning(ABC, LightningModule):
         
         """
         if self.concatenation_type == "scalar":
-            rep = batch.representation
-            scalar = rep.scalar
+            # Access the scalar representation tensor directly from the batch
+            # store rather than going through the Representation wrapper.  This
+            # avoids creating a temporary Python Representation object and keeps
+            # the concatenation as a single traceable torch.cat call.
+            scalar = batch.repr_scalar  # shape (n_nodes, n_features, 1)
 
             if scalar.shape[0] != c.shape[0]:
                 # expand from structure level -> node level
@@ -165,9 +168,7 @@ class Conditioning(ABC, LightningModule):
             if len(scalar.shape) != len(c.shape):
                 c = c[..., None]
                 
-            new_scalar = torch.cat((scalar, c), dim=1)
-            rep.scalar = new_scalar
-            batch.representation = rep
+            batch.repr_scalar = torch.cat((scalar, c), dim=1)
 
         else:
             raise ValueError(

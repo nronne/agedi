@@ -339,6 +339,8 @@ class Diffusion(LightningModule):
         self.eps = eps
 
         self._regressor_training = False
+        # Lazily initialised by the compiled_score_forward property.
+        self._compiled_score_forward = None
 
     def on_fit_start(self) -> None:
         """Write ``hparams.yaml`` to the trainer log directory at training start.
@@ -1394,10 +1396,138 @@ class Diffusion(LightningModule):
 
         return batch
 
+    @property
+    def compiled_score_forward(self):
+        """Lazily compiled version of :attr:`score_model`.
 
-    @torch.compile(mode="default") # , fullgraph=True
+        On the first access, ``torch.compile`` is called on ``score_model``
+        with ``mode="reduce-overhead"``.  Subsequent accesses return the
+        same cached compiled callable, so compilation happens at most once
+        per ``Diffusion`` instance.
+
+        Returns
+        -------
+        callable
+            A compiled drop-in replacement for ``self.score_model(batch)``.
+        """
+        if self._compiled_score_forward is None:
+            self._compiled_score_forward = torch.compile(
+                self.score_model, mode="reduce-overhead"
+            )
+        return self._compiled_score_forward
+
     def compiled_reverse_step(self, batch: AtomsGraph, delta_t: float, force_field_guidance: float, last: bool=False, timings: Optional[SamplingTimings] = None) -> AtomsGraph:
-        return self.reverse_step(batch, delta_t, force_field_guidance, last=last)
+        """Reverse step that compiles only the score-model forward pass.
+
+        Unlike the old ``@torch.compile``-decorated version that tried to
+        trace the entire reverse step (including the neighborlist rebuild and
+        Python control flow for ``last``/``timings``), this method keeps all
+        Python orchestration in eager mode and only hands the
+        computationally expensive score prediction to ``compiled_score_forward``.
+
+        This avoids the main graph-break sources:
+
+        * ``Representation.to_tensor`` / ``from_tensor`` – eliminated by the
+          new direct ``repr_scalar``/``repr_vector`` storage.
+        * ``if batch.representation is not None`` in the translator – removed
+          by the ``translate_input`` / ``translate_with_representation`` split.
+        * ``last: bool`` triggering a retrace on the final step – the
+          ``last`` argument only reaches the eager denoise loop, never the
+          compiled score model.
+        * ``timings is not None`` Python guard – kept in eager orchestration.
+        * ``torch.where(mask)`` dynamic shape in ``_cell_list_to_graph`` –
+          ``update_graph`` remains in eager mode; the NVIDIA cell-list
+          build/query kernels are already GPU-optimised.
+
+        Parameters
+        ----------
+        batch : AtomsGraph
+        delta_t : float
+        force_field_guidance : float
+        last : bool
+        timings : Optional[SamplingTimings]
+
+        Returns
+        -------
+        AtomsGraph
+        """
+        if timings is not None:
+            timings.reverse_step_calls += 1
+            batch = self._time_sampling_call(
+                batch.pos.device,
+                timings,
+                "score_model",
+                self.compiled_score_forward,
+                batch,
+            )
+        else:
+            batch = self.compiled_score_forward(batch)
+
+        for noiser in self.noisers[::-1]:
+            if timings is None:
+                batch = noiser.denoise(batch, delta_t, last=last)
+            else:
+                batch = self._time_sampling_call(
+                    batch.pos.device,
+                    timings,
+                    "denoise",
+                    noiser.denoise,
+                    batch,
+                    delta_t,
+                    last=last,
+                )
+
+        if timings is None:
+            batch.wrap_positions()
+            batch.update_graph()
+        else:
+            self._time_sampling_call(
+                batch.pos.device,
+                timings,
+                "wrap_positions",
+                batch.wrap_positions,
+            )
+            rebuilt = self._time_sampling_call(
+                batch.pos.device,
+                timings,
+                "neighbor_list",
+                batch.update_graph,
+            )
+            timings.neighbor_list_calls += 1
+            if rebuilt:
+                timings.neighbor_list_rebuilds += 1
+
+        if self.regressor_model is not None and force_field_guidance > 0.0:
+            if timings is None:
+                batch = self.force_field_guidance_step(batch, force_field_guidance * delta_t)
+                batch.wrap_positions()
+                batch.update_graph()
+            else:
+                batch = self._time_sampling_call(
+                    batch.pos.device,
+                    timings,
+                    "force_field_guidance",
+                    self.force_field_guidance_step,
+                    batch,
+                    force_field_guidance * delta_t,
+                )
+                self._time_sampling_call(
+                    batch.pos.device,
+                    timings,
+                    "guidance_wrap_positions",
+                    batch.wrap_positions,
+                )
+                guidance_rebuilt = self._time_sampling_call(
+                    batch.pos.device,
+                    timings,
+                    "guidance_neighbor_list",
+                    batch.update_graph,
+                )
+                timings.guidance_neighbor_list_calls += 1
+                if guidance_rebuilt:
+                    timings.guidance_neighbor_list_rebuilds += 1
+
+        return batch
     
 
     # def force_field_guidance_step(self, batch: AtomsGraph, scale: float) -> AtomsGraph:
