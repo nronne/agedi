@@ -229,10 +229,11 @@ class Translator(ABC):
             out = module(out)
         # Read scalar (always present) and vector (present for PaiNN-style models)
         # directly from _store to avoid any Python-object wrapper overhead.
-        rep = Representation(scalar=batch.repr_scalar)
+        # Build kwargs once to avoid constructing a temporary Representation.
+        repr_kwargs = {"scalar": batch.repr_scalar}
         if "repr_vector" in batch._store:
-            rep = Representation(scalar=batch.repr_scalar, vector=batch.repr_vector)
-        out = self._translate_representation(rep, out)
+            repr_kwargs["vector"] = batch.repr_vector
+        out = self._translate_representation(Representation(**repr_kwargs), out)
         return out
 
     def add_representation(self, batch: "AtomsGraph", out: Any) -> "AtomsGraph":

@@ -1411,6 +1411,13 @@ class Diffusion(LightningModule):
             A compiled drop-in replacement for ``self.score_model(batch)``.
         """
         if self._compiled_score_forward is None:
+            # ``reduce-overhead`` is preferred over ``default`` here because the
+            # score model is called with the same graph structure on every reverse
+            # step (fixed shapes after prepare_for_compile).  ``reduce-overhead``
+            # minimises Python dispatch overhead for repeated same-shape calls,
+            # which is exactly the sampling regime.  ``default`` would apply more
+            # aggressive graph-level optimisations that are better suited to
+            # variable-shape training batches.
             self._compiled_score_forward = torch.compile(
                 self.score_model, mode="reduce-overhead"
             )
