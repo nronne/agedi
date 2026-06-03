@@ -38,10 +38,12 @@ class StandardNormal(Distribution):
         batch : AtomsGraph
             Batch of atomistic data.
         """
+        device = batch.n_atoms.device
         if self.key is not None:
             attr = batch[self.key]
             n_atoms = int(batch.n_atoms.sum().item())
             self.shape = torch.Size([n_atoms] + list(attr.shape[1:]))
+            device = attr.device
         # Build a per-atom n_atoms vector without relying on batch.batch (which
         # may be None for single un-batched graphs).  repeat_interleave
         # expands each graph's atom count into that many repeated entries.
@@ -49,7 +51,7 @@ class StandardNormal(Distribution):
         per_atom_n = torch.repeat_interleave(
             n_atoms_per_graph.float(), n_atoms_per_graph
         )  # shape: (total_atoms,)
-        self._per_atom_std = 0.8 * per_atom_n ** (1 / 3)
+        self._per_atom_std = (0.8 * per_atom_n ** (1 / 3)).to(device)
 
     def _sample(self, shape: Optional[torch.Size] = None, **kwargs) -> torch.Tensor:
         """Sample from the standard normal distribution.

@@ -8,7 +8,7 @@ def test_standard_normal() -> None:
     assert d._sample((10,3)).shape == (10, 3)
 
 
-def test_standard_normal_per_molecule_std(batch: "Batch") -> None:
+def test_standard_normal_per_molecule_std() -> None:
     """Prior std must scale per-molecule (cube-root of each graph's atom count).
 
     When the batch contains graphs of different sizes the standard deviation
