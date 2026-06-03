@@ -7,6 +7,51 @@ def test_standard_normal() -> None:
     d = StandardNormal()
     assert d._sample((10,3)).shape == (10, 3)
 
+
+def test_standard_normal_per_molecule_std(batch: "Batch") -> None:
+    """Prior std must scale per-molecule (cube-root of each graph's atom count).
+
+    When the batch contains graphs of different sizes the standard deviation
+    of samples belonging to a small graph must be strictly less than those
+    belonging to a large graph.
+    """
+    from agedi.data import AtomsGraph
+    import torch_geometric.data as tgd
+
+    # Build two single-graph AtomsGraphs with very different atom counts so
+    # the stds are clearly distinguishable.
+    small_n, large_n = 2, 64
+
+    def _make_graph(n: int) -> AtomsGraph:
+        g = AtomsGraph.empty(cutoff=6.0)
+        g.n_atoms = torch.tensor([n])
+        g.pos = torch.zeros(n, 3)
+        return g
+
+    small_g = _make_graph(small_n)
+    large_g = _make_graph(large_n)
+    batched = tgd.Batch.from_data_list([small_g, large_g])
+
+    d = StandardNormal()
+    d.key = "pos"
+    d._setup(batched)
+
+    assert d._per_atom_std.shape == (small_n + large_n,)
+
+    small_std = d._per_atom_std[:small_n].mean().item()
+    large_std = d._per_atom_std[small_n:].mean().item()
+
+    expected_small = 0.8 * small_n ** (1 / 3)
+    expected_large = 0.8 * large_n ** (1 / 3)
+
+    assert abs(small_std - expected_small) < 1e-5, f"{small_std} != {expected_small}"
+    assert abs(large_std - expected_large) < 1e-5, f"{large_std} != {expected_large}"
+    assert large_std > small_std, "larger molecule should have larger prior std"
+
+    # Verify that _sample() produces a tensor with the right shape
+    samples = d._sample()
+    assert samples.shape == (small_n + large_n, 3)
+
 def test_normal() -> None:
     d = Normal()
     assert d._sample(torch.rand((10, 3)), 1).shape == (10, 3)

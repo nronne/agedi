@@ -8,7 +8,14 @@ _CONFINEMENT_CLAMP_EPS = 1e-4
 
 
 class StandardNormal(Distribution):
-    """Standard Normal Distribution"""
+    """Standard Normal Distribution
+
+    When used as a prior for a :class:`~agedi.diffusion.noisers.Positions`
+    noiser the standard deviation is scaled by the cube root of the number of
+    atoms **in each individual graph**, so that larger molecules are spread
+    over a proportionally larger region.  This avoids atoms being initialised
+    too close together when sampling clusters or gas-phase molecules.
+    """
 
     def _setup(self, batch: AtomsGraph) -> None:
         """Prepare the distribution for sampling from *batch*.
@@ -21,6 +28,11 @@ class StandardNormal(Distribution):
         where the attribute tensor may still be empty even though ``n_atoms``
         has already been set.
 
+        Also computes a per-atom standard deviation vector where each atom's
+        std is ``0.8 * N_i**(1/3)`` with ``N_i`` the number of atoms in that
+        atom's graph.  This ensures that the prior spread scales with the size
+        of each individual molecule rather than the total batch size.
+
         Parameters
         ----------
         batch : AtomsGraph
@@ -30,26 +42,46 @@ class StandardNormal(Distribution):
             attr = batch[self.key]
             n_atoms = int(batch.n_atoms.sum().item())
             self.shape = torch.Size([n_atoms] + list(attr.shape[1:]))
+        # Build a per-atom n_atoms vector without relying on batch.batch (which
+        # may be None for single un-batched graphs).  repeat_interleave
+        # expands each graph's atom count into that many repeated entries.
+        n_atoms_per_graph = batch.n_atoms.view(-1).long()
+        per_atom_n = torch.repeat_interleave(
+            n_atoms_per_graph.float(), n_atoms_per_graph
+        )  # shape: (total_atoms,)
+        self._per_atom_std = 0.8 * per_atom_n ** (1 / 3)
 
     def _sample(self, shape: Optional[torch.Size] = None, **kwargs) -> torch.Tensor:
-        """Sample from the standard normal distribution
+        """Sample from the standard normal distribution.
+
+        When called after :meth:`_setup` (i.e. via
+        :meth:`~agedi.diffusion.distributions.Distribution.get_callable`), each
+        atom is sampled with a standard deviation proportional to the cube root
+        of the number of atoms in its graph.  When called directly with an
+        explicit *shape* (e.g. in unit tests), a single global std equal to
+        ``0.8 * shape[0]**(1/3)`` is used as a fallback.
 
         Parameters
         ----------
-        mu : torch.Tensor
-            Mean of the distribution
-        sigma : torch.Tensor
-            Standard deviation of the distribution
+        shape : torch.Size, optional
+            Output shape.  Defaults to the shape set by :meth:`_setup`.
 
         Returns
         -------
         torch.Tensor
-            Sampled tensor
-
+            Sampled tensor.
         """
         if shape is None:
             shape = self.shape
-        std = 0.8 * shape[0]**(1/3)
+            if hasattr(self, '_per_atom_std'):
+                # Expand (n_atoms,) → (n_atoms, *trailing) for broadcast
+                std = self._per_atom_std.view(
+                    shape[0], *([1] * (len(shape) - 1))
+                ).expand(shape)
+                return torch.normal(
+                    torch.zeros(shape, device=self._per_atom_std.device), std
+                )
+        std = 0.8 * shape[0] ** (1 / 3)
         return torch.normal(0.0, std, size=shape)
 
 
