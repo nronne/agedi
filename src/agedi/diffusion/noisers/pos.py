@@ -131,6 +131,7 @@ class PositionsNoiser(Noiser):
         w = self.distribution.get_callable(batch)
         setattr(batch, self.key, self.sde.transition_kernel(r, t, w))
         batch[self.key + "_noise"] = batch.apply_mask(self.sde.noise(r, batch.pos, t))
+        batch[self.key + "_sigma"] = torch.sqrt(self.sde.var(t))
 
         return batch
 
@@ -170,6 +171,10 @@ class PositionsNoiser(Noiser):
         r_score = torch.where(torch.isnan(r_score), torch.zeros_like(r_score), r_score)
 
         t = batch.time
+
+        # Keep pos_sigma current so EDM-preconditioned heads have σ = √var(t)
+        # available throughout the reverse process, not just during training.
+        batch[self.key + "_sigma"] = torch.sqrt(self.sde.var(t))
 
         drift = self.sde.drift(r, t)
         diffusion = self.sde.diffusion(t)

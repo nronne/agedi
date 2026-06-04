@@ -121,6 +121,11 @@ class SchNetPackTranslator(Translator):
         if hasattr(batch, "forces"):
             out[forces] = batch.forces
 
+        # EDM preconditioning: expose σ = √var(t) and noisy positions to heads.
+        if hasattr(batch, "pos_sigma"):
+            out["pos_sigma"] = batch.pos_sigma
+        out["pos"] = batch.pos  # noisy positions for skip connection
+
         return out
 
     def _translate_representation(
