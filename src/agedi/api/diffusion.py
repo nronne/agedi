@@ -32,6 +32,8 @@ def create_diffusion(
     guidance_weight: float = -1.0,
     device: Optional[Union[str, torch.device]] = None,
     type_map: Optional[List[int]] = None,
+    precondition: bool = False,
+    sigma_data: float = 1.0,
 ) -> "Agedi":
     """Create a diffusion model for script-based training and sampling.
 
@@ -106,6 +108,18 @@ def create_diffusion(
         a reduced vocabulary of size ``len(type_map)`` instead of the
         default 100.  Auto-populated by :func:`train_from_atoms` when a
         ``"Types"`` noiser is requested.
+    precondition : bool, optional
+        Enable EDM preconditioning (Karras et al., NeurIPS 2022) in the
+        positions score head.  Wraps the network output with
+        σ-dependent skip and scale factors so the network always operates
+        on unit-scale inputs and outputs.  Defaults to ``False``.
+    sigma_data : float, optional
+        Empirical standard deviation of (zero-COM) atom positions in the
+        training set, in Å.  Used to set the crossover scale between the
+        skip connection and the network output.  Only relevant when
+        *precondition* is ``True``.  Estimate with
+        ``data[0].get_positions().std()`` on centered structures.
+        Defaults to ``1.0``.
 
     Returns
     -------
@@ -134,6 +148,8 @@ def create_diffusion(
         n_blocks,
         head_dim=head_dim,
         n_rbf=n_rbf,
+        precondition=precondition,
+        sigma_data=sigma_data,
     )
 
     score_model = ScoreModel(

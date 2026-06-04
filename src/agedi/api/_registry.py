@@ -209,6 +209,8 @@ def _build_score_components(
     n_blocks: int,
     head_dim: int,
     n_rbf: int = 30,
+    precondition: bool = False,
+    sigma_data: float = 1.0,
 ) -> Tuple["Translator", "torch.nn.Module", List["Head"]]:
     """Instantiate the translator, representation, and score heads for a model.
 
@@ -231,6 +233,12 @@ def _build_score_components(
         ``feature_size + conditioning output dims``).
     n_rbf : int, optional
         Number of radial basis functions.  Default is 30.
+    precondition : bool, optional
+        Whether to apply EDM preconditioning in the positions score head.
+        Defaults to ``False``.
+    sigma_data : float, optional
+        Empirical std of (zero-COM) atom positions in the training set (Å).
+        Only used when *precondition* is ``True``.  Defaults to ``1.0``.
 
     Returns
     -------
@@ -251,6 +259,8 @@ def _build_score_components(
         n_blocks=n_blocks,
         head_dim=head_dim,
         n_rbf=n_rbf,
+        precondition=precondition,
+        sigma_data=sigma_data,
     )
 
 
@@ -261,6 +271,8 @@ def _painn_factory(
     n_blocks: int,
     head_dim: int,
     n_rbf: int,
+    precondition: bool = False,
+    sigma_data: float = 1.0,
 ) -> Tuple["Translator", "torch.nn.Module", List["Head"]]:
     """Factory for the SchNetPack PaiNN score model backend."""
     import schnetpack as spk
@@ -295,6 +307,8 @@ def _painn_factory(
                     PositionsScore(
                         input_dim_scalar=head_dim,
                         input_dim_vector=feature_size,
+                        precondition=precondition,
+                        sigma_data=sigma_data,
                     )
                 )
             case "Types" | "types":
