@@ -137,11 +137,16 @@ class PositionsNoiser(Noiser):
     def _denoise(self, batch: AtomsGraph, delta_t: float, last: bool) -> AtomsGraph:
         """Denoises the positions of the atomistic structure.
 
-        The denoising follows the Euler-Maruyama scheme.
+        The denoising follows the reverse-time Euler-Maruyama scheme.
         ::math::
-        R_i+1 = R_i +
-                \Delta t (f(R_i, t) + g(t)**2 * s(R_i, t)) +
+        R_{i+1} = R_i +
+                \Delta t (-f(R_i, t) + g(t)^2 * s(R_i, t)) +
                 \sqrt{\Delta t} g(t) * w
+
+        The sign on the forward drift f is negated because the reverse SDE
+        undoes the contraction from the forward process (e.g. for VP where
+        f = -0.5*beta*x, the reverse step expands positions back toward the
+        data).  For VE where f = 0 this makes no difference.
 
         The used score is expected to be stored in the self.key+"_score",
         which by default is "pos_score".
@@ -177,10 +182,10 @@ class PositionsNoiser(Noiser):
         w = self.distribution.get_callable(batch)
 
         if last:
-            new_pos = r + delta_t * (diffusion**2 * r_score + drift)
+            new_pos = r + delta_t * (diffusion**2 * r_score - drift)
         else:
             new_pos = w(
-                r + delta_t * (diffusion**2 * r_score + drift),  # mean
+                r + delta_t * (diffusion**2 * r_score - drift),  # mean
                 torch.sqrt(delta_t) * diffusion,  # variance
             )
         if batch.confinement is not None:
