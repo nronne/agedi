@@ -1,3 +1,4 @@
+import math
 import torch
 
 from typing import Dict, Optional
@@ -294,14 +295,18 @@ class PositionsNoiser(Noiser):
 
 
 class Positions(PositionsNoiser):
-    """Positions noiser with :class:`~agedi.diffusion.distributions.StandardNormal` prior
-    and :class:`~agedi.diffusion.distributions.Normal` noise distribution.
+    """Positions noiser with :class:`~agedi.diffusion.distributions.ZeroComStandardNormal`
+    prior and :class:`~agedi.diffusion.distributions.ZeroComNormal` noise distribution.
 
     This is the base positions noiser suited for gas-phase clusters or systems
     where positions are not constrained to a periodic unit cell.  The SDE can
     still be chosen freely via the *sde* parameter.  Subclasses can override the
     ``distribution`` and ``prior`` while still delegating to this class through
     ``super()``.
+
+    When *prior* is not supplied, the prior scale is set automatically to
+    ``sqrt(sde.var(t=1))`` — equal to ``sigma_max`` for a VE-SDE — so that
+    the prior matches the forward-process marginal at T=1.
 
     Parameters
     ----------
@@ -317,7 +322,9 @@ class Positions(PositionsNoiser):
     distribution : Distribution, optional
         Noise distribution.  Subclasses may supply a different default.
     prior : Distribution, optional
-        Prior distribution.  Subclasses may supply a different default.
+        Prior distribution.  When ``None`` (default), a
+        :class:`~agedi.diffusion.distributions.ZeroComStandardNormal` with
+        ``scale = sqrt(sde.var(t=1))`` is created automatically.
     **kwargs
         Additional keyword arguments forwarded to
         :class:`~agedi.diffusion.noisers.PositionsNoiser`.
@@ -329,15 +336,25 @@ class Positions(PositionsNoiser):
         sde_kwargs: Optional[Dict] = None,
         sde: Optional[SDE] = None,
         distribution: Distribution = ZeroComNormal(),
-        prior: Distribution = ZeroComStandardNormal(),
+        prior: Optional[Distribution] = None,
         **kwargs,
     ) -> None:
+        # Build the SDE first so we can read sigma_max from it.
+        if sde is not None:
+            _sde = sde
+        else:
+            _sde = sde_class(**(sde_kwargs or {}))
+
+        if prior is None:
+            scale = math.sqrt(float(_sde.var(torch.tensor(1.0)).item()))
+            prior = ZeroComStandardNormal(scale=scale)
+
         super().__init__(
             sde_class=sde_class,
             sde_kwargs=sde_kwargs,
             distribution=distribution,
             prior=prior,
-            sde=sde,
+            sde=_sde,
             **kwargs,
         )
 

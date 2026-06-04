@@ -34,7 +34,25 @@ _CONFINEMENT_CLAMP_EPS = 1e-4
 
 
 class StandardNormal(Distribution):
-    """Standard Normal Distribution"""
+    """Standard Normal Distribution
+
+    Parameters
+    ----------
+    scale : float, optional
+        Standard deviation used when sampling.  Defaults to ``1.0``.
+        Set this to the SDE's ``sigma_max`` (or ``sqrt(var(t=1))``) so that
+        the prior matches the forward-process marginal at T=1, replacing the
+        old ``0.8 * N**(1/3)`` heuristic which was arbitrary and broke for
+        non-compact or heterogeneously-sized systems.
+    """
+
+    def __init__(self, scale: float = 1.0, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.scale = scale
+
+    def get_hparams(self) -> dict:
+        """Return hyperparameters for this distribution."""
+        return {**super().get_hparams(), "scale": self.scale}
 
     def _setup(self, batch: AtomsGraph) -> None:
         """Prepare the distribution for sampling from *batch*.
@@ -58,25 +76,21 @@ class StandardNormal(Distribution):
             self.shape = torch.Size([n_atoms] + list(attr.shape[1:]))
 
     def _sample(self, shape: Optional[torch.Size] = None, **kwargs) -> torch.Tensor:
-        """Sample from the standard normal distribution
+        """Sample from the standard normal distribution.
 
         Parameters
         ----------
-        mu : torch.Tensor
-            Mean of the distribution
-        sigma : torch.Tensor
-            Standard deviation of the distribution
+        shape : torch.Size, optional
+            Output shape.  Defaults to ``self.shape`` set during ``_setup``.
 
         Returns
         -------
         torch.Tensor
-            Sampled tensor
-
+            Sampled tensor with std equal to ``self.scale``.
         """
         if shape is None:
             shape = self.shape
-        std = 0.8 * shape[0]**(1/3)
-        return torch.normal(0.0, std, size=shape)
+        return torch.normal(0.0, self.scale, size=shape)
 
 
 class Normal(Distribution):
@@ -213,6 +227,15 @@ class ZeroComStandardNormal(StandardNormal):
     Drop-in replacement for :class:`StandardNormal` intended as the *prior*
     distribution for the :class:`~agedi.diffusion.noisers.Positions` noiser.
     Sampled positions are centered at the origin for every graph.
+
+    Parameters
+    ----------
+    scale : float, optional
+        Standard deviation of the prior.  Should be set to
+        ``sqrt(sde.var(t=1))`` (i.e. ``sigma_max`` for a VE-SDE) so that the
+        prior matches the forward-process marginal at T=1.  Defaults to
+        ``1.0``; :class:`~agedi.diffusion.noisers.Positions` sets this
+        automatically from the SDE.
 
     Reference: Hoogeboom et al., "Equivariant Diffusion for Molecule Generation
     in 3D", NeurIPS 2022. arXiv:2203.17003
