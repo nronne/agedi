@@ -4,6 +4,32 @@ from agedi.diffusion.distributions import Distribution
 from agedi.data import AtomsGraph
 from agedi.utils import TruncatedNormal as TN
 
+
+def _zero_com(x: torch.Tensor, batch_idx: torch.Tensor) -> torch.Tensor:
+    """Subtract the per-graph center of mass from *x*.
+
+    Projects *x* onto the zero-COM subspace: each graph's mean column is
+    subtracted so that the COM of the returned tensor is exactly zero for
+    every graph.  This is the translational-invariance projection from the
+    EDM paper (Hoogeboom et al., NeurIPS 2022, arXiv:2203.17003).
+
+    Parameters
+    ----------
+    x : torch.Tensor, shape (n_atoms, d)
+    batch_idx : torch.Tensor, shape (n_atoms,)
+        Graph membership index (``batch.batch``).
+
+    Returns
+    -------
+    torch.Tensor, shape (n_atoms, d)
+    """
+    n_graphs = int(batch_idx.max().item()) + 1
+    count = batch_idx.bincount(minlength=n_graphs).float().view(-1, 1)
+    com = torch.zeros(n_graphs, x.shape[1], dtype=x.dtype, device=x.device)
+    com.scatter_add_(0, batch_idx.unsqueeze(1).expand_as(x), x)
+    com = com / count
+    return x - com[batch_idx]
+
 _CONFINEMENT_CLAMP_EPS = 1e-4
 
 
@@ -159,3 +185,48 @@ class TruncatedNormal(Distribution):
         return torch.stack(x, dim=1)
 
 
+class ZeroComNormal(Normal):
+    """Normal distribution whose noise increment has zero center of mass per graph.
+
+    Drop-in replacement for :class:`Normal` for use with the
+    :class:`~agedi.diffusion.noisers.Positions` noiser on gas-phase molecules
+    and clusters.  After sampling ``x = N(mu, sigma)``, the COM of the noise
+    increment ``(x - mu)`` is subtracted per graph so that the diffusion
+    process operates in the translationally-invariant subspace.
+
+    Reference: Hoogeboom et al., "Equivariant Diffusion for Molecule Generation
+    in 3D", NeurIPS 2022. arXiv:2203.17003
+    """
+
+    def _setup(self, batch: AtomsGraph) -> None:
+        self.batch_idx = batch.batch
+
+    def _sample(self, mu: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
+        raw = super()._sample(mu, sigma, **kwargs)
+        noise = _zero_com(raw - mu, self.batch_idx)
+        return mu + noise
+
+
+class ZeroComStandardNormal(StandardNormal):
+    """Standard Normal distribution with zero center of mass per graph.
+
+    Drop-in replacement for :class:`StandardNormal` intended as the *prior*
+    distribution for the :class:`~agedi.diffusion.noisers.Positions` noiser.
+    Sampled positions are centered at the origin for every graph.
+
+    Reference: Hoogeboom et al., "Equivariant Diffusion for Molecule Generation
+    in 3D", NeurIPS 2022. arXiv:2203.17003
+    """
+
+    def _setup(self, batch: AtomsGraph) -> None:
+        super()._setup(batch)
+        if batch.batch is not None:
+            self.batch_idx = batch.batch
+        else:
+            # Single un-batched graph: all atoms belong to graph 0.
+            n_atoms = int(batch.n_atoms.sum().item())
+            self.batch_idx = torch.zeros(n_atoms, dtype=torch.long)
+
+    def _sample(self, shape: Optional[torch.Size] = None, **kwargs) -> torch.Tensor:
+        x = super()._sample(shape=shape, **kwargs)
+        return _zero_com(x, self.batch_idx)

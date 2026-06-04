@@ -9,6 +9,8 @@ from agedi.diffusion.distributions import (
     Normal,
     TruncatedNormal,
     StandardNormal,
+    ZeroComNormal,
+    ZeroComStandardNormal,
     UniformCell,
     UniformCellConfined,
 )
@@ -53,6 +55,7 @@ class PositionsNoiser(Noiser):
         distribution: Distribution = Normal(),
         prior: Distribution = UniformCell(),
         sde: Optional[SDE] = None,
+        loss_weighting: str = "uniform",
         **kwargs
     ) -> None:
         """Initialize the positions noiser.
@@ -74,10 +77,21 @@ class PositionsNoiser(Noiser):
         sde : SDE, optional
             Pre-instantiated SDE object.  When provided, *sde_class* and
             *sde_kwargs* are ignored.
+        loss_weighting : str, optional
+            Loss weighting strategy.  ``"uniform"`` weights all noise levels
+            equally.  ``"min_snr"`` caps the per-sample weight at
+            ``min(SNR, 5)`` following Hang et al. (ICCV 2023, arXiv:2303.09556),
+            which balances contributions from high- and low-noise timesteps and
+            typically accelerates convergence.  Defaults to ``"uniform"``.
         **kwargs
             Additional keyword arguments forwarded to :class:`~agedi.diffusion.noisers.Noiser`.
         """
         super().__init__(distribution, prior, **kwargs)
+        if loss_weighting not in ("uniform", "min_snr"):
+            raise ValueError(
+                f"loss_weighting must be 'uniform' or 'min_snr', got {loss_weighting!r}"
+            )
+        self.loss_weighting = loss_weighting
         if sde is not None:
             self.sde = sde
         else:
@@ -87,7 +101,11 @@ class PositionsNoiser(Noiser):
 
     def get_hparams(self) -> Dict:
         """Return hyperparameters for this positions noiser."""
-        return {**super().get_hparams(), "sde": self.sde.get_hparams()}
+        return {
+            **super().get_hparams(),
+            "sde": self.sde.get_hparams(),
+            "loss_weighting": self.loss_weighting,
+        }
 
     def _noise(self, batch: AtomsGraph) -> AtomsGraph:
         """Initializes the noise for the positions noiser.
@@ -217,10 +235,14 @@ class PositionsNoiser(Noiser):
         r_score = batch.apply_mask(r_score)
         # r_noise = self.periodic_distance(batch.pos, r_noise, batch.cell, batch.batch)
 
-        lt = 1.0  # /var.sqrt()
-
-        # snr = 1.0 / var - 1.0
-        # lt = torch.minimum(snr, torch.tensor(5.0, device=snr.device))
+        if self.loss_weighting == "min_snr":
+            # Min-SNR-γ weighting (γ=5): caps per-sample weight at min(SNR, 5).
+            # Balances loss contributions across noise levels and typically
+            # accelerates convergence.  Hang et al., ICCV 2023, arXiv:2303.09556.
+            snr = 1.0 / var - 1.0
+            lt = torch.minimum(snr, torch.tensor(5.0, device=snr.device))
+        else:
+            lt = 1.0
 
         loss = torch.mean(
             lt * torch.sum((r_noise + r_score * var) ** 2, dim=-1, keepdim=True)
@@ -306,8 +328,8 @@ class Positions(PositionsNoiser):
         sde_class: SDE = VE,
         sde_kwargs: Optional[Dict] = None,
         sde: Optional[SDE] = None,
-        distribution: Distribution = Normal(),
-        prior: Distribution = StandardNormal(),
+        distribution: Distribution = ZeroComNormal(),
+        prior: Distribution = ZeroComStandardNormal(),
         **kwargs,
     ) -> None:
         super().__init__(
@@ -322,13 +344,15 @@ class Positions(PositionsNoiser):
     def get_hparams(self) -> Dict:
         """Return hyperparameters for this positions noiser.
 
-        Only includes :attr:`sde` and :attr:`loss_scaling`; the distribution
-        and prior are fixed by the class and not needed for reconstruction.
+        Only includes :attr:`sde`, :attr:`loss_scaling`, and
+        :attr:`loss_weighting`; the distribution and prior are fixed by the
+        class and not needed for reconstruction.
         """
         return {
             "_target_": f"{type(self).__module__}.{type(self).__qualname__}",
             "sde": self.sde.get_hparams(),
             "loss_scaling": self.loss_scaling,
+            "loss_weighting": self.loss_weighting,
         }
 
 
