@@ -170,10 +170,10 @@ class SDENoiser(Noiser, ABC):
 
         w = self.distribution.get_callable(batch)
         if last:
-            batch[self.key] = batch[self.key] + delta_t * (diffusion**2 * z_score + drift)
+            batch[self.key] = batch[self.key] + delta_t * (diffusion**2 * z_score - drift)
         else:
             batch[self.key] = w(
-                batch[self.key] + delta_t * (diffusion**2 * z_score + drift),  # mean
+                batch[self.key] + delta_t * (diffusion**2 * z_score - drift),  # mean
                 torch.sqrt(delta_t) * diffusion,  # variance
             )
 

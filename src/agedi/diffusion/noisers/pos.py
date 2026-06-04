@@ -140,7 +140,7 @@ class PositionsNoiser(Noiser):
         The denoising follows the Euler-Maruyama scheme.
         ::math::
         R_i+1 = R_i +
-                \Delta t (f(R_i, t) + g(t)**2 * s(R_i, t)) +
+                \Delta t (g(t)**2 * s(R_i, t) - f(R_i, t)) +
                 \sqrt{\Delta t} g(t) * w
 
         The used score is expected to be stored in the self.key+"_score",
@@ -177,10 +177,10 @@ class PositionsNoiser(Noiser):
         w = self.distribution.get_callable(batch)
 
         if last:
-            new_pos = r + delta_t * (diffusion**2 * r_score + drift)
+            new_pos = r + delta_t * (diffusion**2 * r_score - drift)
         else:
             new_pos = w(
-                r + delta_t * (diffusion**2 * r_score + drift),  # mean
+                r + delta_t * (diffusion**2 * r_score - drift),  # mean
                 torch.sqrt(delta_t) * diffusion,  # variance
             )
         if batch.confinement is not None:
