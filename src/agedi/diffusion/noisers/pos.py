@@ -358,21 +358,6 @@ class Positions(PositionsNoiser):
             **kwargs,
         )
 
-    def get_hparams(self) -> Dict:
-        """Return hyperparameters for this positions noiser.
-
-        Only includes :attr:`sde`, :attr:`loss_scaling`, and
-        :attr:`loss_weighting`; the distribution and prior are fixed by the
-        class and not needed for reconstruction.
-        """
-        return {
-            "_target_": f"{type(self).__module__}.{type(self).__qualname__}",
-            "sde": self.sde.get_hparams(),
-            "loss_scaling": self.loss_scaling,
-            "loss_weighting": self.loss_weighting,
-        }
-
-
 class CellPositions(Positions):
     """Positions noiser with :class:`~agedi.diffusion.distributions.UniformCell` prior
     and :class:`~agedi.diffusion.distributions.Normal` noise distribution.
@@ -401,16 +386,30 @@ class CellPositions(Positions):
         sde_class: SDE = VE,
         sde_kwargs: Optional[Dict] = None,
         sde: Optional[SDE] = None,
+        distribution: Distribution = Normal(),
+        prior: Distribution = UniformCell(),
         **kwargs,
     ) -> None:
         super().__init__(
             sde_class=sde_class,
             sde_kwargs=sde_kwargs,
-            distribution=Normal(),
-            prior=UniformCell(),
+            distribution=distribution,
+            prior=prior,
             sde=sde,
             **kwargs,
         )
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters for this noiser.
+
+        Distribution and prior are class-fixed defaults and excluded so that
+        Hydra round-trip instantiation does not conflict with the explicit
+        constructor defaults.
+        """
+        hparams = super().get_hparams()
+        hparams.pop("distribution", None)
+        hparams.pop("prior", None)
+        return hparams
 
 
 class ConfinedCellPositions(Positions):
@@ -441,13 +440,27 @@ class ConfinedCellPositions(Positions):
         sde_class: SDE = VE,
         sde_kwargs: Optional[Dict] = None,
         sde: Optional[SDE] = None,
+        distribution: Distribution = TruncatedNormal(),
+        prior: Distribution = UniformCellConfined(),
         **kwargs,
     ) -> None:
         super().__init__(
             sde_class=sde_class,
             sde_kwargs=sde_kwargs,
-            distribution=TruncatedNormal(),
-            prior=UniformCellConfined(),
+            distribution=distribution,
+            prior=prior,
             sde=sde,
             **kwargs,
         )
+
+    def get_hparams(self) -> Dict:
+        """Return hyperparameters for this noiser.
+
+        Distribution and prior are class-fixed defaults and excluded so that
+        Hydra round-trip instantiation does not conflict with the explicit
+        constructor defaults.
+        """
+        hparams = super().get_hparams()
+        hparams.pop("distribution", None)
+        hparams.pop("prior", None)
+        return hparams

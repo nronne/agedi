@@ -110,7 +110,17 @@ def test_named_noiser_get_hparams():
         assert cls.__qualname__ in hp["_target_"]
         assert "sde" in hp
         assert "loss_scaling" in hp
-        # distribution and prior are fixed – not needed for reconstruction
+
+    # Positions exposes distribution and prior (configurable).
+    pos_hp = Positions().get_hparams()
+    assert "distribution" in pos_hp
+    assert "prior" in pos_hp
+
+    # CellPositions / ConfinedCellPositions fix their distribution and prior
+    # via constructor defaults, so they're excluded from hparams to avoid
+    # conflicts during Hydra round-trip instantiation.
+    for cls in (CellPositions, ConfinedCellPositions):
+        hp = cls().get_hparams()
         assert "distribution" not in hp
         assert "prior" not in hp
 
