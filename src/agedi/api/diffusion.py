@@ -224,5 +224,5 @@ def load_diffusion(
     state_dict = checkpoint_data.get("state_dict", checkpoint_data)
     diffusion.load_state_dict(state_dict)
     diffusion.eval()
-    _print_loaded_model_info(params, checkpoint_path, current_device)
+    _print_loaded_model_info({"diffusion": diffusion.get_hparams()}, checkpoint_path, current_device)
     return diffusion
