@@ -318,6 +318,8 @@ def _painn_factory(
                     PositionsScore(
                         input_dim_scalar=head_dim,
                         input_dim_vector=feature_size,
+                        precondition=precondition,
+                        sigma_data=sigma_data,
                     )
                 )
             case _ if hasattr(head, "_key") and head._key == "x":
