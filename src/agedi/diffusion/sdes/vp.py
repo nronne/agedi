@@ -19,7 +19,7 @@ class VP(SDE):
 
     """
 
-    def __init__(self, beta_min: float = 1e-2, beta_max: float = 3, **kwargs):
+    def __init__(self, beta_min: float = 0.1, beta_max: float = 20.0, **kwargs):
         """Initializes the VP SDE."""
         super().__init__(**kwargs)
         self.beta_min = beta_min

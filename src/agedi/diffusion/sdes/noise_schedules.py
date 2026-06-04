@@ -108,7 +108,7 @@ class Cosine(NoiseSchedule):
     
     def fint(self, t: torch.Tensor) -> torch.Tensor:
         """Return the integral of the noise schedule from 0 to *t*."""
-        return (self.max - self.min) * (t / 2 - torch.sin(2 * t * math.pi) / (4 * math.pi))
+        return self.min * t + (self.max - self.min) * (t / 2 - torch.sin(t * math.pi) / (2 * math.pi))
 
         
 
