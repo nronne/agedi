@@ -108,6 +108,21 @@ class PositionsNoiser(Noiser):
             "loss_weighting": self.loss_weighting,
         }
 
+    def initialize_graph(self, batch: AtomsGraph) -> AtomsGraph:
+        """Initialize the graph and pre-set pos_sigma at t=1.
+
+        Sampling starts at t=1, so the score model is called before the first
+        _denoise step.  pos_sigma must therefore be available from the very
+        first score evaluation — this method seeds it with sqrt(var(t=1)).
+        _denoise keeps it current for all subsequent steps.
+        """
+        super().initialize_graph(batch)
+        pos = batch[self.key]
+        t_one = torch.ones(1, 1, dtype=pos.dtype, device=pos.device)
+        sigma_one = torch.sqrt(self.sde.var(t_one))  # (1, 1)
+        batch[self.key + "_sigma"] = sigma_one.expand(pos.shape[0], 1)
+        return batch
+
     def _noise(self, batch: AtomsGraph) -> AtomsGraph:
         """Initializes the noise for the positions noiser.
 
