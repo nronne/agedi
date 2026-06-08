@@ -309,6 +309,7 @@ def train_from_atoms(
     precondition: bool = False,
     sigma_data: float = 1.0,
     prediction_type: str = "score",
+    sampler: str = "em",
     **trainer_kwargs,
 ) -> Tuple["Agedi", Dataset, Trainer]:
     """Build (or restore), train, and return an AGeDi model from ASE Atoms data.
@@ -498,6 +499,7 @@ def train_from_atoms(
             precondition=precondition,
             sigma_data=sigma_data,
             prediction_type=prediction_type,
+            sampler=sampler,
         )
         ckpt_file = None
 

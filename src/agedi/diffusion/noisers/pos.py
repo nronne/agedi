@@ -58,6 +58,7 @@ class PositionsNoiser(Noiser):
         sde: Optional[SDE] = None,
         loss_weighting: str = "uniform",
         prediction_type: str = "score",
+        sampler: str = "em",
         **kwargs
     ) -> None:
         """Initialize the positions noiser.
@@ -101,6 +102,28 @@ class PositionsNoiser(Noiser):
               recovered as ``s = −r_score / √var(t)`` before applying the
               Euler–Maruyama step.  This is the DDPM / molecule-EDM
               parameterization and the recommended choice with VP-SDE.
+        sampler : str, optional
+            Denoising formula used during sampling.  Applies to both
+            ``prediction_type`` settings but has the most impact with VP:
+
+            * ``"em"`` (default) – Euler–Maruyama.  All existing models
+              use this; default preserves backward compatibility.
+
+            * ``"ddpm"`` – DDPM posterior-mean step (Ho et al., NeurIPS
+              2020).  Only valid with ``prediction_type="epsilon"``.
+              Instead of the EM SDE update, each step uses:
+
+              .. math::
+
+                  \\mathbf{x}_{t-\\Delta t} =
+                      \\frac{\\mathbf{x}_t -
+                             \\frac{\\beta(t)\\Delta t}{\\sqrt{\\mathrm{var}(t)}}
+                             \\boldsymbol{\\varepsilon}_\\theta}{\\sqrt{1 - \\beta(t)\\Delta t}}
+                      + \\sigma_t\\,\\mathbf{z}
+
+              The denominator ``√(1−β·Δt)`` cancels the per-step
+              amplification that makes the EM update unstable for large
+              ``beta_max``, at the cost of being restricted to VP-SDE.
         **kwargs
             Additional keyword arguments forwarded to :class:`~agedi.diffusion.noisers.Noiser`.
         """
@@ -113,8 +136,17 @@ class PositionsNoiser(Noiser):
             raise ValueError(
                 f"prediction_type must be 'score' or 'epsilon', got {prediction_type!r}"
             )
+        if sampler not in ("em", "ddpm"):
+            raise ValueError(
+                f"sampler must be 'em' or 'ddpm', got {sampler!r}"
+            )
+        if sampler == "ddpm" and prediction_type != "epsilon":
+            raise ValueError(
+                "sampler='ddpm' requires prediction_type='epsilon'"
+            )
         self.loss_weighting = loss_weighting
         self.prediction_type = prediction_type
+        self.sampler = sampler
         if sde is not None:
             self.sde = sde
         else:
@@ -129,6 +161,7 @@ class PositionsNoiser(Noiser):
             "sde": self.sde.get_hparams(),
             "loss_weighting": self.loss_weighting,
             "prediction_type": self.prediction_type,
+            "sampler": self.sampler,
         }
 
     def initialize_graph(self, batch: AtomsGraph) -> AtomsGraph:
@@ -215,12 +248,11 @@ class PositionsNoiser(Noiser):
         sigma = torch.sqrt(self.sde.var(t))
         batch[self.key + "_sigma"] = sigma
 
-        if self.prediction_type == "epsilon":
-            # Network predicted ε; convert to the score used by the EM step:
+        epsilon_pred = r_score  # save raw network output before any conversion
+
+        if self.prediction_type == "epsilon" and self.sampler != "ddpm":
+            # EM path: convert ε → score for the standard EM update.
             #   score = −ε / √var(t)   →   g²·score = g²·(−ε / √var)
-            # This gives step sizes ∝ g²/√var instead of g²/var, avoiding the
-            # diverging denoising steps near t=0 that affect score-prediction
-            # with VP-SDE.
             r_score = -r_score / sigma
 
         drift = self.sde.drift(r, t)
@@ -228,7 +260,21 @@ class PositionsNoiser(Noiser):
 
         w = self.distribution.get_callable(batch)
 
-        if last:
+        if self.sampler == "ddpm":
+            # DDPM posterior-mean update (Ho et al., NeurIPS 2020).
+            # μ = (x_t − β·Δt / √var · ε_pred) / √(1 − β·Δt)
+            # The denominator cancels the per-step amplification that makes
+            # the EM update unstable for large beta_max in VP-SDE.
+            beta_dt = diffusion ** 2 * delta_t          # β(t)·Δt  (> 0)
+            denom = torch.sqrt(1.0 - beta_dt)           # √(1 − β·Δt)
+            ddpm_mean = (r - beta_dt / sigma * epsilon_pred) / denom
+            if last:
+                new_pos = ddpm_mean
+            else:
+                # Posterior std ≈ √(β·Δt) to first order; use same distribution
+                # as the EM path for consistency (zero-COM noise for molecules).
+                new_pos = w(ddpm_mean, torch.sqrt(delta_t) * diffusion)
+        elif last:
             new_pos = r + delta_t * (diffusion**2 * r_score - drift)
         else:
             new_pos = w(
