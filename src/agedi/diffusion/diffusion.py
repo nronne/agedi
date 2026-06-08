@@ -888,7 +888,14 @@ class Diffusion:
         self._sync_for_timing(batch.pos.device)
         timings.batch_setup += time.perf_counter() - batch_setup_start
 
-        if not kwargs.get("fully_connected", False):
+        if kwargs.get("fully_connected", False):
+            # For fully-connected graphs, build all-pairs edges directly without
+            # going through the neighbour-list algorithm.
+            batch_idx = batch.batch.to(torch.int32)
+            batch.edge_index, batch.shift_vectors = batch.make_fully_connected_graph(
+                batch.pos, dtype=batch.pos.dtype, batch_idx=batch_idx
+            )
+        else:
             # When torch.compile is requested, estimate cell-list sizes and
             # max_neighbors via NVIDIA nvalchemiops so that all neighbor-list
             # buffers have fixed shapes before the first update_graph() call.
