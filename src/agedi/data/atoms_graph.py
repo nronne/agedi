@@ -635,13 +635,11 @@ class AtomsGraph(Data):
             )
             return True
 
-        # Fully-connected path: all-pairs topology is fixed once built.
-        # Skip the rebuild on subsequent calls; only build on the first call
-        # when edge_index has not been set yet.
+        # Fully-connected path: rebuild edges as all-pairs (trivial, no cutoff or
+        # PBC arithmetic). This is not a neighbour-list computation — it simply
+        # enumerates all N*(N-1) pairs and sets shift_vectors to zero.
         fc = self._get_scalar_attr("fully_connected")
         if fc is not None and bool(fc):
-            if "edge_index" in self._store:
-                return False
             batch_idx = self.batch.to(torch.int32) if isinstance(self, Batch) else None
             self.edge_index, self.shift_vectors = self.make_fully_connected_graph(
                 self.pos, dtype=self.pos.dtype, batch_idx=batch_idx

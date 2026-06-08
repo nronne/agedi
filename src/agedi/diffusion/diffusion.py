@@ -888,19 +888,20 @@ class Diffusion:
         self._sync_for_timing(batch.pos.device)
         timings.batch_setup += time.perf_counter() - batch_setup_start
 
-        # When torch.compile is requested, estimate cell-list sizes and
-        # max_neighbors via NVIDIA nvalchemiops so that all neighbor-list
-        # buffers have fixed shapes before the first update_graph() call.
-        # Fixed shapes are required to trace the reverse step only once.
-        if compile:
-            batch.prepare_for_compile(cutoff)
+        if not kwargs.get("fully_connected", False):
+            # When torch.compile is requested, estimate cell-list sizes and
+            # max_neighbors via NVIDIA nvalchemiops so that all neighbor-list
+            # buffers have fixed shapes before the first update_graph() call.
+            # Fixed shapes are required to trace the reverse step only once.
+            if compile:
+                batch.prepare_for_compile(cutoff)
 
-        self._time_sampling_call(
-            batch.pos.device,
-            timings,
-            "initial_neighbor_list",
-            batch.update_graph,
-        )
+            self._time_sampling_call(
+                batch.pos.device,
+                timings,
+                "initial_neighbor_list",
+                batch.update_graph,
+            )
 
         # Optionally compile the reverse step after the first neighbor list
         # has been built (so all buffer shapes are known and fixed).
