@@ -17,7 +17,7 @@ _FC_DEFAULT_CUTOFF = 50.0   # backbone cutoff auto-used when fully_connected=Tru
 
 def create_diffusion(
     model: str = "PaiNN",
-    cutoff: float = 6.0,
+    cutoff: Optional[float] = None,
     feature_size: int = 64,
     n_blocks: int = 4,
     n_rbf: int = 30,
@@ -141,12 +141,15 @@ def create_diffusion(
     conditioning_modules = _build_conditioning(conditioning, type=conditioning_type)
     head_dim = feature_size + sum(module.output_dim for module in conditioning_modules)
 
-    # When fully_connected=True the graph has no finite cutoff, so the backbone
-    # must be able to process atom pairs at any distance.  Automatically promote
-    # the cutoff used for the RBFs and CosineCutoff envelope to a large value so
-    # that all distances encountered during sampling receive non-zero messages.
-    # The user can still pass an explicit large cutoff to control RBF spacing.
-    backbone_cutoff = max(cutoff, _FC_DEFAULT_CUTOFF) if fully_connected else cutoff
+    # Resolve the cutoff sentinel.
+    # - Default (None) with fully_connected=True  → 50 Å so the backbone's RBFs
+    #   and CosineCutoff cover the full range of distances seen during sampling.
+    # - Default (None) otherwise                  → 6 Å (standard neighbour list).
+    # - Explicit value                            → always respected as-is.
+    if cutoff is None:
+        backbone_cutoff = _FC_DEFAULT_CUTOFF if fully_connected else 6.0
+    else:
+        backbone_cutoff = cutoff
 
     # Build noiser objects first so that the TypesScore head can inherit the
     # correct n_classes from the Types noiser (via the object-based fallback

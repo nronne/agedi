@@ -12,7 +12,7 @@ from agedi.data.transforms import Repeat
 
 def create_dataset(
     data: Sequence[Atoms],
-    cutoff: float = 6.0,
+    cutoff: Optional[float] = None,
     batch_size: int = 64,
     train_split: Union[float, int] = 0.9,
     val_split: Union[float, int] = 0.1,
@@ -87,6 +87,9 @@ def create_dataset(
         phase_transforms = [[]]
         for i in range(2, repeat + 1):
             phase_transforms.append([Repeat((i, i, 1), property=property_kinds)])
+
+    if cutoff is None:
+        cutoff = 50.0 if fully_connected else 6.0
 
     dataset = Dataset(
         cutoff=cutoff,

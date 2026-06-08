@@ -279,7 +279,7 @@ def train_from_atoms(
     data: Sequence[Atoms],
     *,
     model: str = "PaiNN",
-    cutoff: float = 6.0,
+    cutoff: Optional[float] = None,
     feature_size: int = 64,
     n_blocks: int = 4,
     n_rbf: int = 30,
