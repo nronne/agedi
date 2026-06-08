@@ -24,6 +24,7 @@ def create_dataset(
     canonical_cell: bool = False,
     regressor_data: Optional[Sequence[Atoms]] = None,
     properties: Optional[List[Dict]] = None,
+    fully_connected: bool = False,
 ) -> Dataset:
     """Create and setup an AGeDi Dataset from ASE Atoms objects.
 
@@ -94,6 +95,7 @@ def create_dataset(
         n_val=val_split,
         phase_transforms=phase_transforms,
         num_workers=min(4, os.cpu_count() or 1),
+        fully_connected=fully_connected,
     )
 
     conditioning_properties = None

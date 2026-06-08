@@ -368,13 +368,17 @@ class Diffusion:
     # Graph initialisation
     # ------------------------------------------------------------------
 
-    def _initialize_graph(self, cutoff: float, **kwargs) -> AtomsGraph:
+    def _initialize_graph(self, cutoff: float, fully_connected: bool = False, **kwargs) -> AtomsGraph:
         """Initialise a single graph from noiser priors.
 
         Parameters
         ----------
         cutoff : float
             Cutoff radius for the neighbour list.
+        fully_connected : bool, optional
+            When ``True`` the graph is rebuilt as a fully connected graph at
+            every reverse step instead of using a finite cutoff.  Recommended
+            for gas-phase molecules and clusters.  Defaults to ``False``.
         **kwargs
             Additional keyword arguments passed to the graph (e.g. ``cell``,
             ``template``, ``pbc``).
@@ -384,7 +388,7 @@ class Diffusion:
         AtomsGraph
             The initialised graph.
         """
-        graph = AtomsGraph.empty(cutoff=cutoff)
+        graph = AtomsGraph.empty(cutoff=cutoff, fully_connected=fully_connected)
         if "template" in kwargs:
             template = kwargs.pop("template")
         else:
@@ -950,6 +954,7 @@ class Diffusion:
         print_timings: Optional[bool] = False,
         corrector_steps: int = 0,
         corrector_step_size: float = 1e-3,
+        fully_connected: bool = False,
     ) -> List[AtomsGraph]:
         """Sample structures from the diffusion model.
 
@@ -1105,6 +1110,9 @@ class Diffusion:
 
         if pbc is not None:
             kwargs["pbc"] = torch.tensor(pbc, dtype=torch.bool).reshape(3)
+
+        if fully_connected:
+            kwargs["fully_connected"] = True
 
         if N > batch_size:
             from rich.console import Console as _Console

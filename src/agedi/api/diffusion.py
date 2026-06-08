@@ -36,6 +36,7 @@ def create_diffusion(
     sigma_data: float = 1.0,
     prediction_type: str = "score",
     sampler: str = "em",
+    fully_connected: bool = False,
 ) -> "Agedi":
     """Create a diffusion model for script-based training and sampling.
 

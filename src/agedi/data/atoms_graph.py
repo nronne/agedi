@@ -247,6 +247,7 @@ class AtomsGraph(Data):
         initialize_mask: Optional[bool] = None,
         confinement: Optional[Tuple[float, float]] = None,
         canonical_cell: bool = False,
+        fully_connected: bool = False,
     ) -> "AtomsGraph":
         """Create a graph from an ASE Atoms object.
 
@@ -329,9 +330,15 @@ class AtomsGraph(Data):
         kwargs["cell"] = final_cell_f64.to(dtype)
         kwargs["pbc"] = torch.tensor(atoms.get_pbc())
 
-        edge_index, shift_vectors = cls.make_graph(
-            kwargs["pos"], kwargs["cell"], cutoff, kwargs["pbc"]
-        )
+        if fully_connected:
+            edge_index, shift_vectors = cls.make_fully_connected_graph(
+                kwargs["pos"], dtype=dtype
+            )
+            kwargs["fully_connected"] = torch.tensor([1])
+        else:
+            edge_index, shift_vectors = cls.make_graph(
+                kwargs["pos"], kwargs["cell"], cutoff, kwargs["pbc"]
+            )
         kwargs["edge_index"] = edge_index
         kwargs["shift_vectors"] = shift_vectors
 
@@ -345,13 +352,19 @@ class AtomsGraph(Data):
         return cls(**kwargs)
 
     @classmethod
-    def empty(cls, cutoff: float = 6.0) -> "AtomsGraph":
+    def empty(cls, cutoff: float = 6.0, fully_connected: bool = False) -> "AtomsGraph":
         """Create an empty graph.
 
         Parameters
         ----------
         cutoff: float
             The cutoff radius for the edges.
+        fully_connected : bool, optional
+            When ``True`` the graph will be rebuilt as a fully connected graph
+            (all atom pairs, no self-loops, zero shift vectors) every time
+            :meth:`update_graph` is called.  Suitable for gas-phase molecules
+            and clusters where a finite cutoff misses pairs when atoms spread
+            during the reverse diffusion process.  Defaults to ``False``.
 
         Returns
         -------
@@ -359,7 +372,7 @@ class AtomsGraph(Data):
             The graph object.
 
         """
-        return cls(
+        kwargs = dict(
             x=torch.empty(0, dtype=torch.long),
             pos=torch.empty(0, 3),
             n_atoms=torch.tensor([0]),
@@ -367,6 +380,9 @@ class AtomsGraph(Data):
             pbc=torch.tensor([True, True, True], dtype=torch.bool),
             cutoff=cutoff,
         )
+        if fully_connected:
+            kwargs["fully_connected"] = torch.tensor([1])
+        return cls(**kwargs)
 
     def add_batch_attr(self, key: str, value: torch.Tensor, type: str = "node") -> None:
         """Add a batch attribute to the graph.
@@ -619,6 +635,15 @@ class AtomsGraph(Data):
             )
             return True
 
+        # Fully-connected path: rebuild edges as all-pairs for non-periodic systems.
+        fc = self._get_scalar_attr("fully_connected")
+        if fc is not None and bool(fc):
+            batch_idx = self.batch.to(torch.int32) if isinstance(self, Batch) else None
+            self.edge_index, self.shift_vectors = self.make_fully_connected_graph(
+                self.pos, dtype=self.pos.dtype, batch_idx=batch_idx
+            )
+            return True
+
         cutoff = self._get_scalar_attr("cutoff")
         if cutoff is None:
             raise ValueError(
@@ -731,6 +756,66 @@ class AtomsGraph(Data):
             )
 
         return torch.cat(edge_index_parts, dim=1), torch.cat(shift_vector_parts, dim=0)
+
+    @staticmethod
+    def make_fully_connected_graph(
+        positions: torch.Tensor,
+        dtype: Optional[torch.dtype] = None,
+        batch_idx: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Build a fully connected graph: every atom is connected to every other.
+
+        No self-loops are included.  All shift vectors are zero (non-periodic).
+        This is the correct topology for gas-phase molecules and clusters where
+        the finite cutoff of a standard neighbour list would miss long-range
+        pairs when atoms spread apart during the reverse diffusion process.
+
+        Parameters
+        ----------
+        positions : torch.Tensor, shape (n_atoms, 3)
+        dtype : torch.dtype, optional
+            Data type of the shift-vector output.  Defaults to ``positions.dtype``.
+        batch_idx : torch.Tensor of shape (n_atoms,), optional
+            Graph-membership index for batched graphs.  When ``None`` all atoms
+            are treated as belonging to a single graph.
+
+        Returns
+        -------
+        edge_index : torch.Tensor, shape (2, n_edges)
+        shift_vectors : torch.Tensor, shape (n_edges, 3)
+            All zeros (no periodic images).
+        """
+        device = positions.device
+        output_dtype = dtype or positions.dtype
+        n_atoms = positions.shape[0]
+
+        if batch_idx is None:
+            idx = torch.arange(n_atoms, device=device)
+            src, dst = torch.meshgrid(idx, idx, indexing="ij")
+            mask = src != dst
+            edge_index = torch.stack([src[mask], dst[mask]], dim=0)
+        else:
+            n_graphs = int(batch_idx.max().item()) + 1 if n_atoms > 0 else 0
+            parts = []
+            for g in range(n_graphs):
+                atom_idx = torch.where(batch_idx == g)[0]
+                n = atom_idx.shape[0]
+                if n <= 1:
+                    continue
+                local = torch.arange(n, device=device)
+                ls, ld = torch.meshgrid(local, local, indexing="ij")
+                m = ls != ld
+                parts.append(torch.stack([atom_idx[ls[m]], atom_idx[ld[m]]]))
+            edge_index = (
+                torch.cat(parts, dim=1)
+                if parts
+                else torch.empty((2, 0), dtype=torch.long, device=device)
+            )
+
+        shift_vectors = torch.zeros(
+            edge_index.shape[1], 3, dtype=output_dtype, device=device
+        )
+        return edge_index, shift_vectors
 
     @staticmethod
     def make_graph(

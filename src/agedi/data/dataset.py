@@ -48,6 +48,7 @@ class Dataset(LightningDataModule):
         shuffle: bool = True,
         properties: List[str] = ["energy", "forces"],
         cutoff: float = 6.0,
+        fully_connected: bool = False,
         phase_transforms: Optional[List[List[BaseTransform]]] = None,
         num_workers: int = 0,
         **kwargs,
@@ -62,6 +63,7 @@ class Dataset(LightningDataModule):
 
         self.properties = properties
         self.cutoff = cutoff
+        self.fully_connected = fully_connected
 
         self.dataset = None
         self.train_idx = None
@@ -106,6 +108,7 @@ class Dataset(LightningDataModule):
                 d,
                 cutoff=self.cutoff,
                 canonical_cell=canonical_cell,
+                fully_connected=self.fully_connected,
             )
             
             if properties is not None:
@@ -196,7 +199,7 @@ class Dataset(LightningDataModule):
         """
         dataset = []
         for d in data:
-            ag = AtomsGraph.from_atoms(d, cutoff=self.cutoff, canonical_cell=canonical_cell)
+            ag = AtomsGraph.from_atoms(d, cutoff=self.cutoff, canonical_cell=canonical_cell, fully_connected=self.fully_connected)
 
             has_E, has_F = self._has_energy_forces(d)
             if has_E:
