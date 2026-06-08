@@ -204,6 +204,16 @@ class Diffusion:
         AtomsGraph
             The denoised batch.
         """
+        # For fully-connected graphs, rebuild all-pairs edges from current
+        # positions before calling the score model. This is not a neighbour-list
+        # computation and is not included in any timing bucket.
+        fc = batch._get_scalar_attr("fully_connected")
+        if fc is not None and bool(fc):
+            batch_idx = batch.batch.to(torch.int32)
+            batch.edge_index, batch.shift_vectors = batch.make_fully_connected_graph(
+                batch.pos, dtype=batch.pos.dtype, batch_idx=batch_idx
+            )
+
         if timings is not None:
             timings.reverse_step_calls += 1
             batch = self._time_sampling_call(
@@ -226,27 +236,29 @@ class Diffusion:
                     last=last,
                 )
 
-        if timings is None:
-            batch.wrap_positions()
-            batch.update_graph()
-        else:
-            self._time_sampling_call(
-                batch.pos.device, timings, "wrap_positions", batch.wrap_positions
-            )
-            rebuilt = self._time_sampling_call(
-                batch.pos.device, timings, "neighbor_list", batch.update_graph
-            )
-            timings.neighbor_list_calls += 1
-            if rebuilt:
-                timings.neighbor_list_rebuilds += 1
+        if fc is None or not bool(fc):
+            if timings is None:
+                batch.wrap_positions()
+                batch.update_graph()
+            else:
+                self._time_sampling_call(
+                    batch.pos.device, timings, "wrap_positions", batch.wrap_positions
+                )
+                rebuilt = self._time_sampling_call(
+                    batch.pos.device, timings, "neighbor_list", batch.update_graph
+                )
+                timings.neighbor_list_calls += 1
+                if rebuilt:
+                    timings.neighbor_list_rebuilds += 1
 
         if self.regressor_model is not None and force_field_guidance > 0.0:
             if timings is None:
                 batch = self.force_field_guidance_step(
                     batch, force_field_guidance * delta_t
                 )
-                batch.wrap_positions()
-                batch.update_graph()
+                if fc is None or not bool(fc):
+                    batch.wrap_positions()
+                    batch.update_graph()
             else:
                 batch = self._time_sampling_call(
                     batch.pos.device,
@@ -256,21 +268,22 @@ class Diffusion:
                     batch,
                     force_field_guidance * delta_t,
                 )
-                self._time_sampling_call(
-                    batch.pos.device,
-                    timings,
-                    "guidance_wrap_positions",
-                    batch.wrap_positions,
-                )
-                guidance_rebuilt = self._time_sampling_call(
-                    batch.pos.device,
-                    timings,
-                    "guidance_neighbor_list",
-                    batch.update_graph,
-                )
-                timings.guidance_neighbor_list_calls += 1
-                if guidance_rebuilt:
-                    timings.guidance_neighbor_list_rebuilds += 1
+                if fc is None or not bool(fc):
+                    self._time_sampling_call(
+                        batch.pos.device,
+                        timings,
+                        "guidance_wrap_positions",
+                        batch.wrap_positions,
+                    )
+                    guidance_rebuilt = self._time_sampling_call(
+                        batch.pos.device,
+                        timings,
+                        "guidance_neighbor_list",
+                        batch.update_graph,
+                    )
+                    timings.guidance_neighbor_list_calls += 1
+                    if guidance_rebuilt:
+                        timings.guidance_neighbor_list_rebuilds += 1
 
         return batch
 
