@@ -1111,6 +1111,12 @@ class Diffusion:
         if pbc is not None:
             kwargs["pbc"] = torch.tensor(pbc, dtype=torch.bool).reshape(3)
 
+        # Fall back to the value stored on the model when the caller did not
+        # explicitly pass fully_connected.  This ensures that a model created
+        # (or loaded) with fully_connected=True samples with the same topology
+        # without requiring the user to remember to pass the flag every time.
+        fully_connected = fully_connected or getattr(self, "fully_connected", False)
+
         if fully_connected:
             kwargs["fully_connected"] = True
 

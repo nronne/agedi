@@ -171,6 +171,19 @@ def create_diffusion(
             feature_size=feature_size,
         )
 
+    import warnings
+    if fully_connected and cutoff < 50.0:
+        warnings.warn(
+            f"fully_connected=True with cutoff={cutoff} Å: the backbone's radial "
+            f"basis functions and CosineCutoff will zero out messages for atom pairs "
+            f"beyond {cutoff} Å.  During sampling the VP reverse process can spread "
+            f"atoms much further apart, making the score effectively zero and causing "
+            f"structures to blow up.  Retrain with a large cutoff (e.g. cutoff=30.0) "
+            f"when using fully_connected=True.",
+            UserWarning,
+            stacklevel=2,
+        )
+
     return Agedi(
         score_model=score_model,
         noisers=noiser_modules,
@@ -178,6 +191,7 @@ def create_diffusion(
         optim_config={"lr": lr, "weight_decay": weight_decay},
         scheduler_config={"factor": lr_factor, "patience": lr_patience},
         eps=eps,
+        fully_connected=fully_connected,
     ).to(torch_device)
 
 
