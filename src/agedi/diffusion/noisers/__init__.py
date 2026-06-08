@@ -12,16 +12,16 @@ from .types import Types, TypesNoiser
 # :class:`Types`) can simply ignore it.
 
 # CamelCase names (primary)
-Noiser.register("Positions", lambda sde: Positions(sde=sde))
-Noiser.register("CellPositions", lambda sde: CellPositions(sde=sde))
-Noiser.register("ConfinedCellPositions", lambda sde: ConfinedCellPositions(sde=sde))
-Noiser.register("Types", lambda sde: Types())
+Noiser.register("Positions", lambda sde, **kw: Positions(sde=sde, **kw))
+Noiser.register("CellPositions", lambda sde, **kw: CellPositions(sde=sde, **kw))
+Noiser.register("ConfinedCellPositions", lambda sde, **kw: ConfinedCellPositions(sde=sde, **kw))
+Noiser.register("Types", lambda sde, **kw: Types())
 
 # snake_case aliases for backwards compatibility
-Noiser.register("positions", lambda sde: Positions(sde=sde))
-Noiser.register("cell_positions", lambda sde: CellPositions(sde=sde))
-Noiser.register("confined_cell_positions", lambda sde: ConfinedCellPositions(sde=sde))
-Noiser.register("types", lambda sde: Types())
+Noiser.register("positions", lambda sde, **kw: Positions(sde=sde, **kw))
+Noiser.register("cell_positions", lambda sde, **kw: CellPositions(sde=sde, **kw))
+Noiser.register("confined_cell_positions", lambda sde, **kw: ConfinedCellPositions(sde=sde, **kw))
+Noiser.register("types", lambda sde, **kw: Types())
 
 __all__ = [
     "Noiser",

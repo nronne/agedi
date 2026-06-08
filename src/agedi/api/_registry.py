@@ -104,6 +104,7 @@ def _build_noisers(
     noisers: Sequence[Union[str, "Noiser"]],
     sde: Union[str, "SDE"] = "ve",
     type_map: Optional[List[int]] = None,
+    prediction_type: str = "score",
 ) -> List["Noiser"]:
     """Build a list of Noiser objects from a sequence of noiser names or objects.
 
@@ -158,7 +159,7 @@ def _build_noisers(
         if noiser in ("Types", "types") and type_map is not None:
             noiser_list.append(Types(type_map=type_map))
         else:
-            noiser_list.append(Noiser._registry[noiser](sde=resolved_sde))
+            noiser_list.append(Noiser._registry[noiser](sde=resolved_sde, prediction_type=prediction_type))
 
     return noiser_list
 

@@ -34,6 +34,7 @@ def create_diffusion(
     type_map: Optional[List[int]] = None,
     precondition: bool = False,
     sigma_data: float = 1.0,
+    prediction_type: str = "score",
 ) -> "Agedi":
     """Create a diffusion model for script-based training and sampling.
 
@@ -138,7 +139,7 @@ def create_diffusion(
     # Build noiser objects first so that the TypesScore head can inherit the
     # correct n_classes from the Types noiser (via the object-based fallback
     # in _painn_factory).
-    noiser_modules = _build_noisers(noisers, sde=sde, type_map=type_map)
+    noiser_modules = _build_noisers(noisers, sde=sde, type_map=type_map, prediction_type=prediction_type)
 
     translator, representation, heads = _build_score_components(
         model,

@@ -57,6 +57,7 @@ class PositionsNoiser(Noiser):
         prior: Distribution = UniformCell(),
         sde: Optional[SDE] = None,
         loss_weighting: str = "uniform",
+        prediction_type: str = "score",
         **kwargs
     ) -> None:
         """Initialize the positions noiser.
@@ -81,9 +82,25 @@ class PositionsNoiser(Noiser):
         loss_weighting : str, optional
             Loss weighting strategy.  ``"uniform"`` weights all noise levels
             equally.  ``"min_snr"`` caps the per-sample weight at
-            ``min(SNR, 5)`` following Hang et al. (ICCV 2023, arXiv:2303.09556),
-            which balances contributions from high- and low-noise timesteps and
-            typically accelerates convergence.  Defaults to ``"uniform"``.
+            ``min(SNR, 5)`` following Hang et al. (ICCV 2023, arXiv:2303.09556).
+            Defaults to ``"uniform"``.
+        prediction_type : str, optional
+            Parameterization used for both training and sampling.
+
+            * ``"score"`` (default) – the network predicts a quantity
+              proportional to the score.  Loss: ``‖ε + r_score·var‖²``.
+              Works well for VE-SDE but the training gradient at small *t*
+              is attenuated by ``var(t)`` for VP-SDE, which can prevent
+              learning fine-scale corrections.
+
+            * ``"epsilon"`` – the network predicts the normalised noise
+              ``ε = (x_t − μ(t)·x_0) / √var(t)`` directly.
+              Loss: ``‖r_score − ε‖²``.  Gradient magnitude is uniform
+              across all noise levels (no ``var`` weighting), which is
+              essential for VP-SDE.  During denoising the score is
+              recovered as ``s = −r_score / √var(t)`` before applying the
+              Euler–Maruyama step.  This is the DDPM / molecule-EDM
+              parameterization and the recommended choice with VP-SDE.
         **kwargs
             Additional keyword arguments forwarded to :class:`~agedi.diffusion.noisers.Noiser`.
         """
@@ -92,7 +109,12 @@ class PositionsNoiser(Noiser):
             raise ValueError(
                 f"loss_weighting must be 'uniform' or 'min_snr', got {loss_weighting!r}"
             )
+        if prediction_type not in ("score", "epsilon"):
+            raise ValueError(
+                f"prediction_type must be 'score' or 'epsilon', got {prediction_type!r}"
+            )
         self.loss_weighting = loss_weighting
+        self.prediction_type = prediction_type
         if sde is not None:
             self.sde = sde
         else:
@@ -106,6 +128,7 @@ class PositionsNoiser(Noiser):
             **super().get_hparams(),
             "sde": self.sde.get_hparams(),
             "loss_weighting": self.loss_weighting,
+            "prediction_type": self.prediction_type,
         }
 
     def initialize_graph(self, batch: AtomsGraph) -> AtomsGraph:
@@ -189,7 +212,16 @@ class PositionsNoiser(Noiser):
 
         # Keep pos_sigma current so EDM-preconditioned heads have σ = √var(t)
         # available throughout the reverse process, not just during training.
-        batch[self.key + "_sigma"] = torch.sqrt(self.sde.var(t))
+        sigma = torch.sqrt(self.sde.var(t))
+        batch[self.key + "_sigma"] = sigma
+
+        if self.prediction_type == "epsilon":
+            # Network predicted ε; convert to the score used by the EM step:
+            #   score = −ε / √var(t)   →   g²·score = g²·(−ε / √var)
+            # This gives step sizes ∝ g²/√var instead of g²/var, avoiding the
+            # diverging denoising steps near t=0 that affect score-prediction
+            # with VP-SDE.
+            r_score = -r_score / sigma
 
         drift = self.sde.drift(r, t)
         diffusion = self.sde.diffusion(t)
@@ -260,14 +292,25 @@ class PositionsNoiser(Noiser):
             # Min-SNR-γ weighting (γ=5): caps per-sample weight at min(SNR, 5).
             # Balances loss contributions across noise levels and typically
             # accelerates convergence.  Hang et al., ICCV 2023, arXiv:2303.09556.
+            # Note: min_snr is primarily useful with prediction_type="score".
+            # With prediction_type="epsilon" the gradient is already uniform, so
+            # "uniform" weighting is preferred.
             snr = 1.0 / var - 1.0
             lt = torch.minimum(snr, torch.tensor(5.0, device=snr.device))
         else:
             lt = 1.0
 
-        loss = torch.mean(
-            lt * torch.sum((r_noise + r_score * var) ** 2, dim=-1, keepdim=True)
-        )
+        if self.prediction_type == "epsilon":
+            # The network predicts ε = (x_t − μ(t)·x_0) / √var(t).
+            # Simple MSE — gradient magnitude is uniform across all noise levels
+            # (no implicit var weighting), which is essential for VP-SDE.
+            loss = torch.mean(
+                lt * torch.sum((r_score - r_noise) ** 2, dim=-1, keepdim=True)
+            )
+        else:
+            loss = torch.mean(
+                lt * torch.sum((r_noise + r_score * var) ** 2, dim=-1, keepdim=True)
+            )
         return loss
 
     def periodic_distance(
