@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 import yaml
 from ase.build import molecule
@@ -753,3 +754,165 @@ def test_types_noiser_hparams_roundtrip_with_type_map():
     assert "type_map" in types_noiser_hparams
     assert types_noiser_hparams["type_map"] == [0, 1, 8]
     assert types_noiser_hparams["n_classes"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Fully-connected graph
+# ---------------------------------------------------------------------------
+
+def test_create_diffusion_fully_connected():
+    """create_diffusion with fully_connected=True should set the flag on Agedi."""
+    diffusion = create_diffusion(noisers=("Positions",), fully_connected=True)
+    assert diffusion.fully_connected is True
+
+
+def test_create_diffusion_fully_connected_auto_cutoff():
+    """cutoff=None + fully_connected=True must auto-select 50 Å backbone cutoff."""
+    diffusion = create_diffusion(noisers=("Positions",), fully_connected=True, cutoff=None)
+    cutoff = float(diffusion.score_model.representation.cutoff_fn.cutoff[0])
+    assert cutoff == 50.0, f"Expected 50 Å FC cutoff, got {cutoff}"
+
+
+def test_create_diffusion_default_cutoff_no_fc():
+    """cutoff=None without fully_connected must default to 6 Å."""
+    diffusion = create_diffusion(noisers=("CellPositions",), cutoff=None)
+    cutoff = float(diffusion.score_model.representation.radial_basis.offsets[-1])
+    assert abs(cutoff - 6.0) < 0.1, f"Expected 6 Å default cutoff, got {cutoff}"
+
+
+def test_load_diffusion_fully_connected_roundtrip(tmp_path):
+    """load_diffusion must preserve fully_connected=True across save/load."""
+    diffusion = create_diffusion(noisers=("Positions",), fully_connected=True)
+    log_dir = tmp_path / "logs" / "version_0"
+    (log_dir / "checkpoints").mkdir(parents=True)
+    import yaml
+    with open(log_dir / "hparams.yaml", "w") as f:
+        yaml.dump({"diffusion": diffusion.get_hparams()}, f)
+    torch.save({"state_dict": diffusion.state_dict()}, log_dir / "checkpoints" / "last_model.ckpt")
+
+    loaded = load_diffusion(log_dir)
+    assert loaded.fully_connected is True
+
+
+# ---------------------------------------------------------------------------
+# Radial basis selection
+# ---------------------------------------------------------------------------
+
+def test_create_diffusion_radial_basis_bessel():
+    """create_diffusion with radial_basis='bessel' should use BesselRBF."""
+    import schnetpack as spk
+    diffusion = create_diffusion(noisers=("CellPositions",), radial_basis="bessel", cutoff=6.0)
+    rb = diffusion.score_model.representation.radial_basis
+    assert isinstance(rb, spk.nn.BesselRBF), f"Expected BesselRBF, got {type(rb).__name__}"
+
+
+def test_create_diffusion_radial_basis_gaussian():
+    """create_diffusion with radial_basis='gaussian' (default) should use GaussianRBF."""
+    import schnetpack as spk
+    diffusion = create_diffusion(noisers=("CellPositions",), radial_basis="gaussian")
+    rb = diffusion.score_model.representation.radial_basis
+    assert isinstance(rb, spk.nn.GaussianRBF), f"Expected GaussianRBF, got {type(rb).__name__}"
+
+
+def test_create_diffusion_radial_basis_invalid():
+    """create_diffusion with an unknown radial_basis should raise ValueError."""
+    with pytest.raises(ValueError, match="radial_basis"):
+        create_diffusion(noisers=("CellPositions",), radial_basis="sinc")
+
+
+def test_load_diffusion_bessel_roundtrip(tmp_path):
+    """load_diffusion must preserve radial_basis='bessel' across save/load."""
+    import schnetpack as spk
+    import yaml
+    diffusion = create_diffusion(noisers=("CellPositions",), radial_basis="bessel", cutoff=6.0)
+    log_dir = tmp_path / "logs" / "version_0"
+    (log_dir / "checkpoints").mkdir(parents=True)
+    with open(log_dir / "hparams.yaml", "w") as f:
+        yaml.dump({"diffusion": diffusion.get_hparams()}, f)
+    torch.save({"state_dict": diffusion.state_dict()}, log_dir / "checkpoints" / "last_model.ckpt")
+
+    loaded = load_diffusion(log_dir)
+    rb = loaded.score_model.representation.radial_basis
+    assert isinstance(rb, spk.nn.BesselRBF), "BesselRBF must survive save/load"
+
+
+# ---------------------------------------------------------------------------
+# EDM preconditioning
+# ---------------------------------------------------------------------------
+
+def test_create_diffusion_precondition():
+    """create_diffusion with precondition=True should enable preconditioning on the head."""
+    from agedi.models.schnetpack.heads import PositionsScore
+    diffusion = create_diffusion(noisers=("CellPositions",), precondition=True, sigma_data=1.5)
+    pos_head = next(h for h in diffusion.score_model.heads if isinstance(h, PositionsScore))
+    assert pos_head.precondition is True
+    assert abs(pos_head.sigma_data - 1.5) < 1e-6
+
+
+def test_load_diffusion_precondition_roundtrip(tmp_path):
+    """load_diffusion must preserve precondition=True and sigma_data."""
+    from agedi.models.schnetpack.heads import PositionsScore
+    import yaml
+    diffusion = create_diffusion(noisers=("CellPositions",), precondition=True, sigma_data=2.0)
+    log_dir = tmp_path / "logs" / "version_0"
+    (log_dir / "checkpoints").mkdir(parents=True)
+    with open(log_dir / "hparams.yaml", "w") as f:
+        yaml.dump({"diffusion": diffusion.get_hparams()}, f)
+    torch.save({"state_dict": diffusion.state_dict()}, log_dir / "checkpoints" / "last_model.ckpt")
+
+    loaded = load_diffusion(log_dir)
+    pos_head = next(h for h in loaded.score_model.heads if isinstance(h, PositionsScore))
+    assert pos_head.precondition is True
+    assert abs(pos_head.sigma_data - 2.0) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# epsilon prediction + DDPM sampler (API level)
+# ---------------------------------------------------------------------------
+
+def test_create_diffusion_epsilon_prediction():
+    """create_diffusion with prediction_type='epsilon' should configure the noiser."""
+    from agedi.diffusion.noisers import PositionsNoiser
+    diffusion = create_diffusion(
+        noisers=("Positions",), sde="vp", prediction_type="epsilon", sampler="em"
+    )
+    pos_noiser = next(n for n in diffusion.noisers if isinstance(n, PositionsNoiser))
+    assert pos_noiser.prediction_type == "epsilon"
+    assert pos_noiser.sampler == "em"
+
+
+def test_create_diffusion_ddpm_sampler():
+    """create_diffusion with sampler='ddpm' + prediction_type='epsilon' must work."""
+    from agedi.diffusion.noisers import PositionsNoiser
+    diffusion = create_diffusion(
+        noisers=("Positions",), sde="vp", prediction_type="epsilon", sampler="ddpm"
+    )
+    pos_noiser = next(n for n in diffusion.noisers if isinstance(n, PositionsNoiser))
+    assert pos_noiser.sampler == "ddpm"
+
+
+def test_create_diffusion_loss_weighting_min_snr():
+    """create_diffusion with loss_weighting='min_snr' must configure the noiser."""
+    from agedi.diffusion.noisers import PositionsNoiser
+    diffusion = create_diffusion(noisers=("CellPositions",), loss_weighting="min_snr")
+    pos_noiser = next(n for n in diffusion.noisers if isinstance(n, PositionsNoiser))
+    assert pos_noiser.loss_weighting == "min_snr"
+
+
+def test_diffusion_get_hparams_epsilon_prediction_roundtrip(tmp_path):
+    """prediction_type and sampler must survive get_hparams → load_diffusion."""
+    import yaml
+    from agedi.diffusion.noisers import PositionsNoiser
+    diffusion = create_diffusion(
+        noisers=("Positions",), sde="vp", prediction_type="epsilon", sampler="ddpm"
+    )
+    log_dir = tmp_path / "logs" / "version_0"
+    (log_dir / "checkpoints").mkdir(parents=True)
+    with open(log_dir / "hparams.yaml", "w") as f:
+        yaml.dump({"diffusion": diffusion.get_hparams()}, f)
+    torch.save({"state_dict": diffusion.state_dict()}, log_dir / "checkpoints" / "last_model.ckpt")
+
+    loaded = load_diffusion(log_dir)
+    pos_noiser = next(n for n in loaded.noisers if isinstance(n, PositionsNoiser))
+    assert pos_noiser.prediction_type == "epsilon"
+    assert pos_noiser.sampler == "ddpm"

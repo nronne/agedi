@@ -275,4 +275,85 @@ def test_get_representation(graph: AtomsGraph) -> None:
     assert torch.allclose(scalar, rep2.scalar)
     assert torch.allclose(vector, rep2.vector)
 
+
+# ---------------------------------------------------------------------------
+# Fully-connected graph support
+# ---------------------------------------------------------------------------
+
+def test_make_fully_connected_graph_no_self_loops() -> None:
+    """make_fully_connected_graph must not include self-loops."""
+    pos = torch.rand(5, 3)
+    ei, sv = AtomsGraph.make_fully_connected_graph(pos)
+    src, dst = ei[0], ei[1]
+    assert (src != dst).all(), "FC graph must not contain self-loops"
+
+
+def test_make_fully_connected_graph_edge_count() -> None:
+    """FC graph must have N*(N-1) edges for N atoms."""
+    n = 6
+    pos = torch.rand(n, 3)
+    ei, sv = AtomsGraph.make_fully_connected_graph(pos)
+    assert ei.shape[1] == n * (n - 1), f"Expected {n*(n-1)} edges, got {ei.shape[1]}"
+
+
+def test_make_fully_connected_graph_zero_shifts() -> None:
+    """All shift vectors must be zero (non-periodic)."""
+    pos = torch.rand(4, 3)
+    ei, sv = AtomsGraph.make_fully_connected_graph(pos)
+    assert sv.shape == (ei.shape[1], 3)
+    assert (sv == 0).all(), "Shift vectors must be zero for FC graphs"
+
+
+def test_from_atoms_fully_connected(atoms: "Atoms") -> None:
+    """AtomsGraph.from_atoms with fully_connected=True must have N*(N-1) edges."""
+    n = len(atoms)
+    graph = AtomsGraph.from_atoms(atoms, fully_connected=True)
+    assert graph.edge_index.shape[1] == n * (n - 1), (
+        f"Expected {n*(n-1)} edges, got {graph.edge_index.shape[1]}"
+    )
+
+
+def test_fully_connected_edges_survive_pos_assignment(atoms: "Atoms") -> None:
+    """After assigning new positions, update_graph must restore FC edges."""
+    graph = AtomsGraph.from_atoms(atoms, fully_connected=True)
+    n = len(atoms)
+    expected_edges = n * (n - 1)
+
+    # Simulate what _denoise does: assign new positions (clears registered edge attrs)
+    graph.pos = torch.randn_like(graph.pos)
+    graph.update_graph()
+
+    assert graph.edge_index.shape[1] == expected_edges, (
+        "FC edges must survive pos assignment + update_graph"
+    )
+    assert (graph.shift_vectors == 0).all(), "Shift vectors must remain zero after update"
+
+
+def test_atoms_graph_empty_fully_connected() -> None:
+    """AtomsGraph.empty(fully_connected=True) must set the FC flag."""
+    graph = AtomsGraph.empty(cutoff=6.0, fully_connected=True)
+    fc = graph._get_scalar_attr("fully_connected")
+    assert fc is not None and bool(fc), "empty() with fully_connected=True must set the flag"
+
+
+def test_fully_connected_update_graph_returns_false(atoms: "Atoms") -> None:
+    """update_graph on an FC graph must return False (no NL rebuild performed)."""
+    graph = AtomsGraph.from_atoms(atoms, fully_connected=True)
+    result = graph.update_graph()
+    assert result is False, "update_graph for FC graphs must always return False"
+
+
+def test_make_fully_connected_graph_batched() -> None:
+    """Batched FC graph must only connect atoms within the same graph."""
+    pos = torch.rand(6, 3)
+    batch_idx = torch.tensor([0, 0, 0, 1, 1, 1])
+    ei, sv = AtomsGraph.make_fully_connected_graph(pos, batch_idx=batch_idx)
+    src, dst = ei[0], ei[1]
+    # No edge should cross graphs
+    assert (batch_idx[src] == batch_idx[dst]).all(), (
+        "FC edges must not cross graph boundaries in a batch"
+    )
+    # Each graph has 3 atoms → 3*2 = 6 edges; 2 graphs → 12 total
+    assert ei.shape[1] == 12
+
     

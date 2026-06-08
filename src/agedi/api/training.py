@@ -58,6 +58,12 @@ _TRAIN_FROM_ATOMS_KEYS = frozenset(
         "guidance_weight",
         "n_classes",
         "checkpoint",
+        "fully_connected",
+        "prediction_type",
+        "sampler",
+        "loss_weighting",
+        "precondition",
+        "sigma_data",
     ]
 )
 
@@ -312,6 +318,7 @@ def train_from_atoms(
     sigma_data: float = 1.0,
     prediction_type: str = "score",
     sampler: str = "em",
+    loss_weighting: str = "uniform",
     fully_connected: bool = False,
     **trainer_kwargs,
 ) -> Tuple["Agedi", Dataset, Trainer]:
@@ -504,6 +511,7 @@ def train_from_atoms(
             sigma_data=sigma_data,
             prediction_type=prediction_type,
             sampler=sampler,
+            loss_weighting=loss_weighting,
         )
         ckpt_file = None
 

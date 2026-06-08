@@ -70,11 +70,21 @@ Minimal training example for a **periodic bulk system with atomic types diffusio
 
    agedi train --noisers CellPositions,Types training_data.traj
 
-Minimal training example for a **gas-phase cluster**:
+Minimal training example for a **gas-phase cluster or molecule**:
 
 .. code-block:: console
 
-   agedi train --noisers Positions training_data.traj
+   agedi train --noisers Positions --fully_connected training_data.traj
+
+Without ``--fully_connected``, a standard Positions noiser with a neighbour list
+is used. ``--fully_connected`` is recommended for gas-phase molecules and clusters
+because a finite cutoff misses long-range pairs when atoms spread during sampling.
+
+VP-SDE with epsilon prediction (recommended for molecules):
+
+.. code-block:: console
+
+   agedi train --noisers Positions --fully_connected --sde vp --prediction_type epsilon --sampler ddpm training_data.traj
 
 Important options:
 
@@ -89,6 +99,21 @@ Important options:
   (sorted by atomic number); defaults to all distinct types found in the training data
 - ``--canonical_cell``: store unit cells in canonical lower-triangular form
 - ``--force_field``: train a force-field head jointly with the diffusion score (see below)
+- ``--fully_connected``: use a fully connected graph (all atom pairs) instead of a neighbour list.
+  Recommended for gas-phase molecules and clusters.  Automatically sets a 50 Å backbone cutoff
+  when ``--cutoff`` is not specified.
+- ``--prediction_type``: ``score`` (default) or ``epsilon``.  Use ``epsilon`` with ``--sde vp``
+  for uniform gradient magnitude across all noise levels.
+- ``--sampler``: ``em`` (default, Euler–Maruyama) or ``ddpm`` (Ho et al. posterior-mean step,
+  requires ``--prediction_type epsilon``).
+- ``--loss_weighting``: ``uniform`` (default) or ``min_snr`` (caps weight at min(SNR, 5),
+  recommended for VP-SDE to reduce gradient variance).
+- ``--precondition``: apply EDM preconditioning (Karras et al., NeurIPS 2022) to the score head.
+- ``--sigma_data FLOAT``: empirical std of (zero-COM) atom positions in the training set (Å);
+  only used with ``--precondition``.
+- ``--radial_basis``: ``gaussian`` (default) or ``bessel``.  Use the default for ``--fully_connected``
+  or large cutoffs; ``bessel`` provides better short-range resolution for small cutoffs (≤ 8 Å).
+- ``--n_rbf N``: number of radial basis functions (default 30).
 
 Continue training from a checkpoint
 -------------------------------------

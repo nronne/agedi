@@ -7,11 +7,16 @@ click.rich_click.OPTION_GROUPS.update(
         "agedi train": [
             {
                 "name": "Score Model Options",
-                "options": ["--model", "--cutoff", "--feature_size", "--n_blocks"],
+                "options": ["--model", "--cutoff", "--feature_size", "--n_blocks", "--n_rbf", "--radial_basis"],
             },
             {
                 "name": "Diffusion Model Options",
-                "options": ["--noisers", "--sde", "--conditioning", "--conditioning_type", "--force_field", "--n_classes"],
+                "options": [
+                    "--noisers", "--sde", "--conditioning", "--conditioning_type",
+                    "--force_field", "--n_classes", "--fully_connected",
+                    "--prediction_type", "--sampler", "--loss_weighting",
+                    "--precondition", "--sigma_data",
+                ],
             },
             {
                 "name": "Training Options",
@@ -88,9 +93,9 @@ _DEFAULT_NOISER = "CellPositions"
     "--cutoff",
     "-r",
     type=float,
-    default=6.0,
-    show_default=True,
-    help="Cutoff for the representation in Å",
+    default=None,
+    show_default="6 Å (or 50 Å when --fully_connected)",
+    help="Cutoff for the representation in Å. Defaults to 6 Å, or 50 Å when --fully_connected is set.",
 )
 @click.option(
     "--feature_size",
@@ -106,6 +111,26 @@ _DEFAULT_NOISER = "CellPositions"
     default=4,
     show_default=True,
     help="Number of blocks for the representation",
+)
+@click.option(
+    "--n_rbf",
+    type=int,
+    default=30,
+    show_default=True,
+    help="Number of radial basis functions",
+)
+@click.option(
+    "--radial_basis",
+    type=click.Choice(["gaussian", "bessel"]),
+    default="gaussian",
+    show_default=True,
+    help=(
+        "Radial basis type for the PaiNN backbone. "
+        "'gaussian' (default) places Gaussians uniformly across the cutoff range and is "
+        "bounded in [0, 1]. 'bessel' offers better short-range resolution for small "
+        "cutoffs (≤ 8 Å) but can produce large values at very short distances — "
+        "avoid with --fully_connected or large cutoffs."
+    ),
 )
 @click.option(
     "--noisers",
@@ -145,6 +170,74 @@ _DEFAULT_NOISER = "CellPositions"
     help=(
         "Train a force field jointly with the diffusion score. Make sure the training data contains energy and force labels. "
         "Enables force-field guided sampling (--ff_guidance)."
+    ),
+)
+@click.option(
+    "--fully_connected",
+    is_flag=True,
+    default=False,
+    help=(
+        "Use a fully connected graph (all atom pairs, no neighbour-list cutoff). "
+        "Recommended for gas-phase molecules and clusters. "
+        "Automatically selects a 50 Å backbone cutoff when --cutoff is not set."
+    ),
+)
+@click.option(
+    "--prediction_type",
+    type=click.Choice(["score", "epsilon"]),
+    default="score",
+    show_default=True,
+    help=(
+        "Parameterisation for position denoising. "
+        "'score' (default) is suitable for VE-SDE. "
+        "'epsilon' predicts the normalised noise directly; "
+        "recommended with --sde vp as it gives uniform gradient magnitude across all noise levels."
+    ),
+)
+@click.option(
+    "--sampler",
+    type=click.Choice(["em", "ddpm"]),
+    default="em",
+    show_default=True,
+    help=(
+        "Denoising formula used during sampling. "
+        "'em' (default) uses the Euler–Maruyama update. "
+        "'ddpm' uses the DDPM posterior-mean step (Ho et al., NeurIPS 2020); "
+        "requires --prediction_type epsilon."
+    ),
+)
+@click.option(
+    "--loss_weighting",
+    type=click.Choice(["uniform", "min_snr"]),
+    default="uniform",
+    show_default=True,
+    help=(
+        "Loss weighting strategy. "
+        "'uniform' weights all noise levels equally (default). "
+        "'min_snr' caps per-sample weights at min(SNR, 5) following Hang et al. (ICCV 2023), "
+        "reducing gradient variance at low noise levels."
+    ),
+)
+@click.option(
+    "--precondition",
+    is_flag=True,
+    default=False,
+    help=(
+        "Apply EDM preconditioning to the positions score head (Karras et al., NeurIPS 2022). "
+        "Wraps the network output with σ-dependent skip and scale factors so the network "
+        "always operates on unit-scale inputs and outputs."
+    ),
+)
+@click.option(
+    "--sigma_data",
+    type=float,
+    default=1.0,
+    show_default=True,
+    help=(
+        "Empirical standard deviation of (zero-COM) atom positions in the training set (Å). "
+        "Only used when --precondition is set. "
+        "Estimate with: python -c \"import numpy as np; from ase.io import read; "
+        "data = read('train.traj', ':'); print(np.std([a.get_positions() - a.get_center_of_mass() for a in data]))\""
     ),
 )
 @click.option(
@@ -395,6 +488,14 @@ def train(**params) -> None:
             repeat_epoch=params["repeat_epoch"],
             n_classes=params["n_classes"],
             checkpoint=params["checkpoint"],
+            n_rbf=params["n_rbf"],
+            radial_basis=params["radial_basis"],
+            fully_connected=params["fully_connected"],
+            prediction_type=params["prediction_type"],
+            sampler=params["sampler"],
+            loss_weighting=params["loss_weighting"],
+            precondition=params["precondition"],
+            sigma_data=params["sigma_data"],
         )
         log_dir = params["log_dir"]
 

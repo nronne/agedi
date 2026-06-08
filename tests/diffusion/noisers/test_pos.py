@@ -185,3 +185,110 @@ def test_denoise_confinement_does_not_clamp_masked_atoms(batch: "Batch") -> None
         "masked atoms should not be affected by confinement clamping"
     )
 
+
+# ---------------------------------------------------------------------------
+# prediction_type="epsilon" and sampler="ddpm"
+# ---------------------------------------------------------------------------
+
+def test_epsilon_prediction_noise_stores_pos_sigma(batch: "Batch") -> None:
+    """noise() must store pos_sigma (= sqrt(var(t))) when prediction_type='epsilon'."""
+    batch.time = torch.rand((batch.num_graphs, 1))[batch.batch]
+    noiser = PositionsNoiser(prediction_type="epsilon")
+    noised = noiser.noise(batch)
+    assert "pos_sigma" in noised.keys(), "pos_sigma must be stored by noise()"
+    assert noised.pos_sigma.shape == (batch.num_nodes, 1)
+
+
+def test_epsilon_prediction_denoise_em(batch: "Batch", last: bool) -> None:
+    """denoise() with prediction_type='epsilon', sampler='em' must update positions."""
+    pos = batch.pos.clone()
+    batch.time = torch.rand((batch.num_graphs, 1))[batch.batch]
+    batch.pos_score = torch.randn_like(batch.pos)
+    noiser = PositionsNoiser(prediction_type="epsilon", sampler="em")
+    noiser.denoise(batch, torch.tensor(0.001), last=last)
+    assert not torch.allclose(pos, batch.pos)
+
+
+def test_epsilon_prediction_loss(batch: "Batch") -> None:
+    """loss() with prediction_type='epsilon' must return a positive scalar."""
+    batch.time = torch.rand((batch.num_graphs, 1))[batch.batch]
+    noiser = PositionsNoiser(prediction_type="epsilon")
+    noised = noiser.noise(batch)
+    noised.pos_score = torch.randn_like(batch.pos)
+    loss = noiser.loss(noised)
+    assert loss > 0
+
+
+def test_ddpm_sampler_denoise(batch: "Batch", last: bool) -> None:
+    """denoise() with sampler='ddpm' must update positions without error."""
+    from agedi.diffusion.sdes import VP
+    pos = batch.pos.clone()
+    batch.time = torch.rand((batch.num_graphs, 1))[batch.batch]
+    batch.pos_score = torch.randn_like(batch.pos)
+    noiser = PositionsNoiser(prediction_type="epsilon", sampler="ddpm", sde=VP())
+    noiser.denoise(batch, torch.tensor(0.001), last=last)
+    assert not torch.allclose(pos, batch.pos)
+
+
+def test_ddpm_sampler_requires_epsilon() -> None:
+    """sampler='ddpm' must raise ValueError when prediction_type != 'epsilon'."""
+    with pytest.raises(ValueError, match="ddpm"):
+        PositionsNoiser(sampler="ddpm", prediction_type="score")
+
+
+def test_invalid_prediction_type_raises() -> None:
+    """prediction_type must be 'score' or 'epsilon'."""
+    with pytest.raises(ValueError, match="prediction_type"):
+        PositionsNoiser(prediction_type="denoised")
+
+
+def test_invalid_sampler_raises() -> None:
+    """sampler must be 'em' or 'ddpm'."""
+    with pytest.raises(ValueError, match="sampler"):
+        PositionsNoiser(sampler="heun")
+
+
+# ---------------------------------------------------------------------------
+# loss_weighting="min_snr"
+# ---------------------------------------------------------------------------
+
+def test_min_snr_loss_weighting_positive(batch: "Batch") -> None:
+    """loss() with loss_weighting='min_snr' must return a positive scalar."""
+    batch.time = torch.rand((batch.num_graphs, 1))[batch.batch]
+    noiser = PositionsNoiser(loss_weighting="min_snr")
+    noised = noiser.noise(batch)
+    noised.pos_score = torch.randn_like(batch.pos)
+    loss = noiser.loss(noised)
+    assert loss > 0
+
+
+def test_invalid_loss_weighting_raises() -> None:
+    """loss_weighting must be 'uniform' or 'min_snr'."""
+    with pytest.raises(ValueError, match="loss_weighting"):
+        PositionsNoiser(loss_weighting="snr_gamma")
+
+
+# ---------------------------------------------------------------------------
+# hparams round-trip with new parameters
+# ---------------------------------------------------------------------------
+
+def test_positions_noiser_hparams_include_prediction_type_and_sampler() -> None:
+    """get_hparams() must include prediction_type, sampler, and loss_weighting."""
+    noiser = PositionsNoiser(prediction_type="score", sampler="em", loss_weighting="min_snr")
+    hp = noiser.get_hparams()
+    assert hp["prediction_type"] == "score"
+    assert hp["sampler"] == "em"
+    assert hp["loss_weighting"] == "min_snr"
+
+
+def test_positions_initialize_graph_seeds_pos_sigma() -> None:
+    """initialize_graph() must seed pos_sigma so EDM heads work on first call."""
+    from agedi.data import AtomsGraph
+    n_atoms = 5
+    graph = AtomsGraph.empty(cutoff=6.0)
+    graph.n_atoms = torch.tensor([[n_atoms]])
+    noiser = Positions()
+    noiser.initialize_graph(graph)
+    assert "pos_sigma" in graph.keys(), "pos_sigma must be set by initialize_graph"
+    assert graph.pos_sigma.shape == (n_atoms, 1)
+

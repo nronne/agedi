@@ -20,8 +20,8 @@ Choose the noiser that matches your system type:
      - Distribution
      - Use case
    * - ``"Positions"`` / :class:`~agedi.diffusion.noisers.Positions`
-     - StandardNormal
-     - Normal
+     - ZeroComStandardNormal
+     - ZeroComNormal
      - Gas-phase (molecules, clusters)
    * - ``"CellPositions"`` / :class:`~agedi.diffusion.noisers.CellPositions`
      - UniformCell
@@ -38,6 +38,32 @@ Training
 
 Here we show the same example as with the CLI, using
 :func:`~agedi.functional.train_from_atoms`.
+
+Gas-phase molecules and clusters
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use ``fully_connected=True`` so all atom pairs are connected regardless of
+how far apart they drift during sampling.  For VP-SDE, prefer
+``prediction_type="epsilon"`` and ``sampler="ddpm"``:
+
+.. code-block:: python
+
+   from ase.io import read
+   from agedi import train_from_atoms
+
+   data = read("molecules.traj", ":")
+
+   diffusion, dataset, trainer = train_from_atoms(
+       data,
+       noisers=("Positions",),
+       sde="vp",
+       prediction_type="epsilon",  # uniform gradient across noise levels
+       sampler="ddpm",             # stable posterior-mean denoising
+       loss_weighting="min_snr",   # optional: cap weight at min(SNR, 5)
+       fully_connected=True,       # all-pairs graph, no cutoff
+       max_time=4,                 # hours
+       log_dir="logs",
+   )
 
 .. code-block:: python
 
@@ -215,6 +241,34 @@ Core public functions
 - :func:`~agedi.functional.predict`
 - :func:`~agedi.functional.sample`
 - :func:`~agedi.functional.register_model`
+
+EDM preconditioning
+--------------------
+
+Enable σ-dependent skip/scale preconditioning (Karras et al., NeurIPS 2022) by
+passing ``precondition=True``.  This keeps network inputs and outputs at unit scale
+regardless of the noise level, which can stabilise training for large noise ranges:
+
+.. code-block:: python
+
+   from ase.io import read
+   import numpy as np
+   from agedi import train_from_atoms
+
+   data = read("training_data.traj", ":")
+
+   # Estimate sigma_data from the training set
+   sigma_data = float(np.std(
+       [a.get_positions() - a.get_center_of_mass() for a in data]
+   ))
+
+   diffusion, dataset, trainer = train_from_atoms(
+       data,
+       noisers=("CellPositions",),
+       precondition=True,
+       sigma_data=sigma_data,
+       max_time=4,
+   )
 
 Custom model backends
 ----------------------

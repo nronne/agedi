@@ -44,17 +44,27 @@ default so you only need to set the values that differ from those defaults.
    # Score-model architecture
    # ---------------------------------------------------------------------------
    model: PaiNN          # Currently only PaiNN is supported
-   cutoff: 6.0           # Neighbour-list cutoff in Å
+   cutoff: null          # Cutoff in Å. null → 6 Å (or 50 Å when fully_connected: true)
    feature_size: 64      # Embedding / feature dimension
    n_blocks: 4           # Number of interaction blocks
    n_rbf: 30             # Number of radial basis functions
+
+   # Radial basis type: gaussian (default, bounded in [0,1]) or bessel (better short-range
+   # resolution for cutoff ≤ 8 Å; avoid with fully_connected or large cutoffs).
+   radial_basis: gaussian
+
+   # EDM preconditioning (Karras et al., NeurIPS 2022).
+   # precondition: true enables σ-dependent skip/scale factors on the score head.
+   # sigma_data: empirical std of (zero-COM) training positions in Å.
+   precondition: false
+   sigma_data: 1.0
 
    # ---------------------------------------------------------------------------
    # Diffusion / noiser configuration
    # ---------------------------------------------------------------------------
    noisers:
      - CellPositions    # One or more of:
-                        #   Positions               : StandardNormal prior + Normal (gas-phase clusters)
+                        #   Positions               : ZeroComStandardNormal prior + ZeroComNormal (gas-phase clusters)
                         #   CellPositions           : UniformCell prior + Normal (periodic bulk/surface)
                         #   ConfinedCellPositions   : UniformCellConfined prior + TruncatedNormal (Z-confined)
                         #   Types                   : discrete atom-type diffusion
@@ -63,6 +73,26 @@ default so you only need to set the values that differ from those defaults.
    #   ve : Variance-Exploding SDE (default)
    #   vp : Variance-Preserving SDE
    sde: ve
+
+   # Use a fully connected graph (all atom pairs, no neighbour list).
+   # Recommended for gas-phase molecules and clusters.
+   # Sets cutoff to 50 Å automatically when cutoff is null.
+   fully_connected: false
+
+   # Prediction parameterisation.
+   #   score   : predict score ∝ ∇log p_t(x)  (default, recommended for ve)
+   #   epsilon : predict normalised noise ε     (recommended for vp)
+   prediction_type: score
+
+   # Denoising formula during sampling.
+   #   em   : Euler-Maruyama (default)
+   #   ddpm : DDPM posterior-mean step (requires prediction_type: epsilon)
+   sampler: em
+
+   # Loss weighting.
+   #   uniform : weight all noise levels equally (default)
+   #   min_snr : cap weight at min(SNR, 5) — reduces gradient variance at low noise
+   loss_weighting: uniform
 
    # Property conditioning (optional).  Set to "none" to disable.
    conditioning: none
