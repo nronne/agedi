@@ -204,15 +204,6 @@ class Diffusion:
         AtomsGraph
             The denoised batch.
         """
-        # For fully-connected graphs, the edge topology is static (all pairs,
-        # zero shifts). Save the tensors before the noisers run, because pos
-        # assignment inside denoise() clears them from the PyG store as a
-        # side-effect.  They are restored afterwards with no recomputation.
-        fc = batch._get_scalar_attr("fully_connected")
-        if fc is not None and bool(fc):
-            fc_edge_index = batch.edge_index
-            fc_shift_vectors = batch.shift_vectors
-
         if timings is not None:
             timings.reverse_step_calls += 1
             batch = self._time_sampling_call(
@@ -235,35 +226,27 @@ class Diffusion:
                     last=last,
                 )
 
-        if fc is not None and bool(fc):
-            batch._store["edge_index"] = fc_edge_index
-            batch._store["shift_vectors"] = fc_shift_vectors
+        if timings is None:
+            batch.wrap_positions()
+            batch.update_graph()
         else:
-            if timings is None:
-                batch.wrap_positions()
-                batch.update_graph()
-            else:
-                self._time_sampling_call(
-                    batch.pos.device, timings, "wrap_positions", batch.wrap_positions
-                )
-                rebuilt = self._time_sampling_call(
-                    batch.pos.device, timings, "neighbor_list", batch.update_graph
-                )
-                timings.neighbor_list_calls += 1
-                if rebuilt:
-                    timings.neighbor_list_rebuilds += 1
+            self._time_sampling_call(
+                batch.pos.device, timings, "wrap_positions", batch.wrap_positions
+            )
+            rebuilt = self._time_sampling_call(
+                batch.pos.device, timings, "neighbor_list", batch.update_graph
+            )
+            timings.neighbor_list_calls += 1
+            if rebuilt:
+                timings.neighbor_list_rebuilds += 1
 
         if self.regressor_model is not None and force_field_guidance > 0.0:
             if timings is None:
                 batch = self.force_field_guidance_step(
                     batch, force_field_guidance * delta_t
                 )
-                if fc is not None and bool(fc):
-                    batch._store["edge_index"] = fc_edge_index
-                    batch._store["shift_vectors"] = fc_shift_vectors
-                else:
-                    batch.wrap_positions()
-                    batch.update_graph()
+                batch.wrap_positions()
+                batch.update_graph()
             else:
                 batch = self._time_sampling_call(
                     batch.pos.device,
@@ -273,25 +256,21 @@ class Diffusion:
                     batch,
                     force_field_guidance * delta_t,
                 )
-                if fc is not None and bool(fc):
-                    batch._store["edge_index"] = fc_edge_index
-                    batch._store["shift_vectors"] = fc_shift_vectors
-                else:
-                    self._time_sampling_call(
-                        batch.pos.device,
-                        timings,
-                        "guidance_wrap_positions",
-                        batch.wrap_positions,
-                    )
-                    guidance_rebuilt = self._time_sampling_call(
-                        batch.pos.device,
-                        timings,
-                        "guidance_neighbor_list",
-                        batch.update_graph,
-                    )
-                    timings.guidance_neighbor_list_calls += 1
-                    if guidance_rebuilt:
-                        timings.guidance_neighbor_list_rebuilds += 1
+                self._time_sampling_call(
+                    batch.pos.device,
+                    timings,
+                    "guidance_wrap_positions",
+                    batch.wrap_positions,
+                )
+                guidance_rebuilt = self._time_sampling_call(
+                    batch.pos.device,
+                    timings,
+                    "guidance_neighbor_list",
+                    batch.update_graph,
+                )
+                timings.guidance_neighbor_list_calls += 1
+                if guidance_rebuilt:
+                    timings.guidance_neighbor_list_rebuilds += 1
 
         return batch
 
@@ -909,27 +888,19 @@ class Diffusion:
         self._sync_for_timing(batch.pos.device)
         timings.batch_setup += time.perf_counter() - batch_setup_start
 
-        if kwargs.get("fully_connected", False):
-            # For fully-connected graphs, build all-pairs edges directly without
-            # going through the neighbour-list algorithm.
-            batch_idx = batch.batch.to(torch.int32)
-            batch.edge_index, batch.shift_vectors = batch.make_fully_connected_graph(
-                batch.pos, dtype=batch.pos.dtype, batch_idx=batch_idx
-            )
-        else:
-            # When torch.compile is requested, estimate cell-list sizes and
-            # max_neighbors via NVIDIA nvalchemiops so that all neighbor-list
-            # buffers have fixed shapes before the first update_graph() call.
-            # Fixed shapes are required to trace the reverse step only once.
-            if compile:
-                batch.prepare_for_compile(cutoff)
+        # When torch.compile is requested, estimate cell-list sizes and
+        # max_neighbors via NVIDIA nvalchemiops so that all neighbor-list
+        # buffers have fixed shapes before the first update_graph() call.
+        # Fixed shapes are required to trace the reverse step only once.
+        if compile:
+            batch.prepare_for_compile(cutoff)
 
-            self._time_sampling_call(
-                batch.pos.device,
-                timings,
-                "initial_neighbor_list",
-                batch.update_graph,
-            )
+        self._time_sampling_call(
+            batch.pos.device,
+            timings,
+            "initial_neighbor_list",
+            batch.update_graph,
+        )
 
         # Optionally compile the reverse step after the first neighbor list
         # has been built (so all buffer shapes are known and fixed).

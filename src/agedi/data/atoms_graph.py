@@ -635,9 +635,20 @@ class AtomsGraph(Data):
             )
             return True
 
-        # Fully-connected path: edges are managed explicitly by the caller.
+        # Fully-connected path: topology is static (all pairs, zero shifts).
+        # Build once on the first call and cache under a key that survives pos
+        # assignment; restore from cache on every subsequent call.
         fc = self._get_scalar_attr("fully_connected")
         if fc is not None and bool(fc):
+            if "_fc_edge_index" not in self._store:
+                batch_idx = self.batch.to(torch.int32) if isinstance(self, Batch) else None
+                ei, sv = self.make_fully_connected_graph(
+                    self.pos, dtype=self.pos.dtype, batch_idx=batch_idx
+                )
+                self._store["_fc_edge_index"] = ei
+                self._store["_fc_shift_vectors"] = sv
+            self._store["edge_index"] = self._store["_fc_edge_index"]
+            self._store["shift_vectors"] = self._store["_fc_shift_vectors"]
             return False
 
         cutoff = self._get_scalar_attr("cutoff")
