@@ -21,6 +21,7 @@ def create_diffusion(
     feature_size: int = 64,
     n_blocks: int = 4,
     n_rbf: int = 30,
+    radial_basis: str = "gaussian",
     noisers: Sequence[Union[str, "Noiser"]] = ("CellPositions",),
     sde: Union[str, "SDE"] = "ve",
     conditioning: str = "none",
@@ -57,6 +58,9 @@ def create_diffusion(
         Number of interaction blocks.  Defaults to ``4``.
     n_rbf : int, optional
         Number of radial basis functions.  Defaults to ``30``.
+    radial_basis : str, optional
+        Radial basis type: ``"gaussian"`` (default, GaussianRBF) or
+        ``"bessel"`` (BesselRBF, better resolution at short range).
     noisers : Sequence[str or Noiser], optional
         Noiser identifiers or instances to include.  Defaults to
         ``("CellPositions",)``.  Recognised string identifiers (CamelCase
@@ -164,6 +168,7 @@ def create_diffusion(
         n_blocks,
         head_dim=head_dim,
         n_rbf=n_rbf,
+        radial_basis=radial_basis,
         precondition=precondition,
         sigma_data=sigma_data,
     )

@@ -211,6 +211,7 @@ def _build_score_components(
     n_blocks: int,
     head_dim: int,
     n_rbf: int = 30,
+    radial_basis: str = "gaussian",
     precondition: bool = False,
     sigma_data: float = 1.0,
 ) -> Tuple["Translator", "torch.nn.Module", List["Head"]]:
@@ -235,6 +236,8 @@ def _build_score_components(
         ``feature_size + conditioning output dims``).
     n_rbf : int, optional
         Number of radial basis functions.  Default is 30.
+    radial_basis : str, optional
+        Radial basis type: ``"gaussian"`` (default) or ``"bessel"``.
     precondition : bool, optional
         Whether to apply EDM preconditioning in the positions score head.
         Defaults to ``False``.
@@ -261,6 +264,7 @@ def _build_score_components(
         n_blocks=n_blocks,
         head_dim=head_dim,
         n_rbf=n_rbf,
+        radial_basis=radial_basis,
         precondition=precondition,
         sigma_data=sigma_data,
     )
@@ -273,6 +277,7 @@ def _painn_factory(
     n_blocks: int,
     head_dim: int,
     n_rbf: int,
+    radial_basis: str = "gaussian",
     precondition: bool = False,
     sigma_data: float = 1.0,
 ) -> Tuple["Translator", "torch.nn.Module", List["Head"]]:
@@ -284,13 +289,24 @@ def _painn_factory(
         SchNetPackTranslator,
     )
 
+    _RADIAL_BASIS = {"gaussian", "bessel"}
+    if radial_basis not in _RADIAL_BASIS:
+        raise ValueError(
+            f"Unknown radial_basis '{radial_basis}'. Choose from {sorted(_RADIAL_BASIS)}."
+        )
+    rb = (
+        spk.nn.BesselRBF(n_rbf=n_rbf, cutoff=cutoff)
+        if radial_basis == "bessel"
+        else spk.nn.GaussianRBF(n_rbf=n_rbf, cutoff=cutoff)
+    )
+
     translator = SchNetPackTranslator(
         input_modules=[spk.atomistic.PairwiseDistances()]
     )
     representation = spk.representation.PaiNN(
         n_atom_basis=feature_size,
         n_interactions=n_blocks,
-        radial_basis=spk.nn.GaussianRBF(n_rbf=n_rbf, cutoff=cutoff),
+        radial_basis=rb,
         cutoff_fn=spk.nn.CosineCutoff(cutoff),
     )
 

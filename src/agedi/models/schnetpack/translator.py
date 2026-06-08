@@ -53,8 +53,11 @@ class SchNetPackTranslator(Translator):
                     "_target_": f"{type(rb).__module__}.{type(rb).__qualname__}",
                     "n_rbf": int(rb.n_rbf),
                 }
-                # Cutoff is stored implicitly in the last offset value
-                if hasattr(rb, "offsets") and rb.offsets.numel() > 0:
+                # GaussianRBF stores cutoff in offsets; BesselRBF does not.
+                # Read cutoff from cutoff_fn (always present) as the ground truth.
+                if hasattr(representation, "cutoff_fn") and hasattr(representation.cutoff_fn, "cutoff"):
+                    rb_hparams["cutoff"] = float(representation.cutoff_fn.cutoff[0])
+                elif hasattr(rb, "offsets") and rb.offsets.numel() > 0:
                     rb_hparams["cutoff"] = float(rb.offsets[-1])
                 hparams["radial_basis"] = rb_hparams
             # Encode cutoff_fn as a nested instantiation config
