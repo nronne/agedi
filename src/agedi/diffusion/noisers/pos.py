@@ -229,10 +229,10 @@ class PositionsNoiser(Noiser):
         w = self.distribution.get_callable(batch)
 
         if last:
-            new_pos = r + delta_t * (diffusion**2 * r_score + drift)
+            new_pos = r + delta_t * (diffusion**2 * r_score - drift)
         else:
             new_pos = w(
-                r + delta_t * (diffusion**2 * r_score + drift),  # mean
+                r + delta_t * (diffusion**2 * r_score - drift),  # mean
                 torch.sqrt(delta_t) * diffusion,  # variance
             )
         if batch.confinement is not None:
