@@ -204,15 +204,14 @@ class Diffusion:
         AtomsGraph
             The denoised batch.
         """
-        # For fully-connected graphs, rebuild all-pairs edges from current
-        # positions before calling the score model. This is not a neighbour-list
-        # computation and is not included in any timing bucket.
+        # For fully-connected graphs, the edge topology is static (all pairs,
+        # zero shifts). Save the tensors before the noisers run, because pos
+        # assignment inside denoise() clears them from the PyG store as a
+        # side-effect.  They are restored afterwards with no recomputation.
         fc = batch._get_scalar_attr("fully_connected")
         if fc is not None and bool(fc):
-            batch_idx = batch.batch.to(torch.int32)
-            batch.edge_index, batch.shift_vectors = batch.make_fully_connected_graph(
-                batch.pos, dtype=batch.pos.dtype, batch_idx=batch_idx
-            )
+            fc_edge_index = batch.edge_index
+            fc_shift_vectors = batch.shift_vectors
 
         if timings is not None:
             timings.reverse_step_calls += 1
@@ -236,7 +235,10 @@ class Diffusion:
                     last=last,
                 )
 
-        if fc is None or not bool(fc):
+        if fc is not None and bool(fc):
+            batch._store["edge_index"] = fc_edge_index
+            batch._store["shift_vectors"] = fc_shift_vectors
+        else:
             if timings is None:
                 batch.wrap_positions()
                 batch.update_graph()
@@ -256,7 +258,10 @@ class Diffusion:
                 batch = self.force_field_guidance_step(
                     batch, force_field_guidance * delta_t
                 )
-                if fc is None or not bool(fc):
+                if fc is not None and bool(fc):
+                    batch._store["edge_index"] = fc_edge_index
+                    batch._store["shift_vectors"] = fc_shift_vectors
+                else:
                     batch.wrap_positions()
                     batch.update_graph()
             else:
@@ -268,7 +273,10 @@ class Diffusion:
                     batch,
                     force_field_guidance * delta_t,
                 )
-                if fc is None or not bool(fc):
+                if fc is not None and bool(fc):
+                    batch._store["edge_index"] = fc_edge_index
+                    batch._store["shift_vectors"] = fc_shift_vectors
+                else:
                     self._time_sampling_call(
                         batch.pos.device,
                         timings,
