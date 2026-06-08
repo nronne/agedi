@@ -12,6 +12,9 @@ from ._display import _print_loaded_model_info
 from ._registry import _build_conditioning, _build_noisers, _build_regressor, _build_score_components
 
 
+_FC_DEFAULT_CUTOFF = 50.0   # backbone cutoff auto-used when fully_connected=True
+
+
 def create_diffusion(
     model: str = "PaiNN",
     cutoff: float = 6.0,
@@ -138,6 +141,13 @@ def create_diffusion(
     conditioning_modules = _build_conditioning(conditioning, type=conditioning_type)
     head_dim = feature_size + sum(module.output_dim for module in conditioning_modules)
 
+    # When fully_connected=True the graph has no finite cutoff, so the backbone
+    # must be able to process atom pairs at any distance.  Automatically promote
+    # the cutoff used for the RBFs and CosineCutoff envelope to a large value so
+    # that all distances encountered during sampling receive non-zero messages.
+    # The user can still pass an explicit large cutoff to control RBF spacing.
+    backbone_cutoff = max(cutoff, _FC_DEFAULT_CUTOFF) if fully_connected else cutoff
+
     # Build noiser objects first so that the TypesScore head can inherit the
     # correct n_classes from the Types noiser (via the object-based fallback
     # in _painn_factory).
@@ -145,7 +155,7 @@ def create_diffusion(
 
     translator, representation, heads = _build_score_components(
         model,
-        cutoff,
+        backbone_cutoff,
         noiser_modules,
         feature_size,
         n_blocks,
@@ -169,19 +179,6 @@ def create_diffusion(
             translator=translator,
             representation=representation,
             feature_size=feature_size,
-        )
-
-    import warnings
-    if fully_connected and cutoff < 50.0:
-        warnings.warn(
-            f"fully_connected=True with cutoff={cutoff} Å: the backbone's radial "
-            f"basis functions and CosineCutoff will zero out messages for atom pairs "
-            f"beyond {cutoff} Å.  During sampling the VP reverse process can spread "
-            f"atoms much further apart, making the score effectively zero and causing "
-            f"structures to blow up.  Retrain with a large cutoff (e.g. cutoff=30.0) "
-            f"when using fully_connected=True.",
-            UserWarning,
-            stacklevel=2,
         )
 
     return Agedi(
