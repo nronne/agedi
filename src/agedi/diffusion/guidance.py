@@ -324,6 +324,7 @@ def post_diffusion_relaxation_step(
     regressor_model: "torch.nn.Module",
     lbfgs_step_sizer: Optional[BatchedLBFGSStepSizer],
     scale: float = 0.1,
+    max_step_size: float = 0.1,
 ) -> AtomsGraph:
     """Perform a pure force-based relaxation step after diffusion is complete.
 
@@ -365,7 +366,15 @@ def post_diffusion_relaxation_step(
 
     lbfgs_step = lbfgs_step_sizer.compute_step(positions, forces, batch_idx)
 
-    new_pos = batch.pos + scale * lbfgs_step
+    step = scale * lbfgs_step
+    step_magnitude = torch.norm(step, dim=1, keepdim=True)
+    too_large = step_magnitude > max_step_size
+    if torch.any(too_large):
+        scaling_factor = torch.ones_like(step_magnitude)
+        scaling_factor[too_large] = max_step_size / step_magnitude[too_large]
+        step = step * scaling_factor
+
+    new_pos = batch.pos + step
 
     if hasattr(batch, "confinement") and batch.confinement is not None:
         z_min = batch.confinement[:, 0].unsqueeze(1)  # [B, 1]

@@ -739,6 +739,11 @@ class Diffusion:
 
         # Optional post-diffusion relaxation
         if force_field_guidance > 0 and self.regressor_model is not None:
+            # Reset LBFGS memory: history from the noisy diffusion trajectory
+            # carries stale curvature information that corrupts relaxation steps.
+            if self.lbfgs_step_sizer is not None:
+                self.lbfgs_step_sizer.reset()
+
             if timings is None:
                 batch = self.regressor_model(batch)
             else:
