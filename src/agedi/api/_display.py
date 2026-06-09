@@ -328,11 +328,13 @@ def _print_sampling_config(
     property=None,
     force_field_guidance: float = 0.0,
     sampler: Optional[str] = None,
+    corrector_steps: int = 0,
+    corrector_snr: float = 0.0,
 ) -> None:
     """Print a Rich-formatted sampling configuration panel."""
     console = Console()
     table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
-    table.add_column("Key", style="bold cyan", min_width=14, no_wrap=True)
+    table.add_column("Key", style="bold cyan", min_width=18, no_wrap=True)
     table.add_column("Value", style="white")
 
     table.add_row("  n_samples", str(n_samples))
@@ -356,6 +358,11 @@ def _print_sampling_config(
         table.add_row("  ff_guidance", str(force_field_guidance))
     if sampler is not None:
         table.add_row("  sampler", str(sampler))
+    if corrector_steps > 0:
+        table.add_row("  corrector_steps", str(corrector_steps))
+        if corrector_snr > 0.0:
+            table.add_row("  corrector_snr", str(corrector_snr))
+        # (fixed corrector_step_size is not shown — it's rarely changed)
 
     console.print(
         Panel(table, title="[bold]AGeDi Sampling Configuration[/bold]", border_style="blue")

@@ -35,6 +35,9 @@ def sample(
     save_trajectory: bool = False,
     print_timings: bool = False,
     as_atoms: bool = True,
+    sampler: Optional[str] = None,
+    corrector_steps: int = 0,
+    corrector_snr: float = 0.0,
 ) -> Union[List[AtomsGraph], List[Atoms], List[List[AtomsGraph]], List[List[Atoms]]]:
     """Sample structures from a trained diffusion model.
 
@@ -89,6 +92,25 @@ def sample(
         When ``True``, print a per-stage timing breakdown at the end of
         each sampling batch (graph init, score model, denoise, neighbor
         list, etc.).  Defaults to ``False``.
+    sampler:
+        Override the denoising algorithm for this sampling run without
+        changing the saved model.  Accepts ``"em"`` (Euler–Maruyama),
+        ``"ddpm"`` (DDPM posterior mean, requires the model was trained with
+        ``prediction_type="epsilon"``), or ``"ode"`` (probability flow ODE
+        predictor).  When ``None`` (default) the sampler stored in the model
+        is used.
+    corrector_steps:
+        Number of Langevin corrector steps applied after each predictor
+        step.  ``0`` (default) disables the corrector.  Setting this to
+        ``1`` together with ``corrector_snr=0.16`` gives the PC sampler
+        from Song et al. (ICLR 2021) and typically halves the number of
+        steps needed compared to EM-only sampling.
+    corrector_snr:
+        Signal-to-noise ratio for the annealed Langevin corrector step
+        size ``ε = snr · 2σ(t)²`` (Song et al. 2021, Eq. 22).  Only
+        used when ``corrector_steps > 0``.  Recommended value: ``0.16``.
+        When ``0.0`` (default) a fixed ``corrector_step_size=1e-3`` is
+        used instead.
     """
     from agedi.diffusion import ForcefieldGuidanceConfig
 
@@ -98,12 +120,13 @@ def sample(
 
     _ff = ff_guidance if ff_guidance is not None else ForcefieldGuidanceConfig()
 
-    # Extract sampler from the first position noiser.
-    _sampler = None
-    for _n in diffusion.noisers:
-        if hasattr(_n, "sampler"):
-            _sampler = _n.sampler
-            break
+    # Effective sampler: override if provided, else read from the model.
+    _sampler = sampler
+    if _sampler is None:
+        for _n in diffusion.noisers:
+            if hasattr(_n, "sampler"):
+                _sampler = _n.sampler
+                break
 
     _print_sampling_config(
         n_samples=n_samples,
@@ -118,6 +141,8 @@ def sample(
         property=property,
         force_field_guidance=_ff.guidance,
         sampler=_sampler,
+        corrector_steps=corrector_steps,
+        corrector_snr=corrector_snr,
     )
 
     _start = time.monotonic()
@@ -143,6 +168,9 @@ def sample(
             progress_bar=progress_bar,
             save_trajectory=save_trajectory,
             print_timings=print_timings,
+            sampler=sampler,
+            corrector_steps=corrector_steps,
+            corrector_snr=corrector_snr,
         )
 
     elapsed = time.monotonic() - _start

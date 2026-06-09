@@ -983,6 +983,7 @@ class Diffusion:
         corrector_steps: int = 0,
         corrector_step_size: float = 1e-3,
         corrector_snr: float = 0.0,
+        sampler: Optional[str] = None,
         fully_connected: bool = False,
     ) -> List[AtomsGraph]:
         """Sample structures from the diffusion model.
@@ -1051,6 +1052,11 @@ class Diffusion:
             When > 0, replace the fixed *corrector_step_size* with the
             annealed value ``ε = snr · 2σ(t)²`` (Song et al. 2021, Eq. 22).
             Recommended value: ``0.16``.  Defaults to ``0.0``.
+        sampler : str, optional
+            Override the denoising algorithm for this call without changing
+            the saved model.  ``"em"``, ``"ddpm"``, or ``"ode"``.  When
+            ``None`` (default) the sampler stored on the noiser is used.
+            The original is restored after sampling even if an error occurs.
 
         Returns
         -------
@@ -1155,28 +1161,43 @@ class Diffusion:
         if fully_connected:
             kwargs["fully_connected"] = True
 
-        if N > batch_size:
-            from rich.console import Console as _Console
-            _console = _Console()
-            n_full = N // batch_size
-            n_remainder = N % batch_size
-            n_batches = n_full + (1 if n_remainder > 0 else 0)
-            out = []
-            for i in range(n_full):
-                _console.print(f"Sampling batch {i + 1}/{n_batches}...")
-                out += self._sample(
-                    batch_size, steps, cutoff, eps, ff_guidance.guidance,
+        # Apply per-call sampler override: temporarily reconfigure noisers for
+        # this sampling session, then restore the original values afterwards.
+        # Uses configure() so validation (e.g. ddpm requires epsilon) still runs.
+        _restore_samplers: list = []
+        if sampler is not None:
+            for _n in self.noisers:
+                if hasattr(_n, "configure"):
+                    _restore_samplers.append((_n, _n.sampler))
+                    _n.configure(sampler=sampler)
+
+        try:
+            if N > batch_size:
+                from rich.console import Console as _Console
+                _console = _Console()
+                n_full = N // batch_size
+                n_remainder = N % batch_size
+                n_batches = n_full + (1 if n_remainder > 0 else 0)
+                out = []
+                for i in range(n_full):
+                    _console.print(f"Sampling batch {i + 1}/{n_batches}...")
+                    out += self._sample(
+                        batch_size, steps, cutoff, eps, ff_guidance.guidance,
+                        **sample_kwargs, **kwargs,
+                    )
+                if n_remainder > 0:
+                    _console.print(f"Sampling batch {n_batches}/{n_batches}...")
+                    out += self._sample(
+                        n_remainder, steps, cutoff, eps, ff_guidance.guidance,
+                        **sample_kwargs, **kwargs,
+                    )
+                return out
+            else:
+                return self._sample(
+                    N, steps, cutoff, eps, ff_guidance.guidance,
                     **sample_kwargs, **kwargs,
                 )
-            if n_remainder > 0:
-                _console.print(f"Sampling batch {n_batches}/{n_batches}...")
-                out += self._sample(
-                    n_remainder, steps, cutoff, eps, ff_guidance.guidance,
-                    **sample_kwargs, **kwargs,
-                )
-            return out
-        else:
-            return self._sample(
-                N, steps, cutoff, eps, ff_guidance.guidance,
-                **sample_kwargs, **kwargs,
-            )
+        finally:
+            # Restore sampler settings that were temporarily overridden.
+            for _n, _orig in _restore_samplers:
+                _n.configure(sampler=_orig)
