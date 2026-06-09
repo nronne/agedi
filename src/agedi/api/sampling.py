@@ -98,6 +98,13 @@ def sample(
 
     _ff = ff_guidance if ff_guidance is not None else ForcefieldGuidanceConfig()
 
+    # Extract sampler from the first position noiser.
+    _sampler = None
+    for _n in diffusion.noisers:
+        if hasattr(_n, "sampler"):
+            _sampler = _n.sampler
+            break
+
     _print_sampling_config(
         n_samples=n_samples,
         steps=steps,
@@ -110,6 +117,7 @@ def sample(
         confinement=confinement,
         property=property,
         force_field_guidance=_ff.guidance,
+        sampler=_sampler,
     )
 
     _start = time.monotonic()

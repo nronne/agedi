@@ -327,6 +327,7 @@ def _print_sampling_config(
     confinement=None,
     property=None,
     force_field_guidance: float = 0.0,
+    sampler: Optional[str] = None,
 ) -> None:
     """Print a Rich-formatted sampling configuration panel."""
     console = Console()
@@ -353,6 +354,8 @@ def _print_sampling_config(
             table.add_row(f"  {k}", str(v))
     if force_field_guidance > 0.0:
         table.add_row("  ff_guidance", str(force_field_guidance))
+    if sampler is not None:
+        table.add_row("  sampler", str(sampler))
 
     console.print(
         Panel(table, title="[bold]AGeDi Sampling Configuration[/bold]", border_style="blue")
