@@ -278,6 +278,7 @@ class Diffusion:
         self,
         batch: AtomsGraph,
         corrector_dt: float,
+        corrector_snr: float = 0.0,
     ) -> AtomsGraph:
         """Langevin corrector step at constant time.
 
@@ -289,7 +290,13 @@ class Diffusion:
         batch : AtomsGraph
             A batch of AtomsGraph data.
         corrector_dt : float
-            Step size for the Langevin corrector.
+            Fixed step size for the Langevin corrector.  Used when
+            *corrector_snr* is zero.
+        corrector_snr : float, optional
+            When > 0, use the annealed step size
+            ``ε = corrector_snr · 2 · σ(t)²`` from Song et al. (ICLR 2021,
+            Eq. 22) instead of the fixed *corrector_dt*.  The value 0.16 is
+            recommended.  Defaults to ``0.0`` (fixed step size).
 
         Returns
         -------
@@ -297,8 +304,14 @@ class Diffusion:
             The corrected batch.
         """
         batch = self.score_model(batch)
+        t = batch.time[:1]
         for noiser in self.noisers[::-1]:
-            batch = noiser.langevin_step(batch, corrector_dt)
+            if corrector_snr > 0.0 and hasattr(noiser, "sde"):
+                # Annealed step size: ε_i = r · 2σ(t_i)²  (Song et al. 2021)
+                step = corrector_snr * 2.0 * noiser.sde.var(t).squeeze()
+            else:
+                step = corrector_dt
+            batch = noiser.langevin_step(batch, step)
         batch.wrap_positions()
         batch.update_graph()
         return batch
@@ -619,6 +632,7 @@ class Diffusion:
         max_extra_steps: int,
         corrector_steps: int = 0,
         corrector_step_size: float = 1e-3,
+        corrector_snr: float = 0.0,
         timings: Optional[SamplingTimings] = None,
         reverse_step_fn=None,
         is_compiled: bool = False,
@@ -647,8 +661,12 @@ class Diffusion:
             Number of Langevin corrector passes after each predictor step.
             ``0`` (default) disables the corrector (standard DDPM/EM sampling).
         corrector_step_size : float, optional
-            Step size used for each Langevin corrector step.  Defaults to
-            ``1e-3``.
+            Step size used for each Langevin corrector step when
+            *corrector_snr* is zero.  Defaults to ``1e-3``.
+        corrector_snr : float, optional
+            When > 0, use the annealed step size ``ε = snr · 2σ(t)²``
+            (Song et al. 2021, Eq. 22) instead of *corrector_step_size*.
+            Recommended value: ``0.16``.  Defaults to ``0.0``.
         timings : SamplingTimings, optional
             If provided, timing measurements are accumulated here.
         reverse_step_fn : callable, optional
@@ -735,7 +753,7 @@ class Diffusion:
                 batch.add_batch_attr(
                     "time", ts[i].repeat(batch.x.shape[0], 1), type="node"
                 )
-                batch = self.corrector_step(batch, corrector_dt)
+                batch = self.corrector_step(batch, corrector_dt, corrector_snr=corrector_snr)
 
         # Optional post-diffusion relaxation
         if force_field_guidance > 0 and self.regressor_model is not None:
@@ -836,6 +854,7 @@ class Diffusion:
         save_trajectory: bool,
         corrector_steps: int = 0,
         corrector_step_size: float = 1e-3,
+        corrector_snr: float = 0.0,
         print_timings: bool = False,
         compile: bool = False,
         **kwargs,
@@ -865,7 +884,10 @@ class Diffusion:
         corrector_steps : int, optional
             Langevin corrector passes per predictor step.
         corrector_step_size : float, optional
-            Step size for each corrector pass.
+            Step size for each corrector pass when *corrector_snr* is zero.
+        corrector_snr : float, optional
+            When > 0, use the annealed step size ``ε = snr · 2σ(t)²``
+            (Song et al. 2021, Eq. 22).  Recommended: ``0.16``.
         print_timings : bool, optional
             Print a timing breakdown after sampling completes.
         compile : bool, optional
@@ -922,6 +944,7 @@ class Diffusion:
             max_extra_steps,
             corrector_steps=corrector_steps,
             corrector_step_size=corrector_step_size,
+            corrector_snr=corrector_snr,
             timings=timings,
             reverse_step_fn=reverse_step_fn,
             is_compiled=compile,
@@ -959,6 +982,7 @@ class Diffusion:
         print_timings: Optional[bool] = False,
         corrector_steps: int = 0,
         corrector_step_size: float = 1e-3,
+        corrector_snr: float = 0.0,
         fully_connected: bool = False,
     ) -> List[AtomsGraph]:
         """Sample structures from the diffusion model.
@@ -1021,7 +1045,12 @@ class Diffusion:
             Number of Langevin corrector passes after each predictor step.
             ``0`` (default) gives standard (predictor-only) sampling.
         corrector_step_size : float, optional
-            Step size for each corrector pass.  Defaults to ``1e-3``.
+            Fixed step size for each corrector pass when *corrector_snr* is
+            zero.  Defaults to ``1e-3``.
+        corrector_snr : float, optional
+            When > 0, replace the fixed *corrector_step_size* with the
+            annealed value ``ε = snr · 2σ(t)²`` (Song et al. 2021, Eq. 22).
+            Recommended value: ``0.16``.  Defaults to ``0.0``.
 
         Returns
         -------
@@ -1066,6 +1095,7 @@ class Diffusion:
             "max_extra_steps": ff_guidance.max_extra_steps,
             "corrector_steps": corrector_steps,
             "corrector_step_size": corrector_step_size,
+            "corrector_snr": corrector_snr,
             "print_timings": print_timings,
             "compile": compile,
         }

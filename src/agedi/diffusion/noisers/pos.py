@@ -49,6 +49,13 @@ class PositionsNoiser(Noiser):
 
     _key = "pos"
 
+    #: Allowed values for :attr:`prediction_type`.
+    _VALID_PREDICTION_TYPES: tuple = ("score", "epsilon")
+    #: Allowed values for :attr:`sampler`.
+    _VALID_SAMPLERS: tuple = ("em", "ddpm", "ode")
+    #: Allowed values for :attr:`loss_weighting`.
+    _VALID_LOSS_WEIGHTINGS: tuple = ("uniform", "min_snr")
+
     def __init__(
         self,
         sde_class: SDE = VE,
@@ -124,35 +131,86 @@ class PositionsNoiser(Noiser):
               The denominator ``√(1−β·Δt)`` cancels the per-step
               amplification that makes the EM update unstable for large
               ``beta_max``, at the cost of being restricted to VP-SDE.
+
+            * ``"ode"`` – Probability flow ODE predictor (Song et al.,
+              ICLR 2021, Eq. 13).  Deterministic; no per-step noise.
+              Uses half the drift coefficient compared to EM:
+
+              .. math::
+
+                  \\mathbf{x}_{t-\\Delta t} =
+                      \\mathbf{x}_t +
+                      \\Delta t\\left(\\tfrac{1}{2}g(t)^2\\,
+                      \\mathbf{s}_\\theta - f(\\mathbf{x}_t, t)\\right)
+
+              Works with both ``prediction_type`` values and both SDEs.
+              Typically paired with Langevin corrector steps
+              (``corrector_steps≥1``, ``corrector_snr=0.16`` in
+              :meth:`~agedi.Agedi.sample`) to maintain sample quality
+              at fewer total steps.
         **kwargs
             Additional keyword arguments forwarded to :class:`~agedi.diffusion.noisers.Noiser`.
         """
         super().__init__(distribution, prior, **kwargs)
-        if loss_weighting not in ("uniform", "min_snr"):
-            raise ValueError(
-                f"loss_weighting must be 'uniform' or 'min_snr', got {loss_weighting!r}"
-            )
-        if prediction_type not in ("score", "epsilon"):
-            raise ValueError(
-                f"prediction_type must be 'score' or 'epsilon', got {prediction_type!r}"
-            )
-        if sampler not in ("em", "ddpm"):
-            raise ValueError(
-                f"sampler must be 'em' or 'ddpm', got {sampler!r}"
-            )
-        if sampler == "ddpm" and prediction_type != "epsilon":
-            raise ValueError(
-                "sampler='ddpm' requires prediction_type='epsilon'"
-            )
-        self.loss_weighting = loss_weighting
-        self.prediction_type = prediction_type
-        self.sampler = sampler
         if sde is not None:
             self.sde = sde
         else:
             if sde_kwargs is None:
                 sde_kwargs = {}
             self.sde = sde_class(**sde_kwargs)
+        self.configure(
+            prediction_type=prediction_type,
+            sampler=sampler,
+            loss_weighting=loss_weighting,
+        )
+
+    def configure(
+        self,
+        prediction_type: str = "score",
+        sampler: str = "em",
+        loss_weighting: str = "uniform",
+    ) -> None:
+        """Validate and apply ``prediction_type``, ``sampler``, and ``loss_weighting``.
+
+        This is the single source of truth for validating these settings.
+        Called from :meth:`__init__` and from
+        :func:`~agedi.api._registry._build_noisers` when pre-instantiated
+        noisers are reconfigured via ``create_diffusion``.
+
+        Parameters
+        ----------
+        prediction_type : str
+            ``"score"`` (default) or ``"epsilon"``.
+        sampler : str
+            ``"em"`` (default), ``"ddpm"``, or ``"ode"``.
+        loss_weighting : str
+            ``"uniform"`` (default) or ``"min_snr"``.
+
+        Raises
+        ------
+        ValueError
+            If any value is not in the allowed set, or if ``sampler="ddpm"``
+            is paired with ``prediction_type != "epsilon"``.
+        """
+        if loss_weighting not in self._VALID_LOSS_WEIGHTINGS:
+            raise ValueError(
+                f"loss_weighting must be one of {self._VALID_LOSS_WEIGHTINGS}, "
+                f"got {loss_weighting!r}"
+            )
+        if prediction_type not in self._VALID_PREDICTION_TYPES:
+            raise ValueError(
+                f"prediction_type must be one of {self._VALID_PREDICTION_TYPES}, "
+                f"got {prediction_type!r}"
+            )
+        if sampler not in self._VALID_SAMPLERS:
+            raise ValueError(
+                f"sampler must be one of {self._VALID_SAMPLERS}, got {sampler!r}"
+            )
+        if sampler == "ddpm" and prediction_type != "epsilon":
+            raise ValueError("sampler='ddpm' requires prediction_type='epsilon'")
+        self.prediction_type = prediction_type
+        self.sampler = sampler
+        self.loss_weighting = loss_weighting
 
     def get_hparams(self) -> Dict:
         """Return hyperparameters for this positions noiser."""
@@ -250,7 +308,7 @@ class PositionsNoiser(Noiser):
 
         epsilon_pred = r_score  # save raw network output before any conversion
 
-        if self.prediction_type == "epsilon" and self.sampler != "ddpm":
+        if self.prediction_type == "epsilon" and self.sampler not in ("ddpm", "ode"):
             # EM path: convert ε → score for the standard EM update.
             #   score = −ε / √var(t)   →   g²·score = g²·(−ε / √var)
             r_score = -r_score / sigma
@@ -260,7 +318,15 @@ class PositionsNoiser(Noiser):
 
         w = self.distribution.get_callable(batch)
 
-        if self.sampler == "ddpm":
+        if self.sampler == "ode":
+            # Probability flow ODE predictor (Song et al., ICLR 2021, Eq. 13).
+            # Deterministic — no stochastic term; `last` has no effect.
+            # dx = (½·g²·s − f)·Δt   where s is always the score.
+            if self.prediction_type == "epsilon":
+                # Convert ε → score here (ODE branch skips the conversion above).
+                r_score = -epsilon_pred / sigma
+            new_pos = r + delta_t * (0.5 * diffusion**2 * r_score - drift)
+        elif self.sampler == "ddpm":
             # DDPM posterior-mean update (Ho et al., NeurIPS 2020).
             # μ = (x_t − β·Δt / √var · ε_pred) / √(1 − β·Δt)
             # The denominator cancels the per-step amplification that makes

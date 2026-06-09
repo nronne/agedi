@@ -153,24 +153,13 @@ def _build_noisers(
             # Apply prediction_type / sampler / loss_weighting to pre-instantiated
             # noisers so that create_diffusion's settings are consistently honoured
             # regardless of whether noisers were passed as strings or objects.
-            if hasattr(noiser, "prediction_type"):
-                if loss_weighting not in ("uniform", "min_snr"):
-                    raise ValueError(
-                        f"loss_weighting must be 'uniform' or 'min_snr', got {loss_weighting!r}"
-                    )
-                if prediction_type not in ("score", "epsilon"):
-                    raise ValueError(
-                        f"prediction_type must be 'score' or 'epsilon', got {prediction_type!r}"
-                    )
-                if sampler not in ("em", "ddpm"):
-                    raise ValueError(
-                        f"sampler must be 'em' or 'ddpm', got {sampler!r}"
-                    )
-                if sampler == "ddpm" and prediction_type != "epsilon":
-                    raise ValueError("sampler='ddpm' requires prediction_type='epsilon'")
-                noiser.prediction_type = prediction_type
-                noiser.sampler = sampler
-                noiser.loss_weighting = loss_weighting
+            # Validation lives in PositionsNoiser.configure() — not duplicated here.
+            if hasattr(noiser, "configure"):
+                noiser.configure(
+                    prediction_type=prediction_type,
+                    sampler=sampler,
+                    loss_weighting=loss_weighting,
+                )
             noiser_list.append(noiser)
             continue
         if noiser not in Noiser._registry:
