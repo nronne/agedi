@@ -376,8 +376,8 @@ class AtomsGraph(Data):
             x=torch.empty(0, dtype=torch.long),
             pos=torch.empty(0, 3),
             n_atoms=torch.tensor([0]),
-            cell=torch.empty(3, 3),
-            pbc=torch.tensor([True, True, True], dtype=torch.bool),
+            cell=torch.zeros(3, 3),
+            pbc=torch.tensor([not fully_connected] * 3, dtype=torch.bool),
             cutoff=cutoff,
         )
         if fully_connected:
@@ -714,12 +714,26 @@ class AtomsGraph(Data):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         output_dtype = dtype or positions.dtype
         if batch_idx is None:
+            cell_np = cell.detach().cpu().numpy()
+            pbc_np = pbc.detach().cpu().numpy()
+            # matscipy inverts the cell internally even when pbc=False; for
+            # non-periodic systems with no cell, build a tight bounding box so
+            # the cell-list grid stays small (a fixed 1000 Å dummy would create
+            # ~4 M empty grid cells and make the neighbour search very slow).
+            if not pbc_np.any() and not cell_np.any():
+                pos_np = positions.detach().cpu().numpy()
+                if len(pos_np) > 0:
+                    extent = pos_np.max(axis=0) - pos_np.min(axis=0) + 2 * cutoff
+                    extent = np.maximum(extent, cutoff)  # at least one cell wide
+                else:
+                    extent = np.full(3, cutoff, dtype=cell_np.dtype)
+                cell_np = np.diag(extent.astype(cell_np.dtype))
             i, j, shifts = matscipy_neighbour_list(
                 "ijS",
                 positions=positions.detach().cpu().numpy(),
-                cell=cell.detach().cpu().numpy(),
+                cell=cell_np,
                 cutoff=cutoff,
-                pbc=pbc.detach().cpu().numpy(),
+                pbc=pbc_np,
             )
             edge_index = torch.tensor(
                 np.stack([i, j]), dtype=torch.long, device=positions.device
@@ -851,7 +865,9 @@ class AtomsGraph(Data):
         """
 
         with torch.no_grad():
-            if nvidia_neighbor_list is None:
+            _pbc = pbc.view(-1, 3) if batch_idx is not None else pbc.view(3)
+            _any_pbc = bool(_pbc.any())
+            if nvidia_neighbor_list is None or not _any_pbc:
                 return AtomsGraph._make_graph_matscipy(
                     positions,
                     cell,
@@ -1182,6 +1198,8 @@ class AtomsGraph(Data):
         None
 
         """
+        if not self.pbc.any():
+            return
         pbc = torch.repeat_interleave(self.pbc.view(-1, 3), self.n_atoms.view(-1), dim=0)
         f = self.pos_to_frac(self.pos)
         f = torch.where(pbc, f % 1, f)
@@ -1303,29 +1321,33 @@ class AtomsGraph(Data):
 
         """
         cell = cell.view(-1, 3, 3)
-        
+
         a = torch.norm(cell[..., 0, :], dim=-1)
         b = torch.norm(cell[..., 1, :], dim=-1)
         c = torch.norm(cell[..., 2, :], dim=-1)
 
-        alpha = torch.acos(
-            torch.sum(cell[..., 1, :] * cell[..., 2, :], dim=-1) / (b * c)
-        )
-        beta = torch.acos(
-            torch.sum(cell[..., 0, :] * cell[..., 2, :], dim=-1) / (a * c)
-        )
-        gamma = torch.acos(
-            torch.sum(cell[..., 0, :] * cell[..., 1, :], dim=-1) / (a * b)
-        )
+        # Zero-cell guard: non-periodic systems have no cell (all norms == 0).
+        # Use safe denominators to avoid 0/0 in angle computation and log(0).
+        zero_cell = (a == 0) & (b == 0) & (c == 0)
+        sa = torch.where(zero_cell, torch.ones_like(a), a)
+        sb = torch.where(zero_cell, torch.ones_like(b), b)
+        sc = torch.where(zero_cell, torch.ones_like(c), c)
 
-        # alpha = alpha * 180 / torch.pi
-        # beta = beta * 180 / torch.pi
-        # gamma = gamma * 180 / torch.pi
+        alpha = torch.acos(torch.clamp(
+            torch.sum(cell[..., 1, :] * cell[..., 2, :], dim=-1) / (sb * sc), -1.0, 1.0))
+        beta = torch.acos(torch.clamp(
+            torch.sum(cell[..., 0, :] * cell[..., 2, :], dim=-1) / (sa * sc), -1.0, 1.0))
+        gamma = torch.acos(torch.clamp(
+            torch.sum(cell[..., 0, :] * cell[..., 1, :], dim=-1) / (sa * sb), -1.0, 1.0))
 
-        a,b,c = torch.log(a), torch.log(b), torch.log(c)
-        alpha, beta, gamma = alpha - torch.pi / 2, beta - torch.pi / 2, gamma - torch.pi / 2
+        log_a = torch.where(zero_cell, torch.zeros_like(a), torch.log(sa))
+        log_b = torch.where(zero_cell, torch.zeros_like(b), torch.log(sb))
+        log_c = torch.where(zero_cell, torch.zeros_like(c), torch.log(sc))
+        alpha = torch.where(zero_cell, torch.zeros_like(alpha), alpha - torch.pi / 2)
+        beta  = torch.where(zero_cell, torch.zeros_like(beta),  beta  - torch.pi / 2)
+        gamma = torch.where(zero_cell, torch.zeros_like(gamma), gamma - torch.pi / 2)
 
-        return torch.stack([a, b, c, alpha, beta, gamma], dim=-1)
+        return torch.stack([log_a, log_b, log_c, alpha, beta, gamma], dim=-1)
 
     @staticmethod
     def vector_to_cell(cellpar: torch.Tensor) -> torch.Tensor:

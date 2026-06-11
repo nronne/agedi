@@ -954,7 +954,6 @@ class Diffusion:
         print_timings: Optional[bool] = False,
         corrector_steps: int = 0,
         corrector_step_size: float = 1e-3,
-        fully_connected: bool = False,
     ) -> List[AtomsGraph]:
         """Sample structures from the diffusion model.
 
@@ -967,8 +966,10 @@ class Diffusion:
           (key ``"x"``), or derivable from ``formula``.
         * ``positions`` -- required when no positions-noiser is configured
           (type-only diffusion).
-        * ``cell`` -- required when no ``template`` is given.
-        * ``pbc`` -- optional; defaults to ``[True, True, True]``.
+        * ``cell`` -- required for periodic systems when no ``template`` is given.
+          Not required when ``pbc=[False, False, False]``.
+        * ``pbc`` -- optional; defaults to ``[True, True, True]``.  Pass
+          ``[False, False, False]`` for non-periodic systems.
 
         Parameters
         ----------
@@ -1090,9 +1091,15 @@ class Diffusion:
             for k, v in property.items():
                 kwargs[k] = torch.tensor(v, dtype=torch.float)
 
+        fully_connected = getattr(self, "fully_connected", False)
+        _pbc_all_false = pbc is not None and not any(pbc)
+        _cell_not_needed = _pbc_all_false
+
         for key in ["pos", "x", "cell", "n_atoms"]:
             if key not in kwargs and key not in self.noiser_keys:
                 if key == "pos" and "frac" in self.noiser_keys:
+                    continue
+                if key == "cell" and _cell_not_needed:
                     continue
                 raise ValueError(
                     f"Missing default values for key {key} in kwargs."
@@ -1110,12 +1117,6 @@ class Diffusion:
 
         if pbc is not None:
             kwargs["pbc"] = torch.tensor(pbc, dtype=torch.bool).reshape(3)
-
-        # Fall back to the value stored on the model when the caller did not
-        # explicitly pass fully_connected.  This ensures that a model created
-        # (or loaded) with fully_connected=True samples with the same topology
-        # without requiring the user to remember to pass the flag every time.
-        fully_connected = fully_connected or getattr(self, "fully_connected", False)
 
         if fully_connected:
             kwargs["fully_connected"] = True

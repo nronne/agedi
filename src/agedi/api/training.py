@@ -3,6 +3,8 @@
 import logging
 import math
 import warnings
+
+import torch
 from datetime import timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
@@ -259,6 +261,13 @@ def train(
         Additional keyword arguments forwarded to :func:`create_trainer`
         when *trainer* is ``None``.
     """
+    if getattr(diffusion, "fully_connected", False) and not dataset.fully_connected:
+        dataset.fully_connected = True
+        if dataset.dataset is not None:
+            fc = torch.tensor([1])
+            for g in dataset.dataset:
+                g["fully_connected"] = fc
+
     # Suppress Lightning's verbose INFO output; our Rich panels provide that context.
     _lightning_logger = logging.getLogger("lightning.pytorch")
     _prev_level = _lightning_logger.level

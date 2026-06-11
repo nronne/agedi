@@ -236,6 +236,8 @@ class Agedi(LightningModule, Diffusion):
             A dictionary of losses.
         """
         noised_batch = batch.clone()
+        if self.fully_connected:
+            noised_batch["fully_connected"] = torch.tensor([1], device=noised_batch.pos.device)
 
         self.sample_time(noised_batch)
         noised_batch = self.forward_step(noised_batch)
