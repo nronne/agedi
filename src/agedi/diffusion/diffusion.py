@@ -725,6 +725,15 @@ class Diffusion:
                     batch, dt, force_field_guidance, last=last_step, timings=timings
                 )
 
+            # Reset LBFGS after each predictor step: the denoiser's stochastic
+            # position update dominates s_k = pos_{k+1} - pos_k, so stored
+            # curvature would reflect noiser noise rather than the energy
+            # landscape.  LBFGS only accumulates valid history during
+            # post-diffusion relaxation, where positions change solely due to
+            # guidance steps.
+            if force_field_guidance > 0 and self.lbfgs_step_sizer is not None:
+                self.lbfgs_step_sizer.reset()
+
             # Corrector steps at constant time t_i
             for _ in range(corrector_steps):
                 if corrector_dt is None:
