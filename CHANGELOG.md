@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heuristic with an SDE-derived scale set automatically to `sqrt(var(T))`.
 
 ### Fixed
+- Force-field guidance L-BFGS step sizer now resets after each predictor
+  step during the main diffusion loop.  Previously the sizer accumulated
+  history across all diffusion steps; because `s_k = pos_{k+1} - pos_k` is
+  dominated by the denoiser's stochastic position update, the stored
+  curvature reflected noiser noise rather than the energy landscape.  Near
+  the end of diffusion (where guidance is strongest) this caused misdirected
+  0.1 Å steps that blew up molecular structures.  The L-BFGS now only
+  accumulates valid curvature history during post-diffusion relaxation, where
+  positions change solely due to guidance steps.
 - Cosine noise-schedule `fint` had a factor-of-2 error in the argument of
   `sin`; corrected to `sin(π·t)`.
 - VP-SDE reverse drift sign was wrong in the Euler–Maruyama denoising step.
