@@ -758,6 +758,12 @@ class Diffusion:
         _sampler = None
         if not is_compiled:
             _sampler = self._resolve_sampler(sampler, corrector_steps, corrector_step_size)
+        elif sampler is not None:
+            raise ValueError(
+                "compile=True is only compatible with the default Euler-Maruyama / "
+                "Predictor-Corrector sampler (sampler=None). "
+                f"Got sampler={sampler!r}. Either set compile=False or remove the sampler argument."
+            )
 
         needs_lbfgs = (
             (force_field_guidance > 0 or (

@@ -134,7 +134,7 @@ class ProbabilityFlowODESampler(Sampler):
         # Convert epsilon-prediction → score when needed.
         if getattr(noiser, "prediction_type", "score") == "epsilon":
             sigma = torch.sqrt(noiser.sde.var(t))
-            r_score = -r_score / sigma
+            r_score = -r_score / torch.clamp(sigma, min=1e-12)
 
         drift = noiser.sde.drift(r, t)   # f(r, t)
         g = noiser.sde.diffusion(t)      # g(t)
@@ -206,8 +206,8 @@ class HeunODESampler(Sampler):
         sde_noisers = [n for n in self.noisers if hasattr(n, "sde")]
         other_noisers = [n for n in self.noisers if not hasattr(n, "sde")]
 
-        # Save original positions and time.
-        x_t = batch.pos.clone()
+        # Save original SDE states and time.
+        original_states = {n.key: batch[n.key].clone() for n in sde_noisers}
         t_current = batch.time.clone()
 
         # --- Step 1: First score call at (x_t, t) ---
@@ -238,14 +238,18 @@ class HeunODESampler(Sampler):
             for n in sde_noisers
         }
 
-        # --- Step 5: Average scores; restore x_t and time ---
+        # --- Step 5: Average scores; restore original SDE states and time ---
         for key in s1:
             batch[key] = 0.5 * (s1[key] + s2[key])
         # Restore scores for non-SDE noisers to the first evaluation.
         for key, val in s1_other.items():
             batch[key] = val
-        # Restore original position and time (pos setter clears graph).
-        batch.pos = x_t
+        # Restore original SDE states (pos setter clears graph).
+        for n in sde_noisers:
+            if n.key == "pos":
+                batch.pos = original_states["pos"]
+            else:
+                batch[n.key] = original_states[n.key]
         batch.time = t_current
 
         # --- Step 6: ODE corrector with averaged scores ---

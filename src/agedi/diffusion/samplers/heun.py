@@ -74,8 +74,8 @@ class HeunSampler(Sampler):
         sde_noisers = [n for n in self.noisers if hasattr(n, "sde")]
         other_noisers = [n for n in self.noisers if not hasattr(n, "sde")]
 
-        # Save original positions and time.
-        x_t = batch.pos.clone()
+        # Save original SDE states and time.
+        original_states = {n.key: batch[n.key].clone() for n in sde_noisers}
         t_current = batch.time.clone()
 
         # --- Step 1: First score call at (x_t, t) ---
@@ -108,15 +108,19 @@ class HeunSampler(Sampler):
             for n in sde_noisers
         }
 
-        # --- Step 5: Average scores; restore x_t and original time ---
+        # --- Step 5: Average scores; restore original SDE states and time ---
         # The averaged score is stored in-place on the batch.
         for key in s1:
             batch[key] = 0.5 * (s1[key] + s2[key])
         # Restore scores for non-SDE noisers to the first evaluation.
         for key, val in s1_other.items():
             batch[key] = val
-        # Restore original positions (the pos setter clears the stale graph).
-        batch.pos = x_t
+        # Restore original SDE states (pos setter clears the stale graph).
+        for n in sde_noisers:
+            if n.key == "pos":
+                batch.pos = original_states["pos"]
+            else:
+                batch[n.key] = original_states[n.key]
         batch.time = t_current
 
         # --- Step 6: Stochastic EM step using averaged scores ---
