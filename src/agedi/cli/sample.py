@@ -37,6 +37,9 @@ click.rich_click.OPTION_GROUPS.update(
                     "--eps",
                     "--compile",
                     "--batch_size",
+                    "--sampler",
+                    "--ff_corrector_steps",
+                    "--ff_corrector_scale",
                     "--progress_bar",
                     "--print_timings",
                 ],
@@ -80,6 +83,35 @@ click.rich_click.OPTION_GROUPS.update(
     type=float,
     default=None,
     help="Z-confinement to use for the data. Give min and max value",
+)
+@click.option(
+    "--sampler",
+    type=click.Choice(["em", "pc", "heun", "ddim", "heun_ode", "ffpc"]),
+    default=None,
+    show_default=True,
+    help=(
+        "Reverse-diffusion sampler. "
+        "'em': Euler-Maruyama (default); "
+        "'pc': predictor-corrector (EM + Langevin corrector); "
+        "'heun': 2nd-order stochastic (2 score calls/step); "
+        "'ddim': deterministic probability-flow ODE; "
+        "'heun_ode': 2nd-order deterministic ODE; "
+        "'ffpc': EM predictor + force-field corrector (requires a forces head)."
+    ),
+)
+@click.option(
+    "--ff_corrector_steps",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Number of force-field corrector steps per diffusion step (used with --sampler ffpc).",
+)
+@click.option(
+    "--ff_corrector_scale",
+    type=float,
+    default=0.01,
+    show_default=True,
+    help="Base scale for the force-field corrector step (used with --sampler ffpc).",
 )
 @click.option("--progress_bar", is_flag=True, help="Show progress bar")
 @click.option("--print_timings", is_flag=True, help="Print per-stage timing breakdown after sampling")
@@ -129,6 +161,22 @@ def sample(path: str, **kwargs) -> None:
             zeta=kwargs["ff_zeta"],
         )
 
+    _sampler = kwargs["sampler"]
+    if _sampler == "ffpc":
+        from agedi import ForcefieldCorrectorSampler
+        ff_fn = (
+            diffusion.force_field_guidance_step
+            if diffusion.regressor_model is not None
+            else None
+        )
+        _sampler = ForcefieldCorrectorSampler(
+            diffusion.score_model,
+            diffusion.noisers,
+            ff_fn=ff_fn,
+            corrector_steps=kwargs["ff_corrector_steps"],
+            corrector_scale=kwargs["ff_corrector_scale"],
+        )
+
     sample_kwargs = dict(
         n_samples=kwargs["n_samples"],
         n_atoms=kwargs["n_atoms"],
@@ -136,6 +184,7 @@ def sample(path: str, **kwargs) -> None:
         eps=kwargs["eps"],
         compile=kwargs["compile_model"],
         batch_size=kwargs["batch_size"],
+        sampler=_sampler,
         progress_bar=kwargs["progress_bar"],
         print_timings=kwargs["print_timings"],
         save_trajectory=kwargs["save_trajectory"],
