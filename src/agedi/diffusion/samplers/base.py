@@ -94,6 +94,35 @@ class Sampler(abc.ABC):
         """
         cls._registry[name] = factory
 
+    @staticmethod
+    def _check_finite(batch: "AtomsGraph", stage: str) -> None:
+        """Raise ``RuntimeError`` if any atom positions are non-finite.
+
+        Call this immediately before every ``batch.update_graph()`` call.
+        The neighbour-list C/CUDA kernel does not validate its inputs; passing
+        NaN or infinite positions crashes the process with no Python traceback.
+
+        Parameters
+        ----------
+        batch : AtomsGraph
+            Batch whose ``pos`` tensor will be inspected.
+        stage : str
+            Short description of where the check is called, included in the
+            error message to help locate the divergence.
+        """
+        if not batch.pos.isfinite().all():
+            raise RuntimeError(
+                f"Non-finite atom positions detected after {stage}. "
+                "Aborting before the neighbour-list kernel crashes silently.\n"
+                "Common causes:\n"
+                "  • corrector_step_size is too large — stability requires\n"
+                "    corrector_step_size < 2·var(t) at every step; var(t) → 0\n"
+                "    at the end of the trajectory, so the threshold is very small.\n"
+                "    Try the default 1e-3 or smaller.\n"
+                "  • The score model returned NaN (check model weights / inputs).\n"
+                "  • corrector_scale for the force-field corrector is too large."
+            )
+
     @abc.abstractmethod
     def step(
         self,

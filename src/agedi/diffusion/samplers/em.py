@@ -55,5 +55,6 @@ class EulerMaruyamaSampler(Sampler):
         for noiser in self.noisers[::-1]:
             batch = noiser.denoise(batch, dt, last=last)
         batch.wrap_positions()
+        self._check_finite(batch, "EM denoising step")
         batch.update_graph()
         return batch

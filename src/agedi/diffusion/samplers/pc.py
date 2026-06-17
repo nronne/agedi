@@ -70,6 +70,7 @@ class PredictorCorrectorSampler(Sampler):
         for noiser in self.noisers[::-1]:
             batch = noiser.denoise(batch, dt, last=last)
         batch.wrap_positions()
+        self._check_finite(batch, "PC predictor (EM) step")
         batch.update_graph()
 
         if self.corrector_steps == 0:
@@ -94,6 +95,10 @@ class PredictorCorrectorSampler(Sampler):
             for noiser in self.noisers[::-1]:
                 batch = noiser.langevin_step(batch, self._corrector_dt)
             batch.wrap_positions()
+            self._check_finite(
+                batch,
+                f"Langevin corrector step (corrector_step_size={self.corrector_step_size})",
+            )
             batch.update_graph()
 
         return batch

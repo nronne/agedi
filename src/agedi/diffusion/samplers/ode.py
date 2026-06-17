@@ -86,6 +86,7 @@ class ProbabilityFlowODESampler(Sampler):
             else:
                 batch = noiser.denoise(batch, dt, last=True)
         batch.wrap_positions()
+        self._check_finite(batch, "probability-flow ODE step")
         batch.update_graph()
         return batch
 
@@ -229,6 +230,7 @@ class HeunODESampler(Sampler):
 
         # --- Step 3: Advance time to t-dt, rebuild graph ---
         batch.time = (t_current - dt).clamp(min=0.0)
+        self._check_finite(batch, "Heun ODE predictor step")
         batch.update_graph()
 
         # --- Step 4: Second score call at (x_pred, t-dt) ---
@@ -261,5 +263,6 @@ class HeunODESampler(Sampler):
             batch = noiser.denoise(batch, dt, last=True)
 
         batch.wrap_positions()
+        self._check_finite(batch, "Heun ODE corrector step")
         batch.update_graph()
         return batch

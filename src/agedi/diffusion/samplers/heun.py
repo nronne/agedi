@@ -99,6 +99,7 @@ class HeunSampler(Sampler):
 
         # --- Step 3: Advance time to t-dt, rebuild graph for second score call ---
         batch.time = (t_current - dt).clamp(min=0.0)
+        self._check_finite(batch, "Heun SDE predictor step")
         batch.update_graph()
 
         # --- Step 4: Second score call at (x_pred, t-dt) ---
@@ -134,5 +135,6 @@ class HeunSampler(Sampler):
             batch = noiser.denoise(batch, dt, last=last)
 
         batch.wrap_positions()
+        self._check_finite(batch, "Heun SDE corrector step")
         batch.update_graph()
         return batch

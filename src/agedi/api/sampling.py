@@ -36,6 +36,7 @@ def sample(
     print_timings: bool = False,
     as_atoms: bool = True,
     sampler=None,
+    sampler_kwargs=None,
 ) -> Union[List[AtomsGraph], List[Atoms], List[List[AtomsGraph]], List[List[Atoms]]]:
     """Sample structures from a trained diffusion model.
 
@@ -148,6 +149,7 @@ def sample(
             save_trajectory=save_trajectory,
             print_timings=print_timings,
             sampler=sampler,
+            sampler_kwargs=sampler_kwargs,
         )
 
     elapsed = time.monotonic() - _start

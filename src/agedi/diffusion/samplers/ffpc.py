@@ -82,6 +82,7 @@ class ForcefieldCorrectorSampler(Sampler):
         for noiser in self.noisers[::-1]:
             batch = noiser.denoise(batch, dt, last=last)
         batch.wrap_positions()
+        self._check_finite(batch, "FFPC predictor (EM) step")
         batch.update_graph()
 
         # Corrector: force-field gradient descent at the predicted positions
@@ -89,6 +90,7 @@ class ForcefieldCorrectorSampler(Sampler):
             for _ in range(self.corrector_steps):
                 batch = self.ff_fn(batch, self.corrector_scale)
                 batch.wrap_positions()
+                self._check_finite(batch, "FFPC force-field corrector step")
                 batch.update_graph()
 
         return batch
