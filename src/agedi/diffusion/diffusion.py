@@ -335,11 +335,6 @@ class Diffusion:
                     f"Unknown sampler {sampler!r}. "
                     f"Available: {sorted(_Sampler._registry)}"
                 )
-            ff_fn = (
-                self.force_field_guidance_step
-                if self.regressor_model is not None
-                else None
-            )
             # Don't forward the legacy corrector defaults — they apply only to
             # the sampler=None path.  Each registry factory defines its own
             # sensible defaults; sampler_kwargs lets callers override them.
@@ -347,7 +342,7 @@ class Diffusion:
             return _Sampler._registry[sampler](
                 score_fn=self.score_model,
                 noisers=self.noisers,
-                ff_fn=ff_fn,
+                regressor_fn=self.regressor_model,
                 **merged,
             )
 
@@ -802,7 +797,7 @@ class Diffusion:
 
         # Inject call-counting wrappers so timings tracks actual score/ff invocations.
         _orig_score_fn = None
-        _orig_ff_fn = None
+        _orig_regressor_fn = None
         if timings is not None and _sampler is not None:
             _orig_score_fn = _sampler.score_fn
 
@@ -814,14 +809,14 @@ class Diffusion:
 
             from agedi.diffusion.samplers import ForcefieldCorrectorSampler as _FFPC
 
-            if isinstance(_sampler, _FFPC) and _sampler.ff_fn is not None:
-                _orig_ff_fn = _sampler.ff_fn
+            if isinstance(_sampler, _FFPC) and _sampler.regressor_fn is not None:
+                _orig_regressor_fn = _sampler.regressor_fn
 
-                def _counted_ff_fn(batch, scale, _f=_orig_ff_fn, _t=timings):
+                def _counted_regressor_fn(batch, _f=_orig_regressor_fn, _t=timings):
                     _t.force_field_calls += 1
-                    return _f(batch, scale)
+                    return _f(batch)
 
-                _sampler.ff_fn = _counted_ff_fn
+                _sampler.regressor_fn = _counted_regressor_fn
 
         if save_trajectory:
             path = []
@@ -910,11 +905,11 @@ class Diffusion:
                         batch.wrap_positions()
                         batch.update_graph()
 
-        # Restore original score_fn / ff_fn if they were wrapped for counting.
+        # Restore original score_fn / regressor_fn if they were wrapped for counting.
         if _orig_score_fn is not None:
             _sampler.score_fn = _orig_score_fn
-        if _orig_ff_fn is not None:
-            _sampler.ff_fn = _orig_ff_fn
+        if _orig_regressor_fn is not None:
+            _sampler.regressor_fn = _orig_regressor_fn
 
         # Optional post-diffusion relaxation
         if force_field_guidance > 0 and self.regressor_model is not None:

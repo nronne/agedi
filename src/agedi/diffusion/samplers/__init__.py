@@ -96,13 +96,22 @@ Sampler.register(
 Sampler.register(
     "ffpc",
     lambda score_fn, noisers,
-    ff_fn=None, corrector_steps=1, corrector_scale=0.01, **kw:
+    regressor_fn=None, corrector_steps=1, corrector_step_size=1e-3,
+    mixing_zeta=1.0, temperature=1.0,
+    terminal_steps=0, terminal_step_size=1e-3,
+    terminal_dynamics="overdamped", terminal_friction=1.0, **kw:
     ForcefieldCorrectorSampler(
         score_fn,
         noisers,
-        ff_fn=ff_fn,
+        regressor_fn=regressor_fn,
         corrector_steps=corrector_steps,
-        corrector_scale=corrector_scale,
+        corrector_step_size=corrector_step_size,
+        mixing_zeta=mixing_zeta,
+        temperature=temperature,
+        terminal_steps=terminal_steps,
+        terminal_step_size=terminal_step_size,
+        terminal_dynamics=terminal_dynamics,
+        terminal_friction=terminal_friction,
     ),
 )
 
