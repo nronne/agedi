@@ -150,7 +150,12 @@ click.rich_click.OPTION_GROUPS.update(
     type=float,
     default=1e-3,
     show_default=True,
-    help="Step size for the terminal corrector (ffpc only). For langevin_md, use physical time units (e.g. fs when forces are in eV/Å).",
+    help=(
+        "Step size for the terminal corrector (ffpc only). "
+        "For overdamped: dimensionless, ~1e-3 is a safe start. "
+        "For langevin_md: physical time step — typically 1.0 fs when forces are in eV/Å. "
+        "The default 1e-3 is too small for langevin_md; set this explicitly."
+    ),
 )
 @click.option(
     "--ffpc_terminal_dynamics",
@@ -169,7 +174,12 @@ click.rich_click.OPTION_GROUPS.update(
     type=float,
     default=1.0,
     show_default=True,
-    help="Friction coefficient γ for the Langevin thermostat (ffpc langevin_md only, units: 1/terminal_step_size).",
+    help=(
+        "Friction coefficient γ for the Langevin thermostat (ffpc langevin_md only). "
+        "Units: 1/terminal_step_size. When terminal_step_size is in fs, typical range is "
+        "0.001–0.1 fs⁻¹ (1–100 ps⁻¹). Default 1.0 is very high damping; only reasonable "
+        "with a step size in ps or larger."
+    ),
 )
 @click.option("--progress_bar", is_flag=True, help="Show progress bar")
 @click.option("--print_timings", is_flag=True, help="Print per-stage timing breakdown after sampling")

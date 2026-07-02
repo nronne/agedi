@@ -105,19 +105,30 @@ class ForcefieldCorrectorSampler(Sampler):
         Number of refinement steps applied after the last diffusion step.
         ``0`` (default) disables them.
     terminal_step_size : float
-        Step size for each terminal step.  For *overdamped* dynamics this is
-        dimensionless; for *langevin_md* this is a time step in units
-        consistent with the model forces and ASE masses
-        (e.g. femtoseconds when forces are in eV/Å).  Default: ``1e-3``.
+        Step size for each terminal step.
+
+        * *overdamped*: dimensionless gradient-descent step.  ``1e-3``
+          (default) is a conservatively small starting point; stability
+          requires ``terminal_step_size < 2·T``.
+        * *langevin_md*: physical time step in units consistent with the
+          model forces and ASE masses.  When forces are in eV/Å and masses
+          in amu the unit is femtoseconds; a typical value is ``1.0`` (1 fs).
+          The default ``1e-3`` is far too small for this mode — always set
+          it explicitly when using ``terminal_dynamics="langevin_md"``.
     terminal_dynamics : ``"overdamped"`` or ``"langevin_md"``
         Dynamics used for the terminal phase.  ``"overdamped"`` (default) uses
         overdamped Langevin (no momenta).  ``"langevin_md"`` uses standard
         Langevin MD (BAOAB) with real atomic masses from ASE and momenta
         initialised from the Maxwell-Boltzmann distribution.
     terminal_friction : float
-        Friction coefficient :math:`\\gamma` for the Langevin thermostat used
-        in *langevin_md* terminal dynamics.  Ignored for *overdamped*.
-        Default: ``1.0`` (in units of 1/``terminal_step_size``).
+        Friction coefficient :math:`\\gamma` for the Langevin thermostat in
+        *langevin_md* dynamics (ignored for *overdamped*).  Units are
+        ``1/terminal_step_size``; when ``terminal_step_size`` is in fs a
+        physically reasonable range is ``0.001``–``0.1`` fs⁻¹
+        (1–100 ps⁻¹).  Higher values give heavier damping and faster
+        thermalisation at the cost of slower diffusion.  Default: ``1.0``
+        (very high damping — suitable only if ``terminal_step_size`` is
+        already in ps or larger units).
 
     String alias
     ------------
