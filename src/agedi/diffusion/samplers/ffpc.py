@@ -243,7 +243,13 @@ class ForcefieldCorrectorSampler(Sampler):
         return batch
 
     def _run_terminal(self, batch: "AtomsGraph") -> None:
-        """Dispatch to the selected terminal dynamics."""
+        """Dispatch to the selected terminal dynamics.
+
+        Always prepends the pre-terminal (fully denoised) frame to
+        ``_pending_frames`` so that saved trajectories include the bridge
+        between the last diffusion step and the first terminal step.
+        """
+        self._pending_frames.append(batch.to_data_list())
         if self.terminal_dynamics == "langevin_md":
             self._terminal_langevin_md(batch)
         else:
