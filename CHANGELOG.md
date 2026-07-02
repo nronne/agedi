@@ -5,6 +5,58 @@ All notable changes to AGeDi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-07-02
+
+### Added
+- **Pluggable sampler architecture** — reverse-diffusion algorithm is now
+  selectable via `sampler` parameter on `sample()` / `functional.sample()` /
+  `agedi sample --sampler`.  Built-in aliases:
+  - `"em"` — Euler–Maruyama (default, unchanged behaviour)
+  - `"pc"` — predictor-corrector: EM predictor + N Langevin corrector steps at
+    t_{i-1} (conventional PC convention)
+  - `"heun"` — 2nd-order stochastic sampler (Karras et al., 2022); two score
+    evaluations per step
+  - `"ddim"` — deterministic probability-flow ODE (Anderson, 1982 / Ho et al.
+    DDIM); no noise, one score evaluation per step
+  - `"heun_ode"` — 2nd-order deterministic ODE (Heun's method on the PF-ODE)
+  - `"ffpc"` — force-field augmented predictor-corrector (see below)
+- **`ForcefieldCorrectorSampler` (`"ffpc"`)** — predictor-corrector sampler
+  that blends the neural score with force-field gradients in the corrector:
+  `s̃ = (1-f(t))·s_θ + f(t)·F`, where `f(t) = (1-t)^ζ`.  Optionally runs
+  additional terminal dynamics after the last diffusion step:
+  - `terminal_dynamics="overdamped"` — overdamped Langevin with reduced step
+    `ε = terminal_step_size` (T-independent stability, correct Boltzmann
+    distribution `∝ exp(-U/T)` via `sqrt(2εT)` noise)
+  - `terminal_dynamics="langevin_md"` — standard Langevin MD (BAOAB integrator)
+    with real ASE atomic masses and Maxwell-Boltzmann velocity initialisation
+  - `terminal_step_size` and `terminal_friction` default to `None` and
+    auto-select sensible values (`ε=1e-3` / `dt=1.0 fs`, `γ·dt=0.1`)
+- **`Sampler.register()`** class method for registering custom sampler
+  algorithms by string alias.
+- **`sampler_kwargs` validation** — unknown keys in `sampler_kwargs` raise
+  `ValueError` immediately, naming the offending key (catches typos such as
+  `"ffpc_terminal_steps"` that were previously silently ignored).
+- **Terminal step frames in `save_trajectory`** — when `ffpc` terminal steps
+  are active, saved trajectories include a bridge frame (the denoised structure
+  before terminal dynamics) followed by all terminal step frames.  Total frame
+  count: `steps + 1 + terminal_steps`.
+
+### Changed
+- Temperature (`temperature`) is **not** applied inside the ffpc corrector
+  blended score.  Dividing forces by a small T caused numerical blowup; the
+  force-field contribution is controlled via `mixing_zeta` and
+  `corrector_step_size` instead.
+- `PositionsNoiser` hparam key renamed from `"sampler"` to `"denoising_step"`
+  to avoid confusion with the new top-level `sampler` parameter.  Old
+  checkpoints with `"sampler"` in `hparams.yaml` are loaded transparently via
+  a backward-compatibility alias.
+
+### Fixed
+- `save_trajectory` no longer appends a duplicate trailing frame when terminal
+  dynamics (ffpc) already captured the final state via `_pending_frames`.
+- `sampler=em` no longer appeared spuriously under "positions noisers" in the
+  architecture summary when a different top-level sampler was selected.
+
 ## [1.2.0] - 2026-06-12
 
 ### Added

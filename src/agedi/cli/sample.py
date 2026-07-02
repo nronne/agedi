@@ -37,8 +37,22 @@ click.rich_click.OPTION_GROUPS.update(
                     "--eps",
                     "--compile",
                     "--batch_size",
+                    "--sampler",
                     "--progress_bar",
                     "--print_timings",
+                ],
+            },
+            {
+                "name": "FFPC Sampler Options",
+                "options": [
+                    "--ffpc_corrector_steps",
+                    "--ffpc_corrector_step_size",
+                    "--ffpc_zeta",
+                    "--ffpc_temperature",
+                    "--ffpc_terminal_steps",
+                    "--ffpc_terminal_step_size",
+                    "--ffpc_terminal_dynamics",
+                    "--ffpc_terminal_friction",
                 ],
             },
             {
@@ -80,6 +94,90 @@ click.rich_click.OPTION_GROUPS.update(
     type=float,
     default=None,
     help="Z-confinement to use for the data. Give min and max value",
+)
+@click.option(
+    "--sampler",
+    type=click.Choice(["em", "pc", "heun", "ddim", "heun_ode", "ffpc"]),
+    default=None,
+    show_default=True,
+    help=(
+        "Reverse-diffusion sampler. "
+        "'em': Euler-Maruyama (default); "
+        "'pc': predictor-corrector (EM + Langevin corrector); "
+        "'heun': 2nd-order stochastic (2 score calls/step); "
+        "'ddim': deterministic probability-flow ODE; "
+        "'heun_ode': 2nd-order deterministic ODE; "
+        "'ffpc': force-field augmented score + optional terminal Langevin (requires a forces head)."
+    ),
+)
+@click.option(
+    "--ffpc_corrector_steps",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Number of augmented Langevin corrector steps per diffusion step (ffpc only).",
+)
+@click.option(
+    "--ffpc_corrector_step_size",
+    type=float,
+    default=1e-3,
+    show_default=True,
+    help="Step size for the augmented Langevin corrector (ffpc only).",
+)
+@click.option(
+    "--ffpc_zeta",
+    type=float,
+    default=1.0,
+    show_default=True,
+    help="Mixing exponent for ffpc: f(t)=(1-t)**zeta weights the force field vs neural score.",
+)
+@click.option(
+    "--ffpc_temperature",
+    type=float,
+    default=1.0,
+    show_default=True,
+    help="Temperature T for the ffpc terminal phase (not applied in the corrector). For overdamped: sets noise amplitude sqrt(2εT) while step size ε stays T-independent. For langevin_md: kBT in the same units as model forces.",
+)
+@click.option(
+    "--ffpc_terminal_steps",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Number of overdamped Langevin steps applied after the last diffusion step (ffpc only).",
+)
+@click.option(
+    "--ffpc_terminal_step_size",
+    type=float,
+    default=None,
+    show_default=False,
+    help=(
+        "Step size for the ffpc terminal phase. "
+        "For overdamped: dimensionless reduced step ε (T-independent); auto-default 1e-3. "
+        "For langevin_md: physical time step (e.g. 1.0 fs for eV/Å forces); auto-default 1.0."
+    ),
+)
+@click.option(
+    "--ffpc_terminal_dynamics",
+    type=click.Choice(["overdamped", "langevin_md"]),
+    default="overdamped",
+    show_default=True,
+    help=(
+        "Terminal corrector dynamics (ffpc only). "
+        "'overdamped': overdamped Langevin (no momenta); "
+        "'langevin_md': Langevin MD (BAOAB) with real ASE atomic masses and "
+        "Maxwell-Boltzmann momentum initialisation."
+    ),
+)
+@click.option(
+    "--ffpc_terminal_friction",
+    type=float,
+    default=None,
+    show_default=False,
+    help=(
+        "Friction coefficient γ for the ffpc langevin_md terminal thermostat (ignored for overdamped). "
+        "Units: 1/terminal_step_size. When terminal_step_size is in fs, typical range is "
+        "0.001–0.1 fs⁻¹ (1–100 ps⁻¹). Auto-default: γ·dt = 0.1 (moderately damped)."
+    ),
 )
 @click.option("--progress_bar", is_flag=True, help="Show progress bar")
 @click.option("--print_timings", is_flag=True, help="Print per-stage timing breakdown after sampling")
@@ -129,6 +227,20 @@ def sample(path: str, **kwargs) -> None:
             zeta=kwargs["ff_zeta"],
         )
 
+    _sampler = kwargs["sampler"]
+    _sampler_kwargs = None
+    if _sampler == "ffpc":
+        _sampler_kwargs = dict(
+            corrector_steps=kwargs["ffpc_corrector_steps"],
+            corrector_step_size=kwargs["ffpc_corrector_step_size"],
+            mixing_zeta=kwargs["ffpc_zeta"],
+            temperature=kwargs["ffpc_temperature"],
+            terminal_steps=kwargs["ffpc_terminal_steps"],
+            terminal_step_size=kwargs["ffpc_terminal_step_size"],
+            terminal_dynamics=kwargs["ffpc_terminal_dynamics"],
+            terminal_friction=kwargs["ffpc_terminal_friction"],
+        )
+
     sample_kwargs = dict(
         n_samples=kwargs["n_samples"],
         n_atoms=kwargs["n_atoms"],
@@ -136,6 +248,8 @@ def sample(path: str, **kwargs) -> None:
         eps=kwargs["eps"],
         compile=kwargs["compile_model"],
         batch_size=kwargs["batch_size"],
+        sampler=_sampler,
+        sampler_kwargs=_sampler_kwargs,
         progress_bar=kwargs["progress_bar"],
         print_timings=kwargs["print_timings"],
         save_trajectory=kwargs["save_trajectory"],

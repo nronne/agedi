@@ -58,7 +58,8 @@ class PositionsNoiser(Noiser):
         sde: Optional[SDE] = None,
         loss_weighting: str = "uniform",
         prediction_type: str = "score",
-        sampler: str = "em",
+        denoising_step: str = "em",
+        sampler: Optional[str] = None,
         **kwargs
     ) -> None:
         """Initialize the positions noiser.
@@ -102,8 +103,8 @@ class PositionsNoiser(Noiser):
               recovered as ``s = −r_score / √var(t)`` before applying the
               Euler–Maruyama step.  This is the DDPM / molecule-EDM
               parameterization and the recommended choice with VP-SDE.
-        sampler : str, optional
-            Denoising formula used during sampling.  Applies to both
+        denoising_step : str, optional
+            Per-step denoising formula used during sampling.  Applies to both
             ``prediction_type`` settings but has the most impact with VP:
 
             * ``"em"`` (default) – Euler–Maruyama.  All existing models
@@ -124,9 +125,16 @@ class PositionsNoiser(Noiser):
               The denominator ``√(1−β·Δt)`` cancels the per-step
               amplification that makes the EM update unstable for large
               ``beta_max``, at the cost of being restricted to VP-SDE.
+        sampler : str, optional
+            Deprecated alias for *denoising_step*.  Accepted to load
+            checkpoints saved before the rename.
         **kwargs
             Additional keyword arguments forwarded to :class:`~agedi.diffusion.noisers.Noiser`.
         """
+        # Accept legacy `sampler` kwarg from old checkpoints.
+        if sampler is not None:
+            denoising_step = sampler
+
         super().__init__(distribution, prior, **kwargs)
         if loss_weighting not in ("uniform", "min_snr"):
             raise ValueError(
@@ -136,17 +144,17 @@ class PositionsNoiser(Noiser):
             raise ValueError(
                 f"prediction_type must be 'score' or 'epsilon', got {prediction_type!r}"
             )
-        if sampler not in ("em", "ddpm"):
+        if denoising_step not in ("em", "ddpm"):
             raise ValueError(
-                f"sampler must be 'em' or 'ddpm', got {sampler!r}"
+                f"denoising_step must be 'em' or 'ddpm', got {denoising_step!r}"
             )
-        if sampler == "ddpm" and prediction_type != "epsilon":
+        if denoising_step == "ddpm" and prediction_type != "epsilon":
             raise ValueError(
-                "sampler='ddpm' requires prediction_type='epsilon'"
+                "denoising_step='ddpm' requires prediction_type='epsilon'"
             )
         self.loss_weighting = loss_weighting
         self.prediction_type = prediction_type
-        self.sampler = sampler
+        self.sampler = denoising_step  # internal attribute kept as .sampler
         if sde is not None:
             self.sde = sde
         else:
@@ -161,7 +169,7 @@ class PositionsNoiser(Noiser):
             "sde": self.sde.get_hparams(),
             "loss_weighting": self.loss_weighting,
             "prediction_type": self.prediction_type,
-            "sampler": self.sampler,
+            "denoising_step": self.sampler,
         }
 
     def _noise(self, batch: AtomsGraph) -> AtomsGraph:

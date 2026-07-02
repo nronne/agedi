@@ -35,6 +35,8 @@ def sample(
     save_trajectory: bool = False,
     print_timings: bool = False,
     as_atoms: bool = True,
+    sampler=None,
+    sampler_kwargs=None,
 ) -> Union[List[AtomsGraph], List[Atoms], List[List[AtomsGraph]], List[List[Atoms]]]:
     """Sample structures from a trained diffusion model.
 
@@ -98,12 +100,11 @@ def sample(
 
     _ff = ff_guidance if ff_guidance is not None else ForcefieldGuidanceConfig()
 
-    # Extract sampler from the first position noiser.
-    _sampler = None
-    for _n in diffusion.noisers:
-        if hasattr(_n, "sampler"):
-            _sampler = _n.sampler
-            break
+    # Determine display name for the top-level sampler algorithm.
+    if sampler is not None:
+        _sampler = sampler if isinstance(sampler, str) else type(sampler).__name__
+    else:
+        _sampler = None  # default (EM) — not shown separately
 
     _print_sampling_config(
         n_samples=n_samples,
@@ -143,6 +144,8 @@ def sample(
             progress_bar=progress_bar,
             save_trajectory=save_trajectory,
             print_timings=print_timings,
+            sampler=sampler,
+            sampler_kwargs=sampler_kwargs,
         )
 
     elapsed = time.monotonic() - _start

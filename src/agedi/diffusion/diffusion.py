@@ -49,6 +49,8 @@ class SamplingTimings:
     post_diffusion_relaxation_force_eval: float = 0.0
     total_wall: float = 0.0
     reverse_step_calls: int = 0
+    score_model_calls: int = 0
+    force_field_calls: int = 0
     neighbor_list_calls: int = 0
     neighbor_list_rebuilds: int = 0
     guidance_neighbor_list_calls: int = 0
@@ -274,6 +276,101 @@ class Diffusion:
 
         return batch
 
+    # ------------------------------------------------------------------
+    # Sampler resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_sampler(
+        self,
+        sampler: "Optional[Union[str, Sampler]]",
+        corrector_steps: int = 0,
+        corrector_step_size: float = 1e-3,
+        sampler_kwargs: "Optional[Dict]" = None,
+    ) -> "Sampler":
+        """Resolve a sampler string/instance or build one from legacy params.
+
+        Parameters
+        ----------
+        sampler : str, Sampler, or None
+            ``None`` → :class:`~agedi.diffusion.samplers.EulerMaruyamaSampler`
+            (or :class:`~agedi.diffusion.samplers.PredictorCorrectorSampler`
+            when *corrector_steps* > 0).
+            A string looks up the sampler in the registry.
+            A :class:`~agedi.diffusion.samplers.Sampler` instance is returned
+            as-is.
+        corrector_steps : int, optional
+            Used when *sampler* is ``None`` and *corrector_steps* > 0 to
+            build a :class:`~agedi.diffusion.samplers.PredictorCorrectorSampler`.
+        corrector_step_size : float, optional
+            Step size forwarded to the predictor-corrector sampler.
+        sampler_kwargs : dict, optional
+            Extra keyword arguments forwarded to the sampler constructor when
+            *sampler* is a string alias.  Keys override the defaults supplied
+            by *corrector_steps* / *corrector_step_size*.
+
+        Returns
+        -------
+        Sampler
+            A ready-to-use sampler instance.
+        """
+        from agedi.diffusion.samplers import (
+            Sampler as _Sampler,
+            EulerMaruyamaSampler,
+            PredictorCorrectorSampler,
+        )
+
+        if sampler is None:
+            if corrector_steps > 0:
+                return PredictorCorrectorSampler(
+                    self.score_model,
+                    self.noisers,
+                    corrector_steps=corrector_steps,
+                    corrector_step_size=corrector_step_size,
+                )
+            return EulerMaruyamaSampler(self.score_model, self.noisers)
+
+        if isinstance(sampler, str):
+            if sampler not in _Sampler._registry:
+                raise ValueError(
+                    f"Unknown sampler {sampler!r}. "
+                    f"Available: {sorted(_Sampler._registry)}"
+                )
+            # Don't forward the legacy corrector defaults — they apply only to
+            # the sampler=None path.  Each registry factory defines its own
+            # sensible defaults; sampler_kwargs lets callers override them.
+            merged = dict(sampler_kwargs) if sampler_kwargs else {}
+            if merged:
+                import inspect as _inspect
+                _auto = {"score_fn", "noisers", "regressor_fn"}
+                _factory_sig = _inspect.signature(_Sampler._registry[sampler])
+                _valid = {
+                    name
+                    for name, param in _factory_sig.parameters.items()
+                    if name not in _auto
+                    and param.kind != _inspect.Parameter.VAR_KEYWORD
+                }
+                _unknown = set(merged) - _valid
+                if _unknown:
+                    raise ValueError(
+                        f"Unknown sampler_kwargs for sampler {sampler!r}: "
+                        f"{sorted(_unknown)}. "
+                        f"Valid options: {sorted(_valid)}"
+                    )
+            return _Sampler._registry[sampler](
+                score_fn=self.score_model,
+                noisers=self.noisers,
+                regressor_fn=self.regressor_model,
+                **merged,
+            )
+
+        if isinstance(sampler, _Sampler):
+            return sampler
+
+        raise TypeError(
+            f"sampler must be a str, Sampler instance, or None; "
+            f"got {type(sampler)!r}"
+        )
+
     def corrector_step(
         self,
         batch: AtomsGraph,
@@ -490,7 +587,7 @@ class Diffusion:
         )
         print(
             self._format_timing_line(
-                "score model", timings.score_model, timings.reverse_step_calls
+                "score model", timings.score_model, timings.score_model_calls
             )
         )
         print(
@@ -510,12 +607,16 @@ class Diffusion:
                 timings.neighbor_list_calls,
             )
         )
-        if timings.force_field_guidance > 0 or timings.guidance_neighbor_list > 0:
+        if (
+            timings.force_field_calls > 0
+            or timings.force_field_guidance > 0
+            or timings.guidance_neighbor_list > 0
+        ):
             print(
                 self._format_timing_line(
                     "force-field guidance",
                     timings.force_field_guidance,
-                    timings.reverse_step_calls,
+                    timings.force_field_calls,
                 )
             )
             print(
@@ -622,6 +723,8 @@ class Diffusion:
         timings: Optional[SamplingTimings] = None,
         reverse_step_fn=None,
         is_compiled: bool = False,
+        sampler=None,
+        sampler_kwargs=None,
     ) -> List[AtomsGraph]:
         """Run the reverse-diffusion loop for a pre-built batch.
 
@@ -657,6 +760,18 @@ class Diffusion:
             version to enable compiled sampling.
         is_compiled : bool, optional
             Whether ``reverse_step_fn`` is a compiled function.
+        sampler : str, Sampler, or None, optional
+            Sampler instance or string alias controlling the reverse-diffusion
+            algorithm.  When provided (and *is_compiled* is ``False``), the
+            sampler's :meth:`~agedi.diffusion.samplers.Sampler.step` is called
+            instead of *reverse_step_fn*.  ``None`` (default) falls back to an
+            :class:`~agedi.diffusion.samplers.EulerMaruyamaSampler` (or a
+            :class:`~agedi.diffusion.samplers.PredictorCorrectorSampler` when
+            *corrector_steps* > 0).
+        sampler_kwargs : dict, optional
+            Extra constructor arguments forwarded to the sampler when *sampler*
+            is a string alias.  Keys override the defaults supplied by
+            *corrector_steps* / *corrector_step_size*.
 
         Returns
         -------
@@ -670,7 +785,26 @@ class Diffusion:
         if steps < 2:
             return batch.to_data_list()
 
-        if force_field_guidance > 0 and self.regressor_model is not None:
+        # Resolve the sampler for the non-compiled path.
+        _sampler = None
+        if not is_compiled:
+            _sampler = self._resolve_sampler(
+                sampler, corrector_steps, corrector_step_size, sampler_kwargs
+            )
+        elif sampler is not None:
+            raise ValueError(
+                "compile=True is only compatible with the default Euler-Maruyama / "
+                "Predictor-Corrector sampler (sampler=None). "
+                f"Got sampler={sampler!r}. Either set compile=False or remove the sampler argument."
+            )
+
+        needs_lbfgs = (
+            (force_field_guidance > 0 or (
+                _sampler is not None and _sampler.uses_force_field
+            ))
+            and self.regressor_model is not None
+        )
+        if needs_lbfgs:
             self.lbfgs_step_sizer = BatchedLBFGSStepSizer(
                 batch_size=batch.batch_size
             )
@@ -678,12 +812,28 @@ class Diffusion:
         ts = torch.linspace(1, eps, steps, device=self.device)
         dt = ts[0] - ts[1]
 
-        # Pre-create corrector delta_t tensor once to avoid per-call allocation.
-        corrector_dt: Optional[torch.Tensor] = None
-        if corrector_steps > 0:
-            corrector_dt = torch.tensor(
-                corrector_step_size, dtype=dt.dtype, device=self.device
-            )
+        # Inject call-counting wrappers so timings tracks actual score/ff invocations.
+        _orig_score_fn = None
+        _orig_regressor_fn = None
+        if timings is not None and _sampler is not None:
+            _orig_score_fn = _sampler.score_fn
+
+            def _counted_score_fn(batch, _f=_orig_score_fn, _t=timings):
+                _t.score_model_calls += 1
+                return _f(batch)
+
+            _sampler.score_fn = _counted_score_fn
+
+            from agedi.diffusion.samplers import ForcefieldCorrectorSampler as _FFPC
+
+            if isinstance(_sampler, _FFPC) and _sampler.regressor_fn is not None:
+                _orig_regressor_fn = _sampler.regressor_fn
+
+                def _counted_regressor_fn(batch, _f=_orig_regressor_fn, _t=timings):
+                    _t.force_field_calls += 1
+                    return _f(batch)
+
+                _sampler.regressor_fn = _counted_regressor_fn
 
         if save_trajectory:
             path = []
@@ -700,10 +850,9 @@ class Diffusion:
             batch.add_batch_attr("time", ts[i].repeat(batch.x.shape[0], 1), type="node")
             last_step = i == steps - 1
 
-            # Predictor step
             if is_compiled:
-                # compiled_reverse_step cannot accept timings (time.perf_counter
-                # is not traceable by Dynamo); time the whole call from outside.
+                # Compiled path: uses the pre-compiled reverse_step_fn.
+                # Sampler classes are not compatible with torch.compile.
                 if timings is not None:
                     batch = self._time_sampling_call(
                         batch.pos.device,
@@ -716,26 +865,76 @@ class Diffusion:
                         last=last_step,
                     )
                     timings.reverse_step_calls += 1
+                    timings.score_model_calls += 1
                 else:
                     batch = reverse_step_fn(
                         batch, dt, force_field_guidance, last=last_step
                     )
             else:
-                batch = reverse_step_fn(
-                    batch, dt, force_field_guidance, last=last_step, timings=timings
-                )
-
-            # Corrector steps at constant time t_i
-            for _ in range(corrector_steps):
-                if corrector_dt is None:
-                    raise RuntimeError(
-                        "corrector_dt is None but corrector_steps > 0; "
-                        "this indicates a bug in _sample_batch initialisation."
+                # Sampler path: the sampler owns the full algorithmic step,
+                # including any corrector sub-steps.
+                if timings is not None:
+                    timings.reverse_step_calls += 1
+                    batch = self._time_sampling_call(
+                        batch.pos.device,
+                        timings,
+                        "score_model",
+                        _sampler.step,
+                        batch,
+                        dt,
+                        last_step,
                     )
-                batch.add_batch_attr(
-                    "time", ts[i].repeat(batch.x.shape[0], 1), type="node"
-                )
-                batch = self.corrector_step(batch, corrector_dt)
+                else:
+                    batch = _sampler.step(batch, dt, last_step)
+
+                # Force-field guidance applied after the sampler step,
+                # consistent with the current reverse_step() behaviour.
+                if self.regressor_model is not None and force_field_guidance > 0.0:
+                    if timings is not None:
+                        batch = self._time_sampling_call(
+                            batch.pos.device,
+                            timings,
+                            "force_field_guidance",
+                            self.force_field_guidance_step,
+                            batch,
+                            force_field_guidance * dt,
+                        )
+                        timings.force_field_calls += 1
+                        self._time_sampling_call(
+                            batch.pos.device,
+                            timings,
+                            "guidance_wrap_positions",
+                            batch.wrap_positions,
+                        )
+                        guidance_rebuilt = self._time_sampling_call(
+                            batch.pos.device,
+                            timings,
+                            "guidance_neighbor_list",
+                            batch.update_graph,
+                        )
+                        timings.guidance_neighbor_list_calls += 1
+                        if guidance_rebuilt:
+                            timings.guidance_neighbor_list_rebuilds += 1
+                    else:
+                        batch = self.force_field_guidance_step(
+                            batch, force_field_guidance * dt
+                        )
+                        batch.wrap_positions()
+                        batch.update_graph()
+
+                # Append terminal frames (e.g. from ForcefieldCorrectorSampler)
+                # to the trajectory.  These are produced inside sampler.step()
+                # on the last diffusion step and exposed via _pending_frames.
+                if save_trajectory:
+                    pending = getattr(_sampler, "_pending_frames", None)
+                    if pending:
+                        path.extend(pending)
+
+        # Restore original score_fn / regressor_fn if they were wrapped for counting.
+        if _orig_score_fn is not None:
+            _sampler.score_fn = _orig_score_fn
+        if _orig_regressor_fn is not None:
+            _sampler.regressor_fn = _orig_regressor_fn
 
         # Optional post-diffusion relaxation
         if force_field_guidance > 0 and self.regressor_model is not None:
@@ -818,7 +1017,11 @@ class Diffusion:
                     )
 
         if save_trajectory:
-            path.append(batch.to_data_list())
+            # If the last step populated _pending_frames (e.g. terminal dynamics),
+            # the final state is already captured there — don't add a duplicate.
+            _last_had_pending = bool(getattr(_sampler, "_pending_frames", None))
+            if not _last_had_pending:
+                path.append(batch.to_data_list())
             return list(map(list, zip(*path)))
 
         return batch.to_data_list()
@@ -838,6 +1041,8 @@ class Diffusion:
         corrector_step_size: float = 1e-3,
         print_timings: bool = False,
         compile: bool = False,
+        sampler=None,
+        sampler_kwargs=None,
         **kwargs,
     ) -> List[AtomsGraph]:
         """Build *N* graphs from priors and run the sampling loop.
@@ -870,6 +1075,9 @@ class Diffusion:
             Print a timing breakdown after sampling completes.
         compile : bool, optional
             Use ``torch.compile`` on the reverse diffusion step.
+        sampler_kwargs : dict, optional
+            Extra keyword arguments forwarded to the sampler constructor when
+            *sampler* is a string alias.
         **kwargs
             Keyword arguments forwarded to :meth:`_initialize_graph`.
 
@@ -925,6 +1133,8 @@ class Diffusion:
             timings=timings,
             reverse_step_fn=reverse_step_fn,
             is_compiled=compile,
+            sampler=sampler,
+            sampler_kwargs=sampler_kwargs,
         )
         self._sync_for_timing(batch.pos.device)
         timings.total_wall = time.perf_counter() - total_start
@@ -959,6 +1169,8 @@ class Diffusion:
         print_timings: Optional[bool] = False,
         corrector_steps: int = 0,
         corrector_step_size: float = 1e-3,
+        sampler=None,
+        sampler_kwargs=None,
     ) -> List[AtomsGraph]:
         """Sample structures from the diffusion model.
 
@@ -1021,8 +1233,38 @@ class Diffusion:
         corrector_steps : int, optional
             Number of Langevin corrector passes after each predictor step.
             ``0`` (default) gives standard (predictor-only) sampling.
+            Ignored when *sampler* is provided explicitly.
         corrector_step_size : float, optional
             Step size for each corrector pass.  Defaults to ``1e-3``.
+        sampler : str, Sampler, or None, optional
+            Reverse-diffusion algorithm.  Pass a string alias or a
+            :class:`~agedi.diffusion.samplers.Sampler` instance.
+
+            Available string aliases:
+
+            * ``"em"``       — Euler-Maruyama (default)
+            * ``"pc"``       — Predictor-corrector (use with *corrector_steps*)
+            * ``"heun"``     — Stochastic Heun, 2nd-order (2 score calls/step)
+            * ``"ddim"``     — Deterministic probability-flow ODE (DDIM)
+            * ``"heun_ode"`` — Deterministic 2nd-order ODE (Heun on PF-ODE)
+            * ``"ffpc"``     — Force-field corrector (use with *sampler_kwargs*)
+
+            When ``None`` (default), uses ``"em"`` (or ``"pc"`` when
+            *corrector_steps* > 0).
+        sampler_kwargs : dict, optional
+            Sampler-specific constructor arguments, forwarded when *sampler*
+            is a string alias.  Keys override the top-level *corrector_steps*
+            and *corrector_step_size* defaults.  Examples::
+
+                # PC with 3 corrector steps and a custom step size
+                model.sample(N, sampler="pc",
+                             sampler_kwargs={"corrector_steps": 3,
+                                            "corrector_step_size": 5e-4})
+
+                # FFPC with 5 force-field corrector steps
+                model.sample(N, sampler="ffpc",
+                             sampler_kwargs={"corrector_steps": 5,
+                                            "corrector_scale": 0.005})
 
         Returns
         -------
@@ -1069,6 +1311,8 @@ class Diffusion:
             "corrector_step_size": corrector_step_size,
             "print_timings": print_timings,
             "compile": compile,
+            "sampler": sampler,
+            "sampler_kwargs": sampler_kwargs,
         }
         self.zeta = ff_guidance.zeta
 
