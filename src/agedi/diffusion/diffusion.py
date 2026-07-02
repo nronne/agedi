@@ -1017,7 +1017,11 @@ class Diffusion:
                     )
 
         if save_trajectory:
-            path.append(batch.to_data_list())
+            # If the last step populated _pending_frames (e.g. terminal dynamics),
+            # the final state is already captured there — don't add a duplicate.
+            _last_had_pending = bool(getattr(_sampler, "_pending_frames", None))
+            if not _last_had_pending:
+                path.append(batch.to_data_list())
             return list(map(list, zip(*path)))
 
         return batch.to_data_list()

@@ -9,6 +9,7 @@ import torch
 from agedi.data import AtomsGraph
 from agedi.diffusion.samplers import (
     EulerMaruyamaSampler,
+    ForcefieldCorrectorSampler,
     HeunODESampler,
     HeunSampler,
     PredictorCorrectorSampler,
@@ -24,7 +25,7 @@ from agedi.diffusion.samplers import (
 
 def test_registry_has_all_builtin_aliases():
     """All built-in string aliases must be present in the registry."""
-    for alias in ("em", "pc", "heun", "ddim", "heun_ode"):
+    for alias in ("em", "pc", "heun", "ddim", "heun_ode", "ffpc"):
         assert alias in Sampler._registry, f"alias {alias!r} missing from registry"
 
 
@@ -514,3 +515,193 @@ class TestScoreCallCount:
         count = self._count_score_calls(diffusion, pc, steps=steps)
         # Each outer step: 1 predictor + corrector_steps correctors
         assert count == steps * (1 + corrector_steps)
+
+
+# ---------------------------------------------------------------------------
+# ForcefieldCorrectorSampler (ffpc)
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_regressor(batch_ref):
+    """Return a regressor_fn that sets forces_prediction to zeros."""
+    def _fn(batch):
+        batch["forces_prediction"] = torch.zeros_like(batch.pos)
+        return batch
+    return _fn
+
+
+def _make_ffpc_batch(diffusion):
+    """Build a minimal single-graph batch suitable for ffpc tests."""
+    import numpy as _np
+    from torch_geometric.data import Batch as _Batch
+
+    diffusion.score_model.sample_mode()
+    graphs = [
+        diffusion._initialize_graph(
+            6.0,
+            n_atoms=torch.tensor([[3]]),
+            x=torch.tensor([6, 8, 8]),
+            cell=torch.tensor(_np.diag([10.0, 10.0, 10.0]), dtype=torch.float),
+            property=torch.tensor(1.0),
+        )
+    ]
+    batch = _Batch.from_data_list(graphs).to(diffusion.device)
+    batch.update_graph()
+    ts = torch.linspace(1.0, 1e-3, 5, device=diffusion.device)
+    dt = ts[0] - ts[1]
+    batch.add_batch_attr("time", ts[0].repeat(batch.x.shape[0], 1), type="node")
+    return batch, dt
+
+
+class TestForcefieldCorrectorSampler:
+    """Tests for ForcefieldCorrectorSampler (ffpc)."""
+
+    def test_ffpc_step_changes_positions(self, diffusion):
+        """A single ffpc step should move atom positions."""
+        batch, dt = _make_ffpc_batch(diffusion)
+        pos_before = batch.pos.clone()
+        sampler = ForcefieldCorrectorSampler(
+            diffusion.score_model,
+            diffusion.noisers,
+            regressor_fn=_make_mock_regressor(batch),
+            corrector_steps=1,
+        )
+        batch = sampler.step(batch, dt, last=False)
+        assert not torch.allclose(batch.pos, pos_before)
+
+    def test_ffpc_no_regressor_still_runs(self, diffusion):
+        """ffpc without a regressor_fn falls back to EM-only (no corrector)."""
+        batch, dt = _make_ffpc_batch(diffusion)
+        sampler = ForcefieldCorrectorSampler(
+            diffusion.score_model,
+            diffusion.noisers,
+            regressor_fn=None,
+            corrector_steps=1,
+        )
+        out = sampler.step(batch, dt, last=False)
+        assert out.pos.isfinite().all()
+
+    def test_ffpc_pending_frames_empty_when_not_last(self, diffusion):
+        """_pending_frames must be empty for non-terminal steps."""
+        batch, dt = _make_ffpc_batch(diffusion)
+        sampler = ForcefieldCorrectorSampler(
+            diffusion.score_model,
+            diffusion.noisers,
+            regressor_fn=_make_mock_regressor(batch),
+            terminal_steps=10,
+        )
+        sampler.step(batch, dt, last=False)
+        assert sampler._pending_frames == []
+
+    def test_ffpc_terminal_overdamped_frame_count(self, diffusion):
+        """Terminal overdamped steps: _pending_frames has 1 bridge + N terminal."""
+        terminal_steps = 5
+        batch, dt = _make_ffpc_batch(diffusion)
+        sampler = ForcefieldCorrectorSampler(
+            diffusion.score_model,
+            diffusion.noisers,
+            regressor_fn=_make_mock_regressor(batch),
+            corrector_steps=0,
+            terminal_steps=terminal_steps,
+            terminal_dynamics="overdamped",
+        )
+        sampler.step(batch, dt, last=True)
+        # 1 bridge frame + terminal_steps frames
+        assert len(sampler._pending_frames) == 1 + terminal_steps
+
+    def test_ffpc_terminal_langevin_md_frame_count(self, diffusion):
+        """Terminal langevin_md steps: _pending_frames has 1 bridge + N terminal."""
+        terminal_steps = 4
+        batch, dt = _make_ffpc_batch(diffusion)
+        sampler = ForcefieldCorrectorSampler(
+            diffusion.score_model,
+            diffusion.noisers,
+            regressor_fn=_make_mock_regressor(batch),
+            corrector_steps=0,
+            terminal_steps=terminal_steps,
+            terminal_dynamics="langevin_md",
+            temperature=0.026,
+        )
+        sampler.step(batch, dt, last=True)
+        assert len(sampler._pending_frames) == 1 + terminal_steps
+
+    def test_ffpc_corrector_and_terminal_no_duplicate_bridge(self, diffusion):
+        """With corrector_steps>0 and terminal_steps>0, exactly one bridge frame
+        appears — not two even though correctors also ran before terminal steps."""
+        terminal_steps = 3
+        corrector_steps = 2
+        batch, dt = _make_ffpc_batch(diffusion)
+        sampler = ForcefieldCorrectorSampler(
+            diffusion.score_model,
+            diffusion.noisers,
+            regressor_fn=_make_mock_regressor(batch),
+            corrector_steps=corrector_steps,
+            terminal_steps=terminal_steps,
+            terminal_dynamics="overdamped",
+        )
+        sampler.step(batch, dt, last=True)
+        # 1 bridge + terminal_steps (no extra bridge from corrector path)
+        assert len(sampler._pending_frames) == 1 + terminal_steps
+
+    def test_ffpc_save_trajectory_frame_count(self, diffusion):
+        """save_trajectory with terminal steps produces N + 1 + T frames."""
+        steps = 4
+        terminal_steps = 3
+
+        # Attach a mock regressor so terminal steps actually run.
+        def _mock_regressor(batch):
+            batch["forces_prediction"] = torch.zeros_like(batch.pos)
+            return batch
+
+        diffusion.regressor_model = _mock_regressor
+
+        try:
+            out = diffusion.sample(
+                1,
+                steps=steps,
+                atomic_numbers=[6, 8, 8],
+                cell=np.diag([10.0, 10.0, 10.0]),
+                property={"property": 1.0},
+                sampler="ffpc",
+                sampler_kwargs={
+                    "corrector_steps": 0,
+                    "terminal_steps": terminal_steps,
+                    "terminal_dynamics": "overdamped",
+                },
+                save_trajectory=True,
+            )
+        finally:
+            diffusion.regressor_model = None
+
+        trajectory = out[0]
+        # steps pre-step frames + 1 bridge + terminal_steps
+        assert len(trajectory) == steps + 1 + terminal_steps
+
+
+class TestSamplerKwargsValidation:
+    """Validate that sampler_kwargs typos are caught early."""
+
+    def test_unknown_kwarg_raises_value_error(self, diffusion):
+        """A typo in sampler_kwargs should raise ValueError naming the bad key."""
+        with pytest.raises(ValueError, match="ffpc_terminal_steps"):
+            diffusion.sample(
+                1,
+                steps=3,
+                atomic_numbers=[6, 8],
+                cell=np.diag([10.0, 10.0, 10.0]),
+                property={"property": 1.0},
+                sampler="ffpc",
+                sampler_kwargs={"ffpc_terminal_steps": 10},
+            )
+
+    def test_valid_kwargs_do_not_raise(self, diffusion):
+        """Valid sampler_kwargs should be accepted without error."""
+        diffusion.sample(
+            1,
+            steps=3,
+            atomic_numbers=[6, 8],
+            cell=np.diag([10.0, 10.0, 10.0]),
+            property={"property": 1.0},
+            sampler="ffpc",
+            sampler_kwargs={"corrector_steps": 0, "terminal_steps": 0},
+        )
