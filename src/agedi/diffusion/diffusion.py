@@ -339,6 +339,23 @@ class Diffusion:
             # the sampler=None path.  Each registry factory defines its own
             # sensible defaults; sampler_kwargs lets callers override them.
             merged = dict(sampler_kwargs) if sampler_kwargs else {}
+            if merged:
+                import inspect as _inspect
+                _auto = {"score_fn", "noisers", "regressor_fn"}
+                _factory_sig = _inspect.signature(_Sampler._registry[sampler])
+                _valid = {
+                    name
+                    for name, param in _factory_sig.parameters.items()
+                    if name not in _auto
+                    and param.kind != _inspect.Parameter.VAR_KEYWORD
+                }
+                _unknown = set(merged) - _valid
+                if _unknown:
+                    raise ValueError(
+                        f"Unknown sampler_kwargs for sampler {sampler!r}: "
+                        f"{sorted(_unknown)}. "
+                        f"Valid options: {sorted(_valid)}"
+                    )
             return _Sampler._registry[sampler](
                 score_fn=self.score_model,
                 noisers=self.noisers,
