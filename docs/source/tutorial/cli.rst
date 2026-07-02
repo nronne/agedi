@@ -156,6 +156,84 @@ Important options:
   GPU sampling; neighbor-list buffer sizes are estimated automatically (requires
   NVIDIA nvalchemiops)
 
+Choosing a sampler
+~~~~~~~~~~~~~~~~~~
+
+Use ``--sampler`` to select the reverse-diffusion algorithm:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 80
+
+   * - ``--sampler``
+     - Description
+   * - *(default)*
+     - Euler–Maruyama (EM): one score evaluation per step
+   * - ``em``
+     - Euler–Maruyama (explicit alias)
+   * - ``pc``
+     - Predictor-corrector: EM predictor + Langevin corrector steps at t_{i-1}
+   * - ``heun``
+     - 2nd-order stochastic (Karras et al. 2022): two score evaluations per step,
+       often gives better quality at fewer steps
+   * - ``ddim``
+     - Deterministic probability-flow ODE: no noise, fully reproducible; one score
+       evaluation per step
+   * - ``heun_ode``
+     - 2nd-order deterministic ODE (Heun's method): two score evaluations per step
+   * - ``ffpc``
+     - Force-field augmented predictor-corrector (requires ``--force_field``
+       training); see below
+
+Example:
+
+.. code-block:: console
+
+   agedi sample logs/agedi/version_0 -f Pd2O2 --sampler heun --steps 200
+
+Force-field augmented sampling (``ffpc``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When the model has been trained with ``--force_field``, the ``ffpc`` sampler
+blends the neural score with the predicted forces during the corrector phase,
+and can optionally run additional Langevin dynamics after the last diffusion
+step:
+
+.. code-block:: console
+
+   # EM predictor + force-field augmented Langevin corrector
+   agedi sample logs/agedi/version_0 -f Pd2O2 --sampler ffpc
+
+   # With overdamped terminal steps for extra relaxation
+   agedi sample logs/agedi/version_0 -f Pd2O2 --sampler ffpc \
+       --ffpc_terminal_steps 200 --ffpc_temperature 0.026
+
+   # With standard Langevin MD terminal steps (BAOAB, real atomic masses)
+   agedi sample logs/agedi/version_0 -f Pd2O2 --sampler ffpc \
+       --ffpc_terminal_steps 500 --ffpc_terminal_dynamics langevin_md \
+       --ffpc_temperature 0.026
+
+Key ``ffpc`` options:
+
+- ``--ffpc_corrector_steps`` (default ``1``): Langevin corrector iterations per
+  diffusion step.  Set to ``0`` to disable the corrector (pure EM + terminal steps only).
+- ``--ffpc_corrector_step_size`` (default ``1e-3``): step size for the corrector.
+- ``--ffpc_zeta`` (default ``1.0``): exponent for the force-field mixing schedule
+  ``f(t) = (1-t)^ζ``; higher values concentrate force-field influence near the end.
+- ``--ffpc_temperature`` (default ``1.0``): temperature *T* for the terminal phase.
+  For overdamped this scales the noise amplitude; for ``langevin_md`` this is
+  k\ :sub:`B`\ T in the same units as model forces (e.g. eV).
+- ``--ffpc_terminal_steps`` (default ``0``, disabled): number of post-diffusion
+  terminal dynamics steps.
+- ``--ffpc_terminal_dynamics`` (``overdamped`` / ``langevin_md``): dynamics mode for
+  the terminal phase.  ``overdamped`` uses gradient-based Langevin without momenta;
+  ``langevin_md`` uses the BAOAB integrator with real ASE atomic masses and
+  Maxwell-Boltzmann velocity initialisation.
+- ``--ffpc_terminal_step_size``: step size for the terminal phase.  Auto-selected
+  when not specified (``1e-3`` for overdamped, ``1.0`` fs for langevin_md).
+- ``--ffpc_terminal_friction``: friction coefficient γ for ``langevin_md``
+  (units: 1/terminal_step_size).  Auto-selected when not specified (γ·dt = 0.1).
+
 Force-field guided training and sampling
 -----------------------------------------
 

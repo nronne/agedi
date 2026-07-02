@@ -156,6 +156,130 @@ Similar to the CLI, this samples using the ``last_model.ckpt`` checkpoint found 
 specify the exact path to it when calling :func:`~agedi.functional.load_diffusion`.
 
 
+Choosing a sampler
+-------------------
+
+Pass ``sampler`` to :func:`~agedi.functional.sample` to select the
+reverse-diffusion algorithm:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 80
+
+   * - ``sampler``
+     - Description
+   * - ``None`` (default)
+     - Euler–Maruyama (EM): one score evaluation per step
+   * - ``"em"``
+     - Euler–Maruyama (explicit alias)
+   * - ``"pc"``
+     - Predictor-corrector: EM predictor + Langevin corrector steps at t_{i-1}
+   * - ``"heun"``
+     - 2nd-order stochastic (Karras et al. 2022): two score evaluations per step
+   * - ``"ddim"``
+     - Deterministic probability-flow ODE: no noise, fully reproducible
+   * - ``"heun_ode"``
+     - 2nd-order deterministic ODE (Heun's method on the PF-ODE)
+   * - ``"ffpc"``
+     - Force-field augmented predictor-corrector (requires a force-field head)
+
+.. code-block:: python
+
+   structures = sample(diffusion, n_samples=10, formula="Pd2O2",
+                       template=template, sampler="heun", steps=200)
+
+Additional keyword arguments are passed via ``sampler_kwargs``:
+
+.. code-block:: python
+
+   structures = sample(
+       diffusion, n_samples=10, formula="Pd2O2", template=template,
+       sampler="pc",
+       sampler_kwargs=dict(corrector_steps=3, corrector_step_size=1e-3),
+   )
+
+You can also pass a :class:`~agedi.diffusion.samplers.Sampler` instance
+directly instead of a string alias:
+
+.. code-block:: python
+
+   from agedi.diffusion.samplers import HeunSampler
+
+   sampler = HeunSampler(diffusion.score_model, diffusion.noisers)
+   structures = sample(diffusion, n_samples=10, formula="Pd2O2",
+                       template=template, sampler=sampler)
+
+Force-field augmented sampling (``ffpc``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``ffpc`` sampler blends the neural score with the force-field gradient
+during the corrector phase:
+
+.. math::
+
+   \tilde{s}(x, t) = (1 - f(t))\,s_\theta(x) + f(t)\,F(x)
+
+where :math:`f(t) = (1-t)^\zeta`.  It optionally runs additional Langevin
+dynamics after the last diffusion step via ``terminal_steps``:
+
+.. code-block:: python
+
+   from agedi import load_diffusion, sample
+
+   diffusion = load_diffusion("logs/agedi/version_0")
+
+   # EM predictor + force-field augmented Langevin corrector
+   structures = sample(
+       diffusion, n_samples=10, formula="Pd2O2", template=template,
+       sampler="ffpc",
+       sampler_kwargs=dict(corrector_steps=1, mixing_zeta=1.0),
+   )
+
+   # Add overdamped Langevin terminal steps for extra relaxation at 300 K
+   structures = sample(
+       diffusion, n_samples=10, formula="Pd2O2", template=template,
+       sampler="ffpc",
+       sampler_kwargs=dict(
+           corrector_steps=0,
+           terminal_steps=200,
+           terminal_dynamics="overdamped",
+           temperature=0.026,          # eV ≈ 300 K
+           # terminal_step_size auto-selected (1e-3, T-independent)
+       ),
+   )
+
+   # BAOAB Langevin MD terminal steps with real atomic masses
+   structures = sample(
+       diffusion, n_samples=10, formula="Pd2O2", template=template,
+       sampler="ffpc",
+       sampler_kwargs=dict(
+           corrector_steps=0,
+           terminal_steps=500,
+           terminal_dynamics="langevin_md",
+           temperature=0.026,          # eV ≈ 300 K
+           # terminal_step_size auto-selected (1.0 fs for eV/Å models)
+           # terminal_friction  auto-selected (γ·dt = 0.1)
+       ),
+       save_trajectory=True,           # includes bridge + terminal frames
+   )
+
+With ``save_trajectory=True`` the returned list contains one trajectory per
+sample.  Each trajectory has ``steps + 1 + terminal_steps`` frames: the
+pre-step diffusion frames, a bridge frame (the denoised structure before
+terminal dynamics), and then the terminal step frames.
+
+Full list of ``ffpc`` kwargs:
+
+- ``corrector_steps`` (default ``1``): corrector iterations per diffusion step
+- ``corrector_step_size`` (default ``1e-3``): Langevin corrector step size
+- ``mixing_zeta`` (default ``1.0``): mixing schedule exponent
+- ``temperature`` (default ``1.0``): temperature for terminal dynamics
+- ``terminal_steps`` (default ``0``): post-diffusion terminal steps; ``0`` disables
+- ``terminal_dynamics`` (default ``"overdamped"``): ``"overdamped"`` or ``"langevin_md"``
+- ``terminal_step_size`` (default ``None``): auto-selected per mode
+- ``terminal_friction`` (default ``None``): auto-selected (``langevin_md`` only)
+
+
 Force-field training and prediction
 -------------------------------------
 
