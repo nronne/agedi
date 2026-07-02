@@ -100,15 +100,11 @@ def sample(
 
     _ff = ff_guidance if ff_guidance is not None else ForcefieldGuidanceConfig()
 
-    # Determine display name for the sampler.
+    # Determine display name for the top-level sampler algorithm.
     if sampler is not None:
         _sampler = sampler if isinstance(sampler, str) else type(sampler).__name__
     else:
-        _sampler = None
-        for _n in diffusion.noisers:
-            if hasattr(_n, "sampler"):
-                _sampler = _n.sampler
-                break
+        _sampler = None  # default (EM) — not shown separately
 
     _print_sampling_config(
         n_samples=n_samples,
