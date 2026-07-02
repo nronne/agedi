@@ -115,7 +115,8 @@ class ForcefieldCorrectorSampler(Sampler):
           the Ornstein-Uhlenbeck step and the Maxwell-Boltzmann velocity
           initialisation.
 
-        Default: ``1.0``.
+        Default: ``None`` — falls back to ``1.0`` with a :class:`UserWarning`
+        reminding you to set an explicit value.
     terminal_steps : int
         Number of refinement steps applied after the last diffusion step.
         ``0`` (default) disables them.
@@ -167,12 +168,22 @@ class ForcefieldCorrectorSampler(Sampler):
         corrector_steps: int = 1,
         corrector_step_size: float = 1e-3,
         mixing_zeta: float = 1.0,
-        temperature: float = 1.0,
+        temperature: Optional[float] = None,
         terminal_steps: int = 0,
         terminal_step_size: Optional[float] = None,
         terminal_dynamics: Literal["overdamped", "langevin_md"] = "overdamped",
         terminal_friction: Optional[float] = None,
     ) -> None:
+        if temperature is None:
+            import warnings
+            warnings.warn(
+                "ForcefieldCorrectorSampler: temperature not set, defaulting to 1.0. "
+                "For physical terminal dynamics set temperature to k_B·T in the same "
+                "units as your model forces (e.g. 0.026 eV for 300 K).",
+                UserWarning,
+                stacklevel=2,
+            )
+            temperature = 1.0
         super().__init__(score_fn, noisers)
         self.regressor_fn = regressor_fn
         self.corrector_steps = corrector_steps
