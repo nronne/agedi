@@ -905,6 +905,14 @@ class Diffusion:
                         batch.wrap_positions()
                         batch.update_graph()
 
+                # Append terminal frames (e.g. from ForcefieldCorrectorSampler)
+                # to the trajectory.  These are produced inside sampler.step()
+                # on the last diffusion step and exposed via _pending_frames.
+                if save_trajectory:
+                    pending = getattr(_sampler, "_pending_frames", None)
+                    if pending:
+                        path.extend(pending)
+
         # Restore original score_fn / regressor_fn if they were wrapped for counting.
         if _orig_score_fn is not None:
             _sampler.score_fn = _orig_score_fn

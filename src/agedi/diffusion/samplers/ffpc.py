@@ -171,6 +171,9 @@ class ForcefieldCorrectorSampler(Sampler):
         # Cache the positions noiser for overdamped terminal steps.
         self._pos_noiser = next((n for n in noisers if n.key == "pos"), None)
         self._corrector_dt: Optional[torch.Tensor] = None
+        # Terminal frames collected during the last step; consumed by _sample_batch
+        # to extend the saved trajectory.  Cleared at the start of every step().
+        self._pending_frames: List = []
 
     def step(
         self,
@@ -185,8 +188,11 @@ class ForcefieldCorrectorSampler(Sampler):
         3. For each corrector iteration: evaluate neural score, blend with
            force-field gradient, apply Langevin step.
         4. If ``last`` and ``terminal_steps > 0``: terminal phase with the
-           chosen dynamics.
+           chosen dynamics.  Intermediate frames are stored in
+           :attr:`_pending_frames` for trajectory capture.
         """
+        self._pending_frames.clear()
+
         # --- Step 1: EM predictor (neural score only) ---
         batch = self.score_fn(batch)
         for noiser in self.noisers[::-1]:
@@ -262,6 +268,7 @@ class ForcefieldCorrectorSampler(Sampler):
             batch.wrap_positions()
             self._check_finite(batch, "FFPC terminal overdamped Langevin step")
             batch.update_graph()
+            self._pending_frames.append(batch.to_data_list())
 
     def _terminal_langevin_md(self, batch: "AtomsGraph") -> None:
         """Standard Langevin MD terminal steps (BAOAB, real atomic masses).
@@ -315,6 +322,7 @@ class ForcefieldCorrectorSampler(Sampler):
             batch.wrap_positions()
             self._check_finite(batch, "FFPC terminal Langevin MD step (BAOAB)")
             batch.update_graph()
+            self._pending_frames.append(batch.to_data_list())
 
             # Recompute forces at the new position.
             batch = self.regressor_fn(batch)
