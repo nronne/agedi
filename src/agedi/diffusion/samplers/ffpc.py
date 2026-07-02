@@ -34,11 +34,13 @@ class ForcefieldCorrectorSampler(Sampler):
 
     .. math::
 
-        \\tilde{s}(x, t) = (1 - f(t))\\, s_\\theta(x) + f(t)\\, F(x) / T
+        \\tilde{s}(x, t) = (1 - f(t))\\, s_\\theta(x) + f(t)\\, F(x)
 
     where :math:`f(t) = (1 - t)^\\zeta` increases as :math:`t \\to 0`, so the
     force field has no influence at the start of sampling and full influence at
-    the end.
+    the end.  Temperature is **not** applied here; the relative weight of the
+    force field is controlled entirely by ``mixing_zeta`` and
+    ``corrector_step_size``.
 
     **Terminal phase** (optional) — applies ``terminal_steps`` additional
     refinement steps after the last diffusion step using only the force field.
@@ -48,8 +50,14 @@ class ForcefieldCorrectorSampler(Sampler):
 
     .. math::
 
-        x_{n+1} = x_n + \\frac{\\Delta t}{T}\\, F(x_n)
-                       + \\sqrt{\\frac{2\\Delta t}{T}}\\, z
+        x_{n+1} = x_n + \\varepsilon\\, F(x_n) + \\sqrt{2\\varepsilon T}\\, z
+
+    where :math:`\\varepsilon = \\texttt{terminal\\_step\\_size}` is a
+    **reduced step** :math:`\\varepsilon = \\Delta t / T`.  This parameterization
+    gives T-independent stability (condition: :math:`\\varepsilon < 2/k_{\\max}`)
+    while preserving the correct Boltzmann stationary distribution
+    :math:`\\propto \\exp(-U / T)` through the :math:`\\sqrt{T}` factor in the
+    noise amplitude.
 
     *langevin_md* — standard Langevin MD (BAOAB integrator) with atomic masses
     from ASE.  Momenta are initialised from the Maxwell-Boltzmann distribution
@@ -96,39 +104,46 @@ class ForcefieldCorrectorSampler(Sampler):
         ``1.0`` (default) gives linear mixing; higher values concentrate
         force-field influence near the end of the trajectory.
     temperature : float
-        Temperature *T* scaling the force contribution in the augmented score
-        and the diffusion constant / noise amplitude in the terminal steps.
-        For *overdamped* terminal dynamics this is a dimensionless scale; for
-        *langevin_md* it is the thermal energy :math:`k_B T` in the same units
-        as the model forces (typically eV).  Default: ``1.0``.
+        Temperature *T* used **only** in the terminal phase (not in the
+        corrector steps, where dividing forces by T causes blowup at low T).
+
+        * *overdamped*: appears as :math:`\\sqrt{T}` in the noise amplitude
+          (see the update rule above) to preserve the correct Boltzmann
+          distribution.  The step-size stability bound is T-independent.
+        * *langevin_md*: the thermal energy :math:`k_B T` in the same units
+          as the model forces (typically eV).  Sets the noise amplitude in
+          the Ornstein-Uhlenbeck step and the Maxwell-Boltzmann velocity
+          initialisation.
+
+        Default: ``1.0``.
     terminal_steps : int
         Number of refinement steps applied after the last diffusion step.
         ``0`` (default) disables them.
-    terminal_step_size : float
+    terminal_step_size : float or None
         Step size for each terminal step.
 
-        * *overdamped*: dimensionless gradient-descent step.  ``1e-3``
-          (default) is a conservatively small starting point; stability
-          requires ``terminal_step_size < 2·T``.
+        * *overdamped*: the **reduced step** :math:`\\varepsilon = \\Delta t / T`.
+          Stability requires :math:`\\varepsilon < 2 / k_{\\max}` where
+          :math:`k_{\\max}` is the largest force-constant eigenvalue — a bound
+          that is independent of *T*.  ``None`` (default) auto-selects
+          ``1e-3``, which is conservative for most force fields.
         * *langevin_md*: physical time step in units consistent with the
           model forces and ASE masses.  When forces are in eV/Å and masses
-          in amu the unit is femtoseconds; a typical value is ``1.0`` (1 fs).
-          The default ``1e-3`` is far too small for this mode — always set
-          it explicitly when using ``terminal_dynamics="langevin_md"``.
+          in amu the unit is femtoseconds.  ``None`` (default) auto-selects
+          ``1.0`` (1 fs), a safe starting point for typical ML potentials.
     terminal_dynamics : ``"overdamped"`` or ``"langevin_md"``
         Dynamics used for the terminal phase.  ``"overdamped"`` (default) uses
         overdamped Langevin (no momenta).  ``"langevin_md"`` uses standard
         Langevin MD (BAOAB) with real atomic masses from ASE and momenta
         initialised from the Maxwell-Boltzmann distribution.
-    terminal_friction : float
+    terminal_friction : float or None
         Friction coefficient :math:`\\gamma` for the Langevin thermostat in
-        *langevin_md* dynamics (ignored for *overdamped*).  Units are
-        ``1/terminal_step_size``; when ``terminal_step_size`` is in fs a
-        physically reasonable range is ``0.001``–``0.1`` fs⁻¹
-        (1–100 ps⁻¹).  Higher values give heavier damping and faster
-        thermalisation at the cost of slower diffusion.  Default: ``1.0``
-        (very high damping — suitable only if ``terminal_step_size`` is
-        already in ps or larger units).
+        *langevin_md* dynamics (ignored for *overdamped*).  Units are the
+        inverse of ``terminal_step_size``; when ``terminal_step_size`` is in
+        fs a physically reasonable range is ``0.001``–``0.1`` fs⁻¹
+        (1–100 ps⁻¹).  ``None`` (default) auto-selects
+        :math:`\\gamma = 0.1 / \\Delta t`, giving a dimensionless reduced
+        friction :math:`\\gamma \\Delta t = 0.1` (moderately damped).
 
     String alias
     ------------
@@ -154,9 +169,9 @@ class ForcefieldCorrectorSampler(Sampler):
         mixing_zeta: float = 1.0,
         temperature: float = 1.0,
         terminal_steps: int = 0,
-        terminal_step_size: float = 1e-3,
+        terminal_step_size: Optional[float] = None,
         terminal_dynamics: Literal["overdamped", "langevin_md"] = "overdamped",
-        terminal_friction: float = 1.0,
+        terminal_friction: Optional[float] = None,
     ) -> None:
         super().__init__(score_fn, noisers)
         self.regressor_fn = regressor_fn
@@ -228,7 +243,7 @@ class ForcefieldCorrectorSampler(Sampler):
                 f_t = (1.0 - batch.time).clamp(min=0.0).pow(self.mixing_zeta)
                 batch["pos_score"] = (
                     (1.0 - f_t) * batch["pos_score"]
-                    + f_t * batch["forces_prediction"] / self.temperature
+                    + f_t * batch["forces_prediction"]
                 )
             for noiser in self.noisers[::-1]:
                 batch = noiser.langevin_step(batch, self._corrector_dt)
@@ -245,27 +260,33 @@ class ForcefieldCorrectorSampler(Sampler):
     def _run_terminal(self, batch: "AtomsGraph") -> None:
         """Dispatch to the selected terminal dynamics.
 
-        Always prepends the pre-terminal (fully denoised) frame to
-        ``_pending_frames`` so that saved trajectories include the bridge
-        between the last diffusion step and the first terminal step.
+        Prepends a bridge frame (the denoised state before terminal dynamics
+        start) unless corrector frames already captured it as their last
+        entry — which is the case when ``corrector_steps > 0``.
         """
-        self._pending_frames.append(batch.to_data_list())
+        if not self._pending_frames:
+            self._pending_frames.append(batch.to_data_list())
         if self.terminal_dynamics == "langevin_md":
             self._terminal_langevin_md(batch)
         else:
             self._terminal_overdamped(batch)
 
     def _terminal_overdamped(self, batch: "AtomsGraph") -> None:
-        """Overdamped Langevin terminal steps (no momenta)."""
-        step_over_T = self.terminal_step_size / self.temperature
+        """Overdamped Langevin terminal steps (no momenta).
+
+        ``terminal_step_size`` is the reduced step ε = dt/T.
+        Update: x += ε·F + sqrt(2εT)·z, giving stationary ∝ exp(-U/T).
+        Stability condition: ε < 2/k_max, independent of T.
+        """
+        eps = self.terminal_step_size if self.terminal_step_size is not None else 1e-3
         noise_std = torch.tensor(
-            math.sqrt(2.0 * step_over_T),
+            math.sqrt(2.0 * eps * self.temperature),
             dtype=batch.pos.dtype,
             device=batch.pos.device,
         )
         for _ in range(self.terminal_steps):
             batch = self.regressor_fn(batch)
-            mean = batch.pos + step_over_T * batch.forces_prediction
+            mean = batch.pos + eps * batch.forces_prediction
             if self._pos_noiser is not None:
                 w = self._pos_noiser.distribution.get_callable(batch)
                 batch.pos = w(mean, noise_std)
@@ -302,8 +323,15 @@ class ForcefieldCorrectorSampler(Sampler):
         vel -= (masses * vel).sum(0, keepdim=True) / masses.sum()
 
         # BAOAB Langevin thermostat constants.
-        dt = self.terminal_step_size
-        alpha = math.exp(-self.terminal_friction * dt)
+        # terminal_step_size=None → 1.0 (e.g. 1 fs for eV/Å + amu force fields)
+        # terminal_friction=None → γ·dt = 0.1 (moderately damped)
+        dt = self.terminal_step_size if self.terminal_step_size is not None else 1.0
+        gamma = (
+            self.terminal_friction
+            if self.terminal_friction is not None
+            else (0.1 / dt)
+        )
+        alpha = math.exp(-gamma * dt)
         # Per-atom noise std for the O step: sqrt(kT / m * (1 - alpha^2))
         sigma_ou = torch.sqrt(
             self.temperature / masses * (1.0 - alpha ** 2)

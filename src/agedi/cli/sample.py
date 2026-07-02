@@ -136,7 +136,7 @@ click.rich_click.OPTION_GROUPS.update(
     type=float,
     default=1.0,
     show_default=True,
-    help="Temperature T scaling the force-field contribution in the ffpc blended score and terminal Langevin noise.",
+    help="Temperature T for the ffpc terminal phase (not applied in the corrector). For overdamped: sets noise amplitude sqrt(2εT) while step size ε stays T-independent. For langevin_md: kBT in the same units as model forces.",
 )
 @click.option(
     "--ffpc_terminal_steps",
@@ -148,13 +148,12 @@ click.rich_click.OPTION_GROUPS.update(
 @click.option(
     "--ffpc_terminal_step_size",
     type=float,
-    default=1e-3,
-    show_default=True,
+    default=None,
+    show_default=False,
     help=(
-        "Step size for the terminal corrector (ffpc only). "
-        "For overdamped: dimensionless, ~1e-3 is a safe start. "
-        "For langevin_md: physical time step — typically 1.0 fs when forces are in eV/Å. "
-        "The default 1e-3 is too small for langevin_md; set this explicitly."
+        "Step size for the ffpc terminal phase. "
+        "For overdamped: dimensionless reduced step ε (T-independent); auto-default 1e-3. "
+        "For langevin_md: physical time step (e.g. 1.0 fs for eV/Å forces); auto-default 1.0."
     ),
 )
 @click.option(
@@ -172,13 +171,12 @@ click.rich_click.OPTION_GROUPS.update(
 @click.option(
     "--ffpc_terminal_friction",
     type=float,
-    default=1.0,
-    show_default=True,
+    default=None,
+    show_default=False,
     help=(
-        "Friction coefficient γ for the Langevin thermostat (ffpc langevin_md only). "
+        "Friction coefficient γ for the ffpc langevin_md terminal thermostat (ignored for overdamped). "
         "Units: 1/terminal_step_size. When terminal_step_size is in fs, typical range is "
-        "0.001–0.1 fs⁻¹ (1–100 ps⁻¹). Default 1.0 is very high damping; only reasonable "
-        "with a step size in ps or larger."
+        "0.001–0.1 fs⁻¹ (1–100 ps⁻¹). Auto-default: γ·dt = 0.1 (moderately damped)."
     ),
 )
 @click.option("--progress_bar", is_flag=True, help="Show progress bar")

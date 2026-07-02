@@ -98,8 +98,8 @@ Sampler.register(
     lambda score_fn, noisers,
     regressor_fn=None, corrector_steps=1, corrector_step_size=1e-3,
     mixing_zeta=1.0, temperature=1.0,
-    terminal_steps=0, terminal_step_size=1e-3,
-    terminal_dynamics="overdamped", terminal_friction=1.0, **kw:
+    terminal_steps=0, terminal_step_size=None,
+    terminal_dynamics="overdamped", terminal_friction=None, **kw:
     ForcefieldCorrectorSampler(
         score_fn,
         noisers,
