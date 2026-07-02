@@ -173,6 +173,12 @@ class ForcefieldCorrectorSampler(Sampler):
         terminal_dynamics: Literal["overdamped", "langevin_md"] = "overdamped",
         terminal_friction: Optional[float] = None,
     ) -> None:
+        if temperature is None or temperature <= 0:
+            raise ValueError(
+                f"temperature must be a positive float, got {temperature!r}. "
+                "Set temperature to the desired thermal energy (e.g. 0.026 eV "
+                "for 300 K when forces are in eV/Å)."
+            )
         super().__init__(score_fn, noisers)
         self.regressor_fn = regressor_fn
         self.corrector_steps = corrector_steps
