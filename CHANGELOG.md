@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `save_trajectory` no longer appends a duplicate final frame when
   post-diffusion relaxation ran; the relaxation loop already captured that
   state.
+- Post-diffusion relaxation is no longer gated on `guidance > 0`.
+  `ForcefieldGuidanceConfig(guidance=0.0, max_extra_steps=200)` previously did
+  nothing at all; `max_extra_steps` now enables relaxation on its own, so the
+  final structures can be relaxed without guidance perturbing the diffusion
+  trajectory.  A persistent L-BFGS step sizer is allocated in that case too —
+  without one, each relaxation step built a throwaway sizer and no curvature
+  history accumulated.
 - `ForcefieldCorrectorSampler` now emits a `UserWarning` when the diffusion
   model has no regressor (forces) head.  Previously `sampler="ffpc"` on a
   score-only model silently dropped both the terminal dynamics and the

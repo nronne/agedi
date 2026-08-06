@@ -945,3 +945,127 @@ class TestMissingRegressorWarning:
                 sampler="ffpc",
                 sampler_kwargs={"terminal_steps": 5, "temperature": 0.5},
             )
+
+
+class TestPostDiffusionRelaxation:
+    """Relaxation is driven by max_extra_steps, not by the guidance scale."""
+
+    @staticmethod
+    def _unconverged_regressor(batch):
+        """Constant forces well above any threshold, so relaxation never converges."""
+        batch["forces_prediction"] = torch.ones_like(batch.pos)
+        return batch
+
+    def _sample(self, diffusion, guidance, max_extra_steps, steps=3, **kw):
+        from agedi.diffusion import ForcefieldGuidanceConfig
+
+        diffusion.regressor_model = self._unconverged_regressor
+        try:
+            return diffusion.sample(
+                1,
+                steps=steps,
+                atomic_numbers=[6, 8, 8],
+                cell=np.diag([10.0, 10.0, 10.0]),
+                property={"property": 1.0},
+                save_trajectory=True,
+                ff_guidance=ForcefieldGuidanceConfig(
+                    guidance=guidance,
+                    force_threshold=0.05,
+                    max_extra_steps=max_extra_steps,
+                ),
+                **kw,
+            )[0]
+        finally:
+            diffusion.regressor_model = None
+
+    def test_relaxation_runs_without_guidance(self, diffusion):
+        """max_extra_steps alone triggers relaxation; it used to be a silent no-op."""
+        steps, extra = 3, 5
+        traj = self._sample(diffusion, guidance=0.0, max_extra_steps=extra)
+        # steps pre-step frames + extra relaxation frames; the last relaxation
+        # frame is the final structure, so nothing is appended after it.
+        assert len(traj) == steps + extra
+
+    def test_no_relaxation_when_max_extra_steps_zero(self, diffusion):
+        """Without relaxation steps the trajectory is just the diffusion path."""
+        steps = 3
+        traj = self._sample(diffusion, guidance=0.0, max_extra_steps=0)
+        assert len(traj) == steps + 1
+
+    def test_guidance_still_triggers_relaxation(self, diffusion):
+        """The original guidance-driven path is unchanged."""
+        steps, extra = 3, 5
+        traj = self._sample(diffusion, guidance=1.0, max_extra_steps=extra)
+        assert len(traj) == steps + extra
+
+    def test_relaxation_without_guidance_gets_persistent_step_sizer(self, diffusion):
+        """A persistent L-BFGS sizer is allocated so curvature history accumulates.
+
+        Without it, post_diffusion_relaxation_step builds a throwaway sizer on
+        every call and the relaxation degenerates to fixed-size steps.
+        """
+        self._sample(diffusion, guidance=0.0, max_extra_steps=5)
+        assert diffusion.lbfgs_step_sizer is not None
+
+    def test_relaxation_runs_with_ffpc(self, diffusion):
+        """Relaxation composes with a sampler that has its own force-field use."""
+        steps, extra = 3, 5
+        traj = self._sample(
+            diffusion,
+            guidance=0.0,
+            max_extra_steps=extra,
+            steps=steps,
+            sampler="ffpc",
+            sampler_kwargs={
+                "corrector_steps": 1,
+                "terminal_steps": 0,
+                "temperature": 0.5,
+            },
+        )
+        assert len(traj) == steps + extra
+
+    def test_relaxation_skipped_when_already_converged(self, diffusion):
+        """Structures below force_threshold need no relaxation steps."""
+        from agedi.diffusion import ForcefieldGuidanceConfig
+
+        def _converged(batch):
+            batch["forces_prediction"] = torch.zeros_like(batch.pos)
+            return batch
+
+        steps = 3
+        diffusion.regressor_model = _converged
+        try:
+            traj = diffusion.sample(
+                1,
+                steps=steps,
+                atomic_numbers=[6, 8, 8],
+                cell=np.diag([10.0, 10.0, 10.0]),
+                property={"property": 1.0},
+                save_trajectory=True,
+                ff_guidance=ForcefieldGuidanceConfig(
+                    guidance=0.0, force_threshold=0.05, max_extra_steps=5
+                ),
+            )[0]
+        finally:
+            diffusion.regressor_model = None
+
+        assert len(traj) == steps + 1
+
+    def test_no_relaxation_without_regressor(self, diffusion):
+        """max_extra_steps cannot relax a model that has no forces head."""
+        from agedi.diffusion import ForcefieldGuidanceConfig
+
+        assert diffusion.regressor_model is None
+        steps = 3
+        traj = diffusion.sample(
+            1,
+            steps=steps,
+            atomic_numbers=[6, 8, 8],
+            cell=np.diag([10.0, 10.0, 10.0]),
+            property={"property": 1.0},
+            save_trajectory=True,
+            ff_guidance=ForcefieldGuidanceConfig(
+                guidance=0.0, force_threshold=0.05, max_extra_steps=5
+            ),
+        )[0]
+        assert len(traj) == steps + 1

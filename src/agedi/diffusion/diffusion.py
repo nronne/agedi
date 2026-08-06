@@ -805,8 +805,12 @@ class Diffusion:
                 f"Got sampler={sampler!r}. Either set compile=False or remove the sampler argument."
             )
 
+        # max_extra_steps is included so that post-diffusion relaxation gets a
+        # persistent step sizer even with guidance disabled.  Without one,
+        # post_diffusion_relaxation_step builds a throwaway sizer per call and
+        # no curvature history ever accumulates.
         needs_lbfgs = (
-            (force_field_guidance > 0 or (
+            (force_field_guidance > 0 or max_extra_steps > 0 or (
                 _sampler is not None and _sampler.uses_force_field
             ))
             and self.regressor_model is not None
@@ -948,8 +952,14 @@ class Diffusion:
         if _orig_regressor_fn is not None:
             _sampler.regressor_fn = _orig_regressor_fn
 
-        # Optional post-diffusion relaxation
-        if force_field_guidance > 0 and self.regressor_model is not None:
+        # Optional post-diffusion relaxation.  Independent of guidance: asking
+        # for relaxation steps is enough to get them, so a clean diffusion
+        # trajectory can still be relaxed at the end.  The guidance term is
+        # retained in the condition because it also populates
+        # ``forces_prediction`` on the returned structures.
+        if (
+            force_field_guidance > 0 or max_extra_steps > 0
+        ) and self.regressor_model is not None:
             # Reset LBFGS memory: history from the noisy diffusion trajectory
             # carries stale curvature information that corrupts relaxation steps.
             if self.lbfgs_step_sizer is not None:

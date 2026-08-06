@@ -35,8 +35,13 @@ class ForcefieldGuidanceConfig:
         Convergence criterion for the optional post-diffusion relaxation: the
         maximum per-atom force magnitude (eV/Å) below which relaxation stops.
     max_extra_steps : int
-        Maximum number of additional relaxation steps performed after the
-        main diffusion trajectory when ``guidance > 0``.
+        Maximum number of L-BFGS relaxation steps performed after the main
+        diffusion trajectory.  Independent of ``guidance``: set this alone to
+        relax the final structures without perturbing the diffusion trajectory
+        itself.  Relaxation stops early once the maximum per-atom force drops
+        below ``force_threshold``, and is skipped entirely if the structures
+        are already converged.  Requires a model with a regressor (forces)
+        head.  ``0`` (the default) disables it.
     """
 
     guidance: float = 0.0

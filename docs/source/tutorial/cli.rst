@@ -323,8 +323,39 @@ In Python this is equivalent to:
 - ``zeta`` (float): time-weight exponent ``(1-t)**zeta``; default ``3.0``.
 - ``force_threshold`` (float): convergence criterion (max per-atom force in eV/Å)
   for the optional post-diffusion relaxation; default ``0.05``.
-- ``max_extra_steps`` (int): maximum extra relaxation steps performed after the main
-  diffusion trajectory when ``guidance > 0``; default ``0`` (disabled).
+- ``max_extra_steps`` (int): maximum L-BFGS relaxation steps performed after the main
+  diffusion trajectory; default ``0`` (disabled).
+
+Relaxing without guidance
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``max_extra_steps`` is independent of ``guidance``.  Set it alone to relax the
+final structures while leaving the diffusion trajectory itself untouched:
+
+.. code-block:: python
+
+   structures = sample(
+       diffusion,
+       n_samples=10,
+       formula="Pd2O2",
+       ff_guidance=ForcefieldGuidanceConfig(
+           guidance=0.0,           # no guidance during diffusion
+           max_extra_steps=200,    # L-BFGS relaxation afterwards
+           force_threshold=0.05,   # stop early once forces drop below this
+       ),
+   )
+
+Relaxation stops as soon as the maximum per-atom force falls below
+``force_threshold``, and is skipped entirely when the structures are already
+converged.  It requires a model with a regressor (forces) head.  With
+``save_trajectory=True`` the relaxation steps appear as extra frames at the end
+of each trajectory.
+
+Note that guidance and the ``ffpc`` sampler both apply the same force field by
+different routes — ``ffpc`` blends forces into the corrector score, guidance
+takes a separate L-BFGS-sized step after each sampler step, each on its own
+``zeta`` schedule.  Combining them compounds the force-field pull in a way
+neither parameter's default accounts for; prefer one mechanism at a time.
 
 Predicting energies and forces
 -------------------------------
