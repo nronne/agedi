@@ -345,11 +345,24 @@ final structures while leaving the diffusion trajectory itself untouched:
        ),
    )
 
-Relaxation stops as soon as the maximum per-atom force falls below
-``force_threshold``, and is skipped entirely when the structures are already
-converged.  It requires a model with a regressor (forces) head.  With
-``save_trajectory=True`` the relaxation steps appear as extra frames at the end
-of each trajectory.
+Each step is one :class:`ase.optimize.LBFGS` step, applied to every structure
+in the batch independently and with ASE's defaults (``maxstep=0.2 Å``,
+``memory=100``, ``alpha=70``).  Relaxation stops as soon as the maximum
+per-atom force falls below ``force_threshold``, and is skipped entirely when
+the structures are already converged.  It requires a model with a regressor
+(forces) head.  With ``save_trajectory=True`` the relaxation steps appear as
+extra frames at the end of each trajectory.
+
+Pick ``force_threshold`` to suit the model, not the DFT convention.  The
+default ``0.05`` eV/Å assumes the regressor can resolve near-zero forces, which
+requires relaxed structures in its training set.  A model trained only on
+high-force configurations cannot predict forces below the range it has seen, so
+relaxation will plateau above the threshold and always consume every step.
+Compare against the force distribution of the training data before choosing a
+value.  Note also that the ``Forces`` head predicts forces directly rather than
+as :math:`-\partial E/\partial R`, so the predicted field is not conservative
+and has no exact zero-force fixed point; over many steps the relaxation can
+drift away from the lowest-energy structure it visited.
 
 Note that guidance and the ``ffpc`` sampler both apply the same force field by
 different routes — ``ffpc`` blends forces into the corrector score, guidance

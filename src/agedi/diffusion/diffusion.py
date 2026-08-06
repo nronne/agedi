@@ -438,16 +438,21 @@ class Diffusion:
     def post_diffusion_relaxation_step(
         self,
         batch: AtomsGraph,
-        scale: float = 0.1,
+        scale: float = 1.0,
+        max_step_size: float = 0.2,
     ) -> AtomsGraph:
-        """Perform a pure force-based relaxation step.
+        """Perform one L-BFGS relaxation step, as ``ase.optimize.LBFGS`` would.
 
         Parameters
         ----------
         batch : AtomsGraph
             A batch of AtomsGraph data.
         scale : float, optional
-            Step size scaling factor.
+            Multiplier on the computed step (ASE's ``damping``).  Defaults to
+            ``1.0``: take the full L-BFGS step.
+        max_step_size : float, optional
+            Maximum single-atom displacement per step, in Å.  Defaults to
+            ``0.2``, matching ASE.
 
         Returns
         -------
@@ -459,6 +464,7 @@ class Diffusion:
             self.regressor_model,
             self.lbfgs_step_sizer,
             scale=scale,
+            max_step_size=max_step_size,
         )
 
     # ------------------------------------------------------------------
@@ -994,8 +1000,11 @@ class Diffusion:
                 )
 
                 for i in extra_iterator:
+                    # Full L-BFGS step (ASE damping=1.0).  Scaling the step
+                    # down here would slow convergence without improving
+                    # stability — the maxstep limit is what bounds the step.
                     if timings is None:
-                        batch = self.post_diffusion_relaxation_step(batch, scale=0.1)
+                        batch = self.post_diffusion_relaxation_step(batch)
                     else:
                         batch = self._time_sampling_call(
                             batch.pos.device,
@@ -1003,7 +1012,6 @@ class Diffusion:
                             "post_diffusion_relaxation",
                             self.post_diffusion_relaxation_step,
                             batch,
-                            scale=0.1,
                         )
                         timings.post_diffusion_relaxation_steps += 1
 

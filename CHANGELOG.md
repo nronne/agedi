@@ -22,7 +22,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   helpers on the sampler base class, so custom samplers can contribute
   sub-step frames to the trajectory.
 
+### Changed
+- **`LBFGSStepSizer` now mirrors `ase.optimize.LBFGS`.**  Verified to match
+  ASE's trajectory to float64 precision (`7e-15` over 20 steps on an EMT
+  cluster).  Three deviations were corrected:
+  - The step limit now scales the **whole** displacement by
+    `maxstep / longest_atom_step`, as ASE's `determine_step` does.  It
+    previously rescaled each atom independently, which rotated the search
+    direction instead of shortening the step — and with the old 0.1 Å cap it
+    was engaging on nearly every relaxation step.
+  - The inverse-Hessian seed `H0 = 1/alpha` is now constant, as in ASE.  It was
+    being updated each step by a Barzilai-Borwein estimate, which made the step
+    length oscillate.
+  - Defaults now match ASE: `maxstep=0.2` (was 0.1), `memory=100` (was 10),
+    `alpha=70.0`, `damping=1.0`.  Post-diffusion relaxation takes the full
+    L-BFGS step; it previously scaled every step by 0.1, roughly tenfold
+    slowing convergence.
+
+  `LBFGSStepSizer(memory_size=..., initial_step=...)` becomes
+  `LBFGSStepSizer(memory_size=..., maxstep=..., alpha=..., damping=...)`.
+
 ### Fixed
+- `BatchedLBFGSStepSizer.compute_step` assigned steps to the wrong structures
+  when any graph in the batch had no atoms: results were collected into a list
+  and re-indexed by list position rather than graph id, shifting every
+  subsequent graph's step onto its neighbour.
 - `save_trajectory` no longer appends a duplicate final frame when
   post-diffusion relaxation ran; the relaxation loop already captured that
   state.

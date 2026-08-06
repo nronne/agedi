@@ -51,108 +51,133 @@ class ForcefieldGuidanceConfig:
 
 
 class LBFGSStepSizer:
-    """L-BFGS approach for determining optimal step sizes in force field guidance."""
+    """L-BFGS optimiser step, mirroring :class:`ase.optimize.LBFGS`.
+
+    The algorithm follows ASE's implementation closely so that relaxation
+    behaves the way users expect from ASE:
+
+    * The inverse-Hessian seed ``H0 = 1/alpha`` is **constant**.  ASE notes
+      that this emulates BFGS and is deliberately never updated; an adaptive
+      Barzilai-Borwein estimate here made the step length oscillate.
+    * The step is limited by scaling the **whole** displacement by a single
+      factor ``maxstep / longest_atom_step`` (ASE's ``determine_step``).
+      Rescaling atoms individually would rotate the search direction away from
+      the eigendirection rather than simply shortening the step.
+    * History pairs are stored unconditionally, as in ASE.
+
+    Like ASE's default ``LBFGS`` (``use_line_search=False``) there is no line
+    search, so the energy is not guaranteed to decrease monotonically; the step
+    cap is what keeps the trajectory stable.
+
+    Parameters
+    ----------
+    memory_size : int, optional
+        Number of history pairs retained.  ASE default: ``100``.
+    maxstep : float, optional
+        Maximum distance any single atom may move in one step, in Å.
+        ASE default: ``0.2``.
+    alpha : float, optional
+        Initial guess for the curvature of the energy surface; the
+        inverse-Hessian seed is ``1/alpha``.  ASE default: ``70.0``.  Lower
+        values take larger steps and converge faster at the cost of stability.
+    damping : float, optional
+        The computed step is multiplied by this before being returned.
+        ASE default: ``1.0``.
+    """
 
     def __init__(
         self,
-        memory_size: int = 10,
-        initial_step: float = 0.1,
-        device: str = "cuda",
+        memory_size: int = 100,
+        maxstep: float = 0.2,
+        alpha: float = 70.0,
+        damping: float = 1.0,
     ) -> None:
-        """Initialize the L-BFGS step sizer.
-
-        Parameters
-        ----------
-        memory_size : int, optional
-            Number of previous iterations to store.
-        initial_step : float, optional
-            Initial step size scaling factor.
-        device : str, optional
-            Computation device (e.g. ``"cuda"`` or ``"cpu"``).
-        """
         self.memory_size = memory_size
-        self.initial_step = initial_step
-        self.device = device
+        self.maxstep = maxstep
+        self.damping = damping
+        # Initial approximation of the inverse Hessian; constant, as in ASE.
+        self.H0 = 1.0 / alpha
 
-        # Storage for position and gradient differences
-        self.s_list = deque(maxlen=memory_size)  # Position differences
-        self.y_list = deque(maxlen=memory_size)  # Gradient (force) differences
-        self.rho_list = deque(maxlen=memory_size)  # ρᵢ = 1/(yᵢᵀsᵢ)
+        self.s_list = deque(maxlen=memory_size)  # position differences
+        self.y_list = deque(maxlen=memory_size)  # gradient differences
+        self.rho_list = deque(maxlen=memory_size)  # 1 / (yᵢ·sᵢ)
 
         self.prev_pos = None
         self.prev_forces = None
-        self.H0_scaling = 1.0  # Initial Hessian approximation scaling
 
-    def compute_step(self, pos: torch.Tensor, forces: torch.Tensor) -> torch.Tensor:
-        """Compute the optimal step using L-BFGS approximation.
+    def compute_step(
+        self,
+        pos: torch.Tensor,
+        forces: torch.Tensor,
+        maxstep: Optional[float] = None,
+    ) -> torch.Tensor:
+        """Compute the L-BFGS displacement for one structure.
 
         Parameters
         ----------
         pos : torch.Tensor
-            Current atomic positions (B×N×3 tensor).
+            Current atomic positions, shape ``(n_atoms, 3)``.
         forces : torch.Tensor
-            Current forces (B×N×3 tensor).
+            Current forces, shape ``(n_atoms, 3)``.  Note these are forces,
+            i.e. the *negative* gradient.
+        maxstep : float, optional
+            Overrides :attr:`maxstep` for this call.
 
         Returns
         -------
         torch.Tensor
-            Optimal step vector (B×N×3 tensor).
+            Displacement to add to *pos*, already step-limited and damped.
         """
-        if self.prev_pos is None or self.prev_forces is None:
-            self.prev_pos = pos.clone().detach()
-            self.prev_forces = forces.clone().detach()
+        # --- Update history (ASE: LBFGS.update) ---
+        if self.prev_pos is not None:
+            s0 = pos - self.prev_pos
+            # We use the gradient, which is minus the force.
+            y0 = self.prev_forces - forces
+            ys = torch.sum(y0 * s0)
+            # ASE stores every pair; guard only against division by zero,
+            # which would poison the whole history with inf.
+            if torch.abs(ys) > 1e-30:
+                self.s_list.append(s0)
+                self.y_list.append(y0)
+                self.rho_list.append(1.0 / ys)
 
-            # First iteration, use simple scaling
-            avg_force_mag = torch.norm(forces, dim=1).mean()
-            adaptive_scale = min(self.initial_step, 0.1 / max(avg_force_mag, 1e-6))
-            initial_step = adaptive_scale * forces
-            return initial_step
-
-        # Compute position and gradient differences
-        s = pos - self.prev_pos  # Position difference
-        y = self.prev_forces - forces  # Force difference (negative gradient)
-
-        # Store differences if they satisfy curvature condition
-        sy = torch.sum(s * y)
-        if sy > 1e-10:  # Ensure positive curvature
-            self.s_list.append(s)
-            self.y_list.append(y)
-            self.rho_list.append(1.0 / sy)
-
-            # Update H0 scaling using Barzilai-Borwein formula
-            self.H0_scaling = sy / torch.sum(y * y)
-
-        # Apply L-BFGS two-loop recursion algorithm
-        q = forces.clone()  # Start with gradient
-        alpha_list = []
-
-        # First loop
+        # --- Two-loop recursion (ASE: LBFGS.step) ---
+        q = -forces.clone()
+        alphas = []
         for i in range(len(self.s_list) - 1, -1, -1):
-            rho = self.rho_list[i]
-            s_i = self.s_list[i]
-            y_i = self.y_list[i]
-            alpha_i = rho * torch.sum(s_i * q)
-            alpha_list.append(alpha_i)
-            q = q - alpha_i * y_i
+            alpha_i = self.rho_list[i] * torch.sum(self.s_list[i] * q)
+            alphas.append(alpha_i)
+            q = q - alpha_i * self.y_list[i]
 
-        # Apply initial Hessian approximation
-        r = self.H0_scaling * q
+        z = self.H0 * q
 
-        # Second loop
         for i in range(len(self.s_list)):
-            rho = self.rho_list[i]
-            s_i = self.s_list[i]
-            y_i = self.y_list[i]
-            beta = rho * torch.sum(y_i * r)
-            alpha = alpha_list.pop()
-            r = r + (alpha - beta) * s_i
+            beta = self.rho_list[i] * torch.sum(self.y_list[i] * z)
+            # alphas was filled in reverse, so popping walks it forward again.
+            alpha_i = alphas.pop()
+            z = z + self.s_list[i] * (alpha_i - beta)
 
-        # Save current values for next iteration
+        p = -z
+
         self.prev_pos = pos.clone().detach()
         self.prev_forces = forces.clone().detach()
 
-        # Return step (r is the approximate H⁻¹∇f)
-        return r
+        return self.determine_step(p, maxstep) * self.damping
+
+    def determine_step(
+        self, dr: torch.Tensor, maxstep: Optional[float] = None
+    ) -> torch.Tensor:
+        """Limit the step according to *maxstep* (ASE: ``determine_step``).
+
+        All atoms are scaled by the same factor, derived from the longest
+        single-atom displacement, so the step shortens along the eigendirection
+        instead of being bent by per-atom clamping.
+        """
+        limit = self.maxstep if maxstep is None else maxstep
+        longest_step = torch.norm(dr, dim=1).max()
+        if longest_step >= limit:
+            dr = dr * (limit / longest_step)
+        return dr
 
     def reset(self) -> None:
         """Reset the L-BFGS memory."""
@@ -161,7 +186,6 @@ class LBFGSStepSizer:
         self.rho_list.clear()
         self.prev_pos = None
         self.prev_forces = None
-        self.H0_scaling = 1.0
 
 
 class BatchedLBFGSStepSizer:
@@ -174,8 +198,10 @@ class BatchedLBFGSStepSizer:
     def __init__(
         self,
         batch_size: int,
-        memory_size: int = 10,
-        initial_step: float = 0.1,
+        memory_size: int = 100,
+        maxstep: float = 0.2,
+        alpha: float = 70.0,
+        damping: float = 1.0,
     ) -> None:
         """Initialize one step-sizer per graph in the batch.
 
@@ -185,11 +211,24 @@ class BatchedLBFGSStepSizer:
             Number of graphs in the batch.
         memory_size : int, optional
             L-BFGS memory length (number of past iterations to retain).
-        initial_step : float, optional
-            Initial step-size scaling factor.
+        maxstep : float, optional
+            Maximum single-atom displacement per step, in Å.
+        alpha : float, optional
+            Initial curvature guess; the inverse-Hessian seed is ``1/alpha``.
+        damping : float, optional
+            Multiplier applied to the computed step.
+
+        See :class:`LBFGSStepSizer` for the meaning of each parameter; the
+        defaults match :class:`ase.optimize.LBFGS`.
         """
         self.step_sizers = [
-            LBFGSStepSizer(memory_size, initial_step) for _ in range(batch_size)
+            LBFGSStepSizer(
+                memory_size=memory_size,
+                maxstep=maxstep,
+                alpha=alpha,
+                damping=damping,
+            )
+            for _ in range(batch_size)
         ]
 
     def compute_step(
@@ -197,8 +236,13 @@ class BatchedLBFGSStepSizer:
         pos: torch.Tensor,
         forces: torch.Tensor,
         batch_idx: torch.Tensor,
+        maxstep: Optional[float] = None,
     ) -> torch.Tensor:
         """Compute steps for batched data.
+
+        Each graph is optimised by its own :class:`LBFGSStepSizer`, so the
+        step limit applies per structure exactly as it would when relaxing
+        that structure alone in ASE.
 
         Parameters
         ----------
@@ -208,28 +252,25 @@ class BatchedLBFGSStepSizer:
             Current forces acting on the atoms.
         batch_idx : torch.Tensor
             Index tensor mapping each atom to its graph in the batch.
+        maxstep : float, optional
+            Overrides the per-sizer step limit for this call.
 
         Returns
         -------
         torch.Tensor
             Combined step tensor with the same shape as *pos*.
         """
-        results = []
+        combined_step = torch.zeros_like(pos)
 
-        # Group positions and forces by batch index
-        for i in range(len(self.step_sizers)):
+        # Scatter straight back into the graph's own rows.  Collecting results
+        # into a list and re-enumerating would misalign every graph after an
+        # empty one, silently giving atoms another structure's step.
+        for i, step_sizer in enumerate(self.step_sizers):
             mask = batch_idx == i
             if torch.any(mask):
-                pos_i = pos[mask]
-                forces_i = forces[mask]
-                step_i = self.step_sizers[i].compute_step(pos_i, forces_i)
-                results.append(step_i)
-
-        # Recombine results in original order
-        combined_step = torch.zeros_like(pos)
-        for i, step_i in enumerate(results):
-            mask = batch_idx == i
-            combined_step[mask] = step_i
+                combined_step[mask] = step_sizer.compute_step(
+                    pos[mask], forces[mask], maxstep=maxstep
+                )
 
         return combined_step
 
@@ -291,17 +332,14 @@ def force_field_guidance_step(
     # Get time-dependent scaling factor
     time_factor = (1.0 - batch.time) ** zeta
 
-    # Use L-BFGS to compute optimal step direction and magnitude
-    lbfgs_step = lbfgs_step_sizer.compute_step(positions, forces, batch_idx)
+    # Use L-BFGS to compute the step direction and magnitude.  The sizer caps
+    # the displacement per structure, scaling the whole step uniformly so the
+    # search direction is preserved; guidance strength is then applied on top.
+    lbfgs_step = lbfgs_step_sizer.compute_step(
+        positions, forces, batch_idx, maxstep=max_step_size
+    )
 
-    # Apply step with base scale and time factor, clamping to max_step_size
     step = scale * time_factor * lbfgs_step
-    step_magnitude = torch.norm(step, dim=1, keepdim=True)
-    too_large = step_magnitude > max_step_size
-    if torch.any(too_large):
-        scaling_factor = torch.ones_like(step_magnitude)
-        scaling_factor[too_large] = max_step_size / step_magnitude[too_large]
-        step = step * scaling_factor
 
     # Calculate new positions
     new_pos = batch.pos + step
@@ -328,10 +366,13 @@ def post_diffusion_relaxation_step(
     batch: AtomsGraph,
     regressor_model: "torch.nn.Module",
     lbfgs_step_sizer: Optional[BatchedLBFGSStepSizer],
-    scale: float = 0.1,
-    max_step_size: float = 0.1,
+    scale: float = 1.0,
+    max_step_size: float = 0.2,
 ) -> AtomsGraph:
-    """Perform a pure force-based relaxation step after diffusion is complete.
+    """Perform one L-BFGS relaxation step after diffusion is complete.
+
+    Equivalent to a single ``ase.optimize.LBFGS`` step applied to every
+    structure in the batch independently.
 
     Parameters
     ----------
@@ -340,9 +381,15 @@ def post_diffusion_relaxation_step(
     regressor_model : torch.nn.Module
         The regressor model used to compute forces.
     lbfgs_step_sizer : BatchedLBFGSStepSizer or None
-        The L-BFGS step sizer.  Initialised from ``batch`` if ``None``.
+        The L-BFGS step sizer.  Initialised from ``batch`` if ``None`` —
+        though a persistent sizer should be passed, since a fresh one carries
+        no curvature history and degrades the relaxation to seed-length steps.
     scale : float, optional
-        Step size scaling factor for relaxation.
+        Multiplier on the computed step, equivalent to ASE's ``damping``.
+        Defaults to ``1.0`` (ASE's default), i.e. take the full L-BFGS step.
+    max_step_size : float, optional
+        Maximum single-atom displacement per step, in Å.  Defaults to ``0.2``
+        (ASE's default).  Applied by scaling the whole step uniformly.
 
     Returns
     -------
@@ -363,21 +410,12 @@ def post_diffusion_relaxation_step(
     batch_idx = batch.batch
 
     if lbfgs_step_sizer is None:
-        lbfgs_step_sizer = BatchedLBFGSStepSizer(
-            batch_size=batch.batch_size,
-            memory_size=10,
-            initial_step=0.1,
-        )
+        lbfgs_step_sizer = BatchedLBFGSStepSizer(batch_size=batch.batch_size)
 
-    lbfgs_step = lbfgs_step_sizer.compute_step(positions, forces, batch_idx)
-
-    step = scale * lbfgs_step
-    step_magnitude = torch.norm(step, dim=1, keepdim=True)
-    too_large = step_magnitude > max_step_size
-    if torch.any(too_large):
-        scaling_factor = torch.ones_like(step_magnitude)
-        scaling_factor[too_large] = max_step_size / step_magnitude[too_large]
-        step = step * scaling_factor
+    # The sizer already applies the maxstep limit, uniformly per structure.
+    step = scale * lbfgs_step_sizer.compute_step(
+        positions, forces, batch_idx, maxstep=max_step_size
+    )
 
     new_pos = batch.pos + step
 
