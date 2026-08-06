@@ -1069,3 +1069,122 @@ class TestPostDiffusionRelaxation:
             ),
         )[0]
         assert len(traj) == steps + 1
+
+
+class TestTerminalConfinement:
+    """ffpc terminal dynamics must respect the z-confinement slab."""
+
+    CONF = (2.0, 8.0)
+
+    @staticmethod
+    def _push_up(batch):
+        """Strong constant +z force, enough to drive atoms through the wall."""
+        f = torch.zeros_like(batch.pos)
+        f[:, 2] = 50.0
+        batch["forces_prediction"] = f
+        return batch
+
+    def _sample(self, diffusion, **sampler_kwargs):
+        diffusion.regressor_model = self._push_up
+        try:
+            out = diffusion.sample(
+                2,
+                steps=4,
+                atomic_numbers=[6, 8, 8],
+                cell=np.diag([10.0, 10.0, 10.0]),
+                property={"property": 1.0},
+                confinement=self.CONF,
+                sampler="ffpc",
+                sampler_kwargs=sampler_kwargs,
+                save_trajectory=True,
+            )
+        finally:
+            diffusion.regressor_model = None
+        return out
+
+    def _assert_confined(self, trajectories):
+        """Assert every frame stays in the slab, except the initial prior draw.
+
+        Frame 0 is the raw sample from the positions prior.  Confinement is
+        imposed from the first denoise step onward, so an unconfined prior
+        (as in this fixture) can start outside the slab.
+        """
+        lo, hi = self.CONF
+        for traj in trajectories:
+            for i, frame in enumerate(traj[1:], start=1):
+                z = frame.pos[:, 2]
+                assert z.min() >= lo - 1e-4, f"frame {i}: z={z.min():.4f} below {lo}"
+                assert z.max() <= hi + 1e-4, f"frame {i}: z={z.max():.4f} above {hi}"
+
+    def test_terminal_overdamped_respects_confinement(self, diffusion):
+        """Overdamped terminal steps must not push atoms out of the slab."""
+        self._assert_confined(
+            self._sample(
+                diffusion,
+                corrector_steps=1,
+                terminal_steps=30,
+                terminal_dynamics="overdamped",
+                terminal_step_size=0.05,
+                temperature=0.1,
+            )
+        )
+
+    def test_terminal_langevin_md_respects_confinement(self, diffusion):
+        """BAOAB terminal steps must not push atoms out of the slab."""
+        self._assert_confined(
+            self._sample(
+                diffusion,
+                corrector_steps=1,
+                terminal_steps=30,
+                terminal_dynamics="langevin_md",
+                terminal_step_size=1.0,
+                temperature=0.1,
+            )
+        )
+
+    def test_unconfined_sampling_is_unaffected(self, diffusion):
+        """Without confinement the terminal phase is free to move atoms anywhere."""
+        diffusion.regressor_model = self._push_up
+        try:
+            out = diffusion.sample(
+                1,
+                steps=4,
+                atomic_numbers=[6, 8, 8],
+                cell=np.diag([10.0, 10.0, 10.0]),
+                property={"property": 1.0},
+                sampler="ffpc",
+                sampler_kwargs={
+                    "corrector_steps": 0,
+                    "terminal_steps": 30,
+                    "terminal_dynamics": "langevin_md",
+                    "terminal_step_size": 1.0,
+                    "temperature": 0.1,
+                },
+            )
+        finally:
+            diffusion.regressor_model = None
+        assert out[0].pos.isfinite().all()
+
+    def test_velocity_is_reflected_at_the_wall(self, diffusion):
+        """An atom driven into a wall must bounce, not stick to it.
+
+        A bare clamp leaves the velocity pointing into the wall, so the atom
+        stays pinned at the boundary for the rest of the run.
+        """
+        trajectories = self._sample(
+            diffusion,
+            corrector_steps=0,
+            terminal_steps=40,
+            terminal_dynamics="langevin_md",
+            terminal_step_size=1.0,
+            temperature=0.1,
+        )
+
+        # Terminal frames are the tail of the trajectory.
+        z_max_per_frame = [frame.pos[:, 2].max().item() for frame in trajectories[0]]
+        terminal = z_max_per_frame[-40:]
+
+        # With reflection the topmost atom leaves the wall again; pinned-at-the
+        # -ceiling would make every terminal frame sit exactly at z_max.
+        at_wall = sum(1 for z in terminal if abs(z - self.CONF[1]) < 1e-4)
+        assert at_wall < len(terminal), "every terminal frame is pinned at the wall"

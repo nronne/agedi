@@ -222,6 +222,9 @@ during the corrector phase:
 where :math:`f(t) = (1-t)^\zeta`.  It optionally runs additional Langevin
 dynamics after the last diffusion step via ``terminal_steps``.
 
+Terminal dynamics respect ``confinement``: atoms are kept inside the z-slab and
+bounce off its walls, and frozen (masked) template atoms never move.
+
 ``ffpc`` requires a model trained with a forces head.  Without one there is no
 force field to blend or to drive the terminal dynamics, so the sampler warns
 and degrades to plain predictor-corrector sampling: ``mixing_zeta`` is ignored

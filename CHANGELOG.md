@@ -43,6 +43,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LBFGSStepSizer(memory_size=..., maxstep=..., alpha=..., damping=...)`.
 
 ### Fixed
+- `ffpc` terminal dynamics ignored the z-confinement slab, in both
+  `overdamped` and `langevin_md` modes.  They write `batch.pos` directly and so
+  never inherited the clamp that `PositionsNoiser._denoise` applies, letting
+  atoms drift out of the slab during the terminal phase.  (The diffusion steps,
+  correctors, force-field guidance and post-diffusion relaxation were all
+  unaffected.)  Atoms reaching a wall now have their z-velocity reflected
+  rather than only clamped, so they bounce instead of staying pinned to the
+  boundary for the rest of the run.
 - `BatchedLBFGSStepSizer.compute_step` assigned steps to the wrong structures
   when any graph in the batch had no atoms: results were collected into a list
   and re-indexed by list position rather than graph id, shifting every

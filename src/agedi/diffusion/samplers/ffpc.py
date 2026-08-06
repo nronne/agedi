@@ -313,6 +313,59 @@ class ForcefieldCorrectorSampler(Sampler):
         # loop must not append it a second time.
         self._pending_includes_final = True
 
+    @staticmethod
+    def _confine(
+        batch: "AtomsGraph",
+        new_pos: torch.Tensor,
+        vel: Optional[torch.Tensor] = None,
+    ) -> "tuple[torch.Tensor, Optional[torch.Tensor]]":
+        """Keep candidate positions inside the z-confinement slab.
+
+        Terminal dynamics write ``batch.pos`` directly instead of going through
+        :meth:`~agedi.diffusion.noisers.Noiser.denoise`, so they do not inherit
+        the confinement clamp that
+        :meth:`~agedi.diffusion.noisers.pos.PositionsNoiser._denoise` applies.
+        Without this, atoms drift out of the slab during the terminal phase.
+
+        Atoms that reach a wall have their z-velocity reflected rather than
+        merely zeroed by the clamp: a clamped atom whose velocity still points
+        into the wall would otherwise stay pinned there for the rest of the run.
+
+        Masked atoms need no special handling — the ``AtomsGraph.pos`` setter
+        restores them on assignment.
+
+        Parameters
+        ----------
+        batch : AtomsGraph
+            Batch being propagated; supplies ``confinement`` and ``batch``.
+        new_pos : torch.Tensor
+            Candidate positions, before assignment to ``batch.pos``.
+        vel : torch.Tensor, optional
+            Velocities to reflect.  ``None`` for overdamped dynamics, which
+            carry no momenta.
+
+        Returns
+        -------
+        tuple
+            The clamped positions and the (possibly reflected) velocities.
+        """
+        confinement = getattr(batch, "confinement", None)
+        if confinement is None:
+            return new_pos, vel
+
+        bounds = confinement[batch.batch]  # (n_atoms, 2)
+        z = new_pos[:, 2]
+        outside = (z < bounds[:, 0]) | (z > bounds[:, 1])
+
+        new_pos = new_pos.clone()
+        new_pos[:, 2] = torch.clamp(z, min=bounds[:, 0], max=bounds[:, 1])
+
+        if vel is not None:
+            vel = vel.clone()
+            vel[:, 2] = torch.where(outside, -vel[:, 2], vel[:, 2])
+
+        return new_pos, vel
+
     def _terminal_overdamped(self, batch: "AtomsGraph") -> None:
         """Overdamped Langevin terminal steps (no momenta).
 
@@ -331,9 +384,11 @@ class ForcefieldCorrectorSampler(Sampler):
             mean = batch.pos + eps * batch.forces_prediction
             if self._pos_noiser is not None:
                 w = self._pos_noiser.distribution.get_callable(batch)
-                batch.pos = w(mean, noise_std)
+                new_pos = w(mean, noise_std)
             else:
-                batch.pos = mean + noise_std * torch.randn_like(batch.pos)
+                new_pos = mean + noise_std * torch.randn_like(batch.pos)
+            new_pos, _ = self._confine(batch, new_pos)
+            batch.pos = new_pos
             batch.wrap_positions()
             self._check_finite(batch, "FFPC terminal overdamped Langevin step")
             batch.update_graph()
@@ -387,14 +442,18 @@ class ForcefieldCorrectorSampler(Sampler):
             # B: half-step velocity kick from forces.
             vel = vel + 0.5 * dt * forces / masses
 
-            # A: half-step position drift.
-            batch.pos = batch.pos + 0.5 * dt * vel
+            # A: half-step position drift.  Confinement is enforced after each
+            # drift rather than once per step, so an atom cannot leave the slab
+            # mid-step and have that excursion feed the thermostat.
+            new_pos, vel = self._confine(batch, batch.pos + 0.5 * dt * vel, vel)
+            batch.pos = new_pos
 
             # O: Ornstein-Uhlenbeck thermostat.
             vel = alpha * vel + sigma_ou * torch.randn_like(vel)
 
             # A: half-step position drift.
-            batch.pos = batch.pos + 0.5 * dt * vel
+            new_pos, vel = self._confine(batch, batch.pos + 0.5 * dt * vel, vel)
+            batch.pos = new_pos
             batch.wrap_positions()
             self._check_finite(batch, "FFPC terminal Langevin MD step (BAOAB)")
             batch.update_graph()
