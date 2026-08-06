@@ -5,6 +5,28 @@ All notable changes to AGeDi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-06
+
+### Added
+- **`save_corrector_frames`** on `sample()` / `functional.sample()` /
+  `agedi sample --save_corrector_frames` — records every Langevin corrector
+  sub-step in the saved trajectory, giving a complete frame-by-frame record of
+  sampling.  Requires `save_trajectory` and a sampler that runs correctors
+  (`"pc"`, `"ffpc"`, or `corrector_steps > 0`).  Off by default because it
+  multiplies trajectory length by roughly the corrector count.
+
+  With capture on, one outer diffusion step contributes `1 + corrector_steps`
+  frames, so a run has `steps · (1 + corrector_steps) + 1` frames — plus
+  `1 + terminal_steps` when ffpc terminal dynamics are active.
+- `Sampler._capture_frame()` / `Sampler._reset_pending()` — frame-capture
+  helpers on the sampler base class, so custom samplers can contribute
+  sub-step frames to the trajectory.
+
+### Fixed
+- `save_trajectory` no longer appends a duplicate final frame when
+  post-diffusion relaxation ran; the relaxation loop already captured that
+  state.
+
 ## [1.3.1] - 2026-07-02
 
 ### Fixed

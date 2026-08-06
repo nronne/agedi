@@ -150,6 +150,10 @@ Important options:
 - ``--steps``, ``--eps`` for reverse diffusion resolution
 - ``--save_trajectory``: save the full reverse-diffusion trajectory for each sample
   (one file per sample rather than only the final structures)
+- ``--save_corrector_frames``: with ``--save_trajectory``, also save every Langevin
+  corrector sub-step, giving a complete frame-by-frame record.  Only has an effect
+  with a sampler that runs correctors (``--sampler pc`` or ``ffpc``); multiplies
+  trajectory length by roughly the corrector count
 - ``--print_timings``: print a per-stage timing breakdown after each sampling batch
   (useful for profiling GPU bottlenecks)
 - ``--compile``: compile the reverse-diffusion step with ``torch.compile`` for faster

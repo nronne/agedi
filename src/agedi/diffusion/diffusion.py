@@ -725,6 +725,7 @@ class Diffusion:
         is_compiled: bool = False,
         sampler=None,
         sampler_kwargs=None,
+        save_corrector_frames: bool = False,
     ) -> List[AtomsGraph]:
         """Run the reverse-diffusion loop for a pre-built batch.
 
@@ -772,6 +773,11 @@ class Diffusion:
             Extra constructor arguments forwarded to the sampler when *sampler*
             is a string alias.  Keys override the defaults supplied by
             *corrector_steps* / *corrector_step_size*.
+        save_corrector_frames : bool, optional
+            Also record every Langevin corrector sub-step in the saved
+            trajectory.  Only meaningful together with *save_trajectory* and a
+            sampler that runs correctors (``"pc"`` / ``"ffpc"``).  ``False``
+            (default) records one frame per outer diffusion step.
 
         Returns
         -------
@@ -791,6 +797,7 @@ class Diffusion:
             _sampler = self._resolve_sampler(
                 sampler, corrector_steps, corrector_step_size, sampler_kwargs
             )
+            _sampler.save_corrector_frames = save_trajectory and save_corrector_frames
         elif sampler is not None:
             raise ValueError(
                 "compile=True is only compatible with the default Euler-Maruyama / "
@@ -922,13 +929,18 @@ class Diffusion:
                         batch.wrap_positions()
                         batch.update_graph()
 
-                # Append terminal frames (e.g. from ForcefieldCorrectorSampler)
-                # to the trajectory.  These are produced inside sampler.step()
-                # on the last diffusion step and exposed via _pending_frames.
+                # Append sub-step frames produced inside sampler.step() —
+                # corrector steps when save_corrector_frames is set, and the
+                # ffpc terminal dynamics frames on the last diffusion step.
                 if save_trajectory:
                     pending = getattr(_sampler, "_pending_frames", None)
                     if pending:
                         path.extend(pending)
+
+        # Terminal dynamics end on the state the sampler returned, so it is
+        # already the last pending frame.  Corrector capture deliberately stops
+        # one sub-step short, so the final state still needs appending.
+        _final_captured = bool(getattr(_sampler, "_pending_includes_final", False))
 
         # Restore original score_fn / regressor_fn if they were wrapped for counting.
         if _orig_score_fn is not None:
@@ -1001,6 +1013,7 @@ class Diffusion:
 
                     if save_trajectory:
                         path.append(batch.to_data_list())
+                        _final_captured = True
 
                     if max_forces <= force_threshold:
                         if progress_bar:
@@ -1017,10 +1030,7 @@ class Diffusion:
                     )
 
         if save_trajectory:
-            # If the last step populated _pending_frames (e.g. terminal dynamics),
-            # the final state is already captured there — don't add a duplicate.
-            _last_had_pending = bool(getattr(_sampler, "_pending_frames", None))
-            if not _last_had_pending:
+            if not _final_captured:
                 path.append(batch.to_data_list())
             return list(map(list, zip(*path)))
 
@@ -1043,6 +1053,7 @@ class Diffusion:
         compile: bool = False,
         sampler=None,
         sampler_kwargs=None,
+        save_corrector_frames: bool = False,
         **kwargs,
     ) -> List[AtomsGraph]:
         """Build *N* graphs from priors and run the sampling loop.
@@ -1135,6 +1146,7 @@ class Diffusion:
             is_compiled=compile,
             sampler=sampler,
             sampler_kwargs=sampler_kwargs,
+            save_corrector_frames=save_corrector_frames,
         )
         self._sync_for_timing(batch.pos.device)
         timings.total_wall = time.perf_counter() - total_start
@@ -1166,6 +1178,7 @@ class Diffusion:
         property: Optional[Dict] = None,
         progress_bar: Optional[bool] = False,
         save_trajectory: Optional[bool] = False,
+        save_corrector_frames: Optional[bool] = False,
         print_timings: Optional[bool] = False,
         corrector_steps: int = 0,
         corrector_step_size: float = 1e-3,
@@ -1227,7 +1240,15 @@ class Diffusion:
         progress_bar : bool, optional
             Show a tqdm progress bar.
         save_trajectory : bool, optional
-            Return full trajectories instead of final structures.
+            Return full trajectories instead of final structures.  One frame
+            per reverse-diffusion step, plus any ``ffpc`` terminal-dynamics
+            frames and post-diffusion relaxation frames.
+        save_corrector_frames : bool, optional
+            Additionally record every Langevin corrector sub-step, giving a
+            complete frame-by-frame trajectory.  Requires *save_trajectory* and
+            a sampler that runs correctors (``"pc"`` / ``"ffpc"``, or
+            ``corrector_steps > 0``).  This multiplies the trajectory length by
+            roughly ``corrector_steps``, so it is off by default.
         print_timings : bool, optional
             Print a timing breakdown after sampling completes.
         corrector_steps : int, optional
@@ -1305,6 +1326,7 @@ class Diffusion:
         sample_kwargs: Dict = {
             "progress_bar": progress_bar,
             "save_trajectory": save_trajectory,
+            "save_corrector_frames": save_corrector_frames,
             "force_threshold": ff_guidance.force_threshold,
             "max_extra_steps": ff_guidance.max_extra_steps,
             "corrector_steps": corrector_steps,

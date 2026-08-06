@@ -197,9 +197,6 @@ class ForcefieldCorrectorSampler(Sampler):
         # Cache the positions noiser for overdamped terminal steps.
         self._pos_noiser = next((n for n in noisers if n.key == "pos"), None)
         self._corrector_dt: Optional[torch.Tensor] = None
-        # Terminal frames collected during the last step; consumed by _sample_batch
-        # to extend the saved trajectory.  Cleared at the start of every step().
-        self._pending_frames: List = []
 
     def step(
         self,
@@ -214,10 +211,15 @@ class ForcefieldCorrectorSampler(Sampler):
         3. For each corrector iteration: evaluate neural score, blend with
            force-field gradient, apply Langevin step.
         4. If ``last`` and ``terminal_steps > 0``: terminal phase with the
-           chosen dynamics.  Intermediate frames are stored in
-           :attr:`_pending_frames` for trajectory capture.
+           chosen dynamics.
+
+        Terminal frames are always stored in ``_pending_frames`` for trajectory
+        capture.  Corrector frames are stored there too when
+        :attr:`~agedi.diffusion.samplers.Sampler.save_corrector_frames` is set;
+        the final corrector state is excluded because it is the return value,
+        which the outer loop records itself.
         """
-        self._pending_frames.clear()
+        self._reset_pending()
 
         # --- Step 1: EM predictor (neural score only) ---
         batch = self.score_fn(batch)
@@ -231,6 +233,8 @@ class ForcefieldCorrectorSampler(Sampler):
             if last and self.terminal_steps > 0 and self.regressor_fn is not None:
                 self._run_terminal(batch)
             return batch
+
+        self._capture_frame(batch)
 
         # Advance time to t_{i-1} for the corrector.
         batch.time = (batch.time - dt).clamp(min=0.0)
@@ -246,7 +250,7 @@ class ForcefieldCorrectorSampler(Sampler):
             )
 
         # --- Step 2: Corrector (Langevin with augmented score) ---
-        for _ in range(self.corrector_steps):
+        for i in range(self.corrector_steps):
             batch = self.score_fn(batch)
             if self.regressor_fn is not None:
                 batch = self.regressor_fn(batch)
@@ -261,6 +265,8 @@ class ForcefieldCorrectorSampler(Sampler):
             batch.wrap_positions()
             self._check_finite(batch, "FFPC augmented Langevin corrector step")
             batch.update_graph()
+            if i < self.corrector_steps - 1:
+                self._capture_frame(batch)
 
         # --- Step 3: Terminal phase (force-field only, last step) ---
         if last and self.terminal_steps > 0 and self.regressor_fn is not None:
@@ -271,16 +277,19 @@ class ForcefieldCorrectorSampler(Sampler):
     def _run_terminal(self, batch: "AtomsGraph") -> None:
         """Dispatch to the selected terminal dynamics.
 
-        Prepends a bridge frame (the denoised state before terminal dynamics
-        start) unless corrector frames already captured it as their last
-        entry — which is the case when ``corrector_steps > 0``.
+        Prepends a bridge frame holding the denoised state before terminal
+        dynamics start.  Corrector capture deliberately omits this state (it
+        would otherwise be the sampler's return value), so the bridge frame is
+        what keeps the trajectory gap-free in both capture modes.
         """
-        if not self._pending_frames:
-            self._pending_frames.append(batch.to_data_list())
+        self._pending_frames.append(batch.to_data_list())
         if self.terminal_dynamics == "langevin_md":
             self._terminal_langevin_md(batch)
         else:
             self._terminal_overdamped(batch)
+        # Terminal dynamics end on the state that step() returns, so the outer
+        # loop must not append it a second time.
+        self._pending_includes_final = True
 
     def _terminal_overdamped(self, batch: "AtomsGraph") -> None:
         """Overdamped Langevin terminal steps (no momenta).

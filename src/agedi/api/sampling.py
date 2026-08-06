@@ -33,6 +33,7 @@ def sample(
     property: Optional[Dict[str, float]] = None,
     progress_bar: bool = False,
     save_trajectory: bool = False,
+    save_corrector_frames: bool = False,
     print_timings: bool = False,
     as_atoms: bool = True,
     sampler=None,
@@ -91,6 +92,17 @@ def sample(
         When ``True``, print a per-stage timing breakdown at the end of
         each sampling batch (graph init, score model, denoise, neighbor
         list, etc.).  Defaults to ``False``.
+    save_trajectory:
+        When ``True``, return one trajectory per structure instead of a flat
+        list of final structures.  Each trajectory holds one frame per
+        reverse-diffusion step, plus any ``ffpc`` terminal-dynamics frames and
+        post-diffusion relaxation frames.  Defaults to ``False``.
+    save_corrector_frames:
+        When ``True``, also record every Langevin corrector sub-step, giving a
+        complete frame-by-frame trajectory.  Requires ``save_trajectory`` and a
+        sampler that runs correctors (``"pc"`` / ``"ffpc"``).  Multiplies
+        trajectory length by roughly the corrector count.  Defaults to
+        ``False``.
     """
     from agedi.diffusion import ForcefieldGuidanceConfig
 
@@ -143,6 +155,7 @@ def sample(
             property=property,
             progress_bar=progress_bar,
             save_trajectory=save_trajectory,
+            save_corrector_frames=save_corrector_frames,
             print_timings=print_timings,
             sampler=sampler,
             sampler_kwargs=sampler_kwargs,

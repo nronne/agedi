@@ -705,3 +705,178 @@ class TestSamplerKwargsValidation:
             sampler="ffpc",
             sampler_kwargs={"corrector_steps": 0, "terminal_steps": 0},
         )
+
+
+class TestSaveCorrectorFrames:
+    """Trajectory capture of Langevin corrector sub-steps."""
+
+    def test_correctors_not_captured_by_default(self, diffusion):
+        """Without save_corrector_frames, a pc step records no sub-step frames."""
+        batch, dt = _make_ffpc_batch(diffusion)
+        sampler = PredictorCorrectorSampler(
+            diffusion.score_model, diffusion.noisers, corrector_steps=3
+        )
+        sampler.step(batch, dt, last=False)
+        assert sampler._pending_frames == []
+
+    def test_pc_captures_one_frame_per_corrector(self, diffusion):
+        """A pc step records the predictor state plus all but the last corrector.
+
+        The last corrector state is the return value, which the outer sampling
+        loop records itself — capturing it here would duplicate a frame.
+        """
+        corrector_steps = 3
+        batch, dt = _make_ffpc_batch(diffusion)
+        sampler = PredictorCorrectorSampler(
+            diffusion.score_model, diffusion.noisers, corrector_steps=corrector_steps
+        )
+        sampler.save_corrector_frames = True
+        sampler.step(batch, dt, last=False)
+        # 1 predictor frame + (corrector_steps - 1) corrector frames
+        assert len(sampler._pending_frames) == corrector_steps
+        assert sampler._pending_includes_final is False
+
+    def test_pc_zero_correctors_captures_nothing(self, diffusion):
+        """corrector_steps=0 degenerates to EM, so there is no sub-step to record."""
+        batch, dt = _make_ffpc_batch(diffusion)
+        sampler = PredictorCorrectorSampler(
+            diffusion.score_model, diffusion.noisers, corrector_steps=0
+        )
+        sampler.save_corrector_frames = True
+        sampler.step(batch, dt, last=False)
+        assert sampler._pending_frames == []
+
+    def test_ffpc_captures_correctors_and_terminal(self, diffusion):
+        """On the last ffpc step, corrector frames precede bridge + terminal frames."""
+        corrector_steps = 2
+        terminal_steps = 3
+        batch, dt = _make_ffpc_batch(diffusion)
+        sampler = ForcefieldCorrectorSampler(
+            diffusion.score_model,
+            diffusion.noisers,
+            regressor_fn=_make_mock_regressor(batch),
+            corrector_steps=corrector_steps,
+            terminal_steps=terminal_steps,
+            terminal_dynamics="overdamped",
+        )
+        sampler.save_corrector_frames = True
+        sampler.step(batch, dt, last=True)
+        # corrector_steps sub-step frames + 1 bridge + terminal_steps
+        assert len(sampler._pending_frames) == corrector_steps + 1 + terminal_steps
+        assert sampler._pending_includes_final is True
+
+    def test_trajectory_frame_count_with_correctors(self, diffusion):
+        """Every corrector sub-step appears exactly once in the saved trajectory."""
+        steps = 3
+        corrector_steps = 2
+
+        out = diffusion.sample(
+            1,
+            steps=steps,
+            atomic_numbers=[6, 8, 8],
+            cell=np.diag([10.0, 10.0, 10.0]),
+            property={"property": 1.0},
+            corrector_steps=corrector_steps,
+            save_trajectory=True,
+            save_corrector_frames=True,
+        )
+
+        # Per outer step: 1 pre-step frame + corrector_steps sub-step frames,
+        # then the final structure.
+        assert len(out[0]) == steps * (1 + corrector_steps) + 1
+
+    def test_trajectory_frame_count_without_correctors_unchanged(self, diffusion):
+        """Default capture still yields exactly one frame per step plus the final."""
+        steps = 3
+
+        out = diffusion.sample(
+            1,
+            steps=steps,
+            atomic_numbers=[6, 8, 8],
+            cell=np.diag([10.0, 10.0, 10.0]),
+            property={"property": 1.0},
+            corrector_steps=2,
+            save_trajectory=True,
+        )
+
+        assert len(out[0]) == steps + 1
+
+    def test_no_duplicate_frames(self, diffusion):
+        """Every captured frame is a distinct state, with none recorded twice.
+
+        If capture also recorded the state ``step()`` returns, that state would
+        be snapshotted twice — once as the last sub-step frame of step *i*, once
+        as the pre-step frame of step *i+1* — leaving a duplicate at every step
+        boundary.
+
+        ``eps`` is raised well above its default here on purpose.  At the
+        default ``1e-3`` the final ``last=True`` update is smaller than float32
+        resolution at these coordinates and can round to no change at all, so
+        the last two frames come out bit-identical for reasons unrelated to
+        capture.  A larger ``eps`` keeps every step's update resolvable.
+        """
+        out = diffusion.sample(
+            1,
+            steps=3,
+            eps=0.1,
+            atomic_numbers=[6, 8, 8],
+            cell=np.diag([10.0, 10.0, 10.0]),
+            property={"property": 1.0},
+            corrector_steps=2,
+            save_trajectory=True,
+            save_corrector_frames=True,
+        )
+
+        trajectory = out[0]
+        for i in range(len(trajectory) - 1):
+            assert not torch.equal(
+                trajectory[i].pos, trajectory[i + 1].pos
+            ), f"frames {i} and {i + 1} are identical"
+
+    def test_ffpc_trajectory_frame_count_with_correctors_and_terminal(self, diffusion):
+        """ffpc end-to-end: corrector, bridge and terminal frames all appear once."""
+        steps = 3
+        corrector_steps = 2
+        terminal_steps = 3
+
+        def _mock_regressor(batch):
+            batch["forces_prediction"] = torch.zeros_like(batch.pos)
+            return batch
+
+        diffusion.regressor_model = _mock_regressor
+        try:
+            out = diffusion.sample(
+                1,
+                steps=steps,
+                atomic_numbers=[6, 8, 8],
+                cell=np.diag([10.0, 10.0, 10.0]),
+                property={"property": 1.0},
+                sampler="ffpc",
+                sampler_kwargs={
+                    "corrector_steps": corrector_steps,
+                    "terminal_steps": terminal_steps,
+                    "terminal_dynamics": "overdamped",
+                },
+                save_trajectory=True,
+                save_corrector_frames=True,
+            )
+        finally:
+            diffusion.regressor_model = None
+
+        # steps × (1 pre-step + corrector_steps) + 1 bridge + terminal_steps.
+        # The final structure is the last terminal frame, so it is not re-added.
+        assert len(out[0]) == steps * (1 + corrector_steps) + 1 + terminal_steps
+
+    def test_flag_ignored_without_save_trajectory(self, diffusion):
+        """save_corrector_frames alone must not turn on capture or change output."""
+        out = diffusion.sample(
+            1,
+            steps=3,
+            atomic_numbers=[6, 8, 8],
+            cell=np.diag([10.0, 10.0, 10.0]),
+            property={"property": 1.0},
+            corrector_steps=2,
+            save_corrector_frames=True,
+        )
+        assert len(out) == 1
+        assert out[0].pos.isfinite().all()
