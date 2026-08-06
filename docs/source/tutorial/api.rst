@@ -220,7 +220,14 @@ during the corrector phase:
    \tilde{s}(x, t) = (1 - f(t))\,s_\theta(x) + f(t)\,F(x)
 
 where :math:`f(t) = (1-t)^\zeta`.  It optionally runs additional Langevin
-dynamics after the last diffusion step via ``terminal_steps``:
+dynamics after the last diffusion step via ``terminal_steps``.
+
+``ffpc`` requires a model trained with a forces head.  Without one there is no
+force field to blend or to drive the terminal dynamics, so the sampler warns
+and degrades to plain predictor-corrector sampling: ``mixing_zeta`` is ignored
+and no terminal steps run, leaving saved trajectories short by exactly
+``1 + terminal_steps`` frames.  If your trajectories are missing their terminal
+frames, check that the model actually has a regressor head.
 
 .. code-block:: python
 

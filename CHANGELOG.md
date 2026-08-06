@@ -26,6 +26,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `save_trajectory` no longer appends a duplicate final frame when
   post-diffusion relaxation ran; the relaxation loop already captured that
   state.
+- `ForcefieldCorrectorSampler` now emits a `UserWarning` when the diffusion
+  model has no regressor (forces) head.  Previously `sampler="ffpc"` on a
+  score-only model silently dropped both the terminal dynamics and the
+  force-field blending in the corrector, degrading to plain
+  predictor-corrector sampling; the only symptom was a saved trajectory
+  missing all `terminal_steps` frames.  The warning names the number of
+  terminal steps being skipped.  The separate "temperature not set" warning is
+  suppressed in that case, since temperature only affects the terminal phase
+  that will not run.
 
 ## [1.3.1] - 2026-07-02
 

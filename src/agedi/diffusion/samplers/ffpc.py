@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from typing import TYPE_CHECKING, Callable, ClassVar, List, Literal, Optional
 
 import torch
@@ -81,7 +82,10 @@ class ForcefieldCorrectorSampler(Sampler):
 
     When no regressor is attached (``regressor_fn=None``), the corrector falls
     back to a pure Langevin step with the neural score, and terminal steps are
-    skipped.
+    skipped — leaving this sampler equivalent to
+    :class:`~agedi.diffusion.samplers.PredictorCorrectorSampler`.  A
+    :class:`UserWarning` is emitted in that case, since the resulting
+    trajectory silently lacks the terminal frames that were asked for.
 
     Parameters
     ----------
@@ -92,7 +96,9 @@ class ForcefieldCorrectorSampler(Sampler):
     regressor_fn : callable or None
         Force-field model: ``regressor_fn(batch) -> batch`` with
         ``forces_prediction`` set.  Passed by
-        :meth:`~agedi.diffusion.Diffusion._resolve_sampler`.
+        :meth:`~agedi.diffusion.Diffusion._resolve_sampler`, which supplies the
+        model's regressor head — or ``None`` when it was trained without one,
+        which triggers the fallback warning described above.
     corrector_steps : int
         Number of Langevin corrector steps per predictor step.  Default: ``1``.
     corrector_step_size : float
@@ -174,8 +180,23 @@ class ForcefieldCorrectorSampler(Sampler):
         terminal_dynamics: Literal["overdamped", "langevin_md"] = "overdamped",
         terminal_friction: Optional[float] = None,
     ) -> None:
-        if temperature is None:
-            import warnings
+        if regressor_fn is None:
+            ignored = ["force-field blending in the corrector (mixing_zeta)"]
+            if terminal_steps > 0:
+                ignored.append(
+                    f"all {terminal_steps} terminal {terminal_dynamics} steps"
+                )
+            warnings.warn(
+                "ForcefieldCorrectorSampler: no force-field model available — the "
+                "diffusion model has no regressor (forces) head, so ffpc degrades "
+                "to plain predictor-corrector sampling. Ignored: "
+                + "; ".join(ignored)
+                + ". Saved trajectories will be correspondingly shorter. Train "
+                "with a forces head to enable these.",
+                UserWarning,
+                stacklevel=2,
+            )
+        elif temperature is None:
             warnings.warn(
                 "ForcefieldCorrectorSampler: temperature not set, defaulting to 1.0. "
                 "For physical terminal dynamics set temperature to k_B·T in the same "
@@ -183,6 +204,7 @@ class ForcefieldCorrectorSampler(Sampler):
                 UserWarning,
                 stacklevel=2,
             )
+        if temperature is None:
             temperature = 1.0
         super().__init__(score_fn, noisers)
         self.regressor_fn = regressor_fn

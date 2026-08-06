@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 import torch
@@ -880,3 +882,66 @@ class TestSaveCorrectorFrames:
         )
         assert len(out) == 1
         assert out[0].pos.isfinite().all()
+
+
+class TestMissingRegressorWarning:
+    """ffpc must not silently drop its force-field behaviour."""
+
+    def test_warns_when_no_regressor(self, diffusion):
+        """Constructing ffpc without a forces model warns about the fallback."""
+        with pytest.warns(UserWarning, match="no force-field model available"):
+            ForcefieldCorrectorSampler(
+                diffusion.score_model, diffusion.noisers, regressor_fn=None
+            )
+
+    def test_warning_names_the_skipped_terminal_steps(self, diffusion):
+        """The warning states how many terminal steps are being dropped."""
+        with pytest.warns(UserWarning, match="all 200 terminal langevin_md steps"):
+            ForcefieldCorrectorSampler(
+                diffusion.score_model,
+                diffusion.noisers,
+                regressor_fn=None,
+                terminal_steps=200,
+                terminal_dynamics="langevin_md",
+                temperature=0.5,
+            )
+
+    def test_no_warning_when_regressor_present(self, diffusion):
+        """A model with a forces head must not trigger the fallback warning."""
+        batch, _ = _make_ffpc_batch(diffusion)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            ForcefieldCorrectorSampler(
+                diffusion.score_model,
+                diffusion.noisers,
+                regressor_fn=_make_mock_regressor(batch),
+                terminal_steps=10,
+                temperature=0.5,
+            )
+
+    def test_temperature_warning_suppressed_without_regressor(self, diffusion):
+        """Only the fallback warning fires; temperature is moot with no terminal phase."""
+        with pytest.warns(UserWarning) as record:
+            ForcefieldCorrectorSampler(
+                diffusion.score_model,
+                diffusion.noisers,
+                regressor_fn=None,
+                terminal_steps=10,
+            )
+        messages = [str(w.message) for w in record]
+        assert len(messages) == 1, messages
+        assert "no force-field model available" in messages[0]
+
+    def test_sample_warns_for_model_without_forces_head(self, diffusion):
+        """End-to-end: requesting terminal steps on a score-only model warns."""
+        assert diffusion.regressor_model is None
+        with pytest.warns(UserWarning, match="no force-field model available"):
+            diffusion.sample(
+                1,
+                steps=3,
+                atomic_numbers=[6, 8, 8],
+                cell=np.diag([10.0, 10.0, 10.0]),
+                property={"property": 1.0},
+                sampler="ffpc",
+                sampler_kwargs={"terminal_steps": 5, "temperature": 0.5},
+            )
