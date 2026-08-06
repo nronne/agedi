@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 import torch
@@ -705,3 +707,484 @@ class TestSamplerKwargsValidation:
             sampler="ffpc",
             sampler_kwargs={"corrector_steps": 0, "terminal_steps": 0},
         )
+
+
+class TestSaveCorrectorFrames:
+    """Trajectory capture of Langevin corrector sub-steps."""
+
+    def test_correctors_not_captured_by_default(self, diffusion):
+        """Without save_corrector_frames, a pc step records no sub-step frames."""
+        batch, dt = _make_ffpc_batch(diffusion)
+        sampler = PredictorCorrectorSampler(
+            diffusion.score_model, diffusion.noisers, corrector_steps=3
+        )
+        sampler.step(batch, dt, last=False)
+        assert sampler._pending_frames == []
+
+    def test_pc_captures_one_frame_per_corrector(self, diffusion):
+        """A pc step records the predictor state plus all but the last corrector.
+
+        The last corrector state is the return value, which the outer sampling
+        loop records itself — capturing it here would duplicate a frame.
+        """
+        corrector_steps = 3
+        batch, dt = _make_ffpc_batch(diffusion)
+        sampler = PredictorCorrectorSampler(
+            diffusion.score_model, diffusion.noisers, corrector_steps=corrector_steps
+        )
+        sampler.save_corrector_frames = True
+        sampler.step(batch, dt, last=False)
+        # 1 predictor frame + (corrector_steps - 1) corrector frames
+        assert len(sampler._pending_frames) == corrector_steps
+        assert sampler._pending_includes_final is False
+
+    def test_pc_zero_correctors_captures_nothing(self, diffusion):
+        """corrector_steps=0 degenerates to EM, so there is no sub-step to record."""
+        batch, dt = _make_ffpc_batch(diffusion)
+        sampler = PredictorCorrectorSampler(
+            diffusion.score_model, diffusion.noisers, corrector_steps=0
+        )
+        sampler.save_corrector_frames = True
+        sampler.step(batch, dt, last=False)
+        assert sampler._pending_frames == []
+
+    def test_ffpc_captures_correctors_and_terminal(self, diffusion):
+        """On the last ffpc step, corrector frames precede bridge + terminal frames."""
+        corrector_steps = 2
+        terminal_steps = 3
+        batch, dt = _make_ffpc_batch(diffusion)
+        sampler = ForcefieldCorrectorSampler(
+            diffusion.score_model,
+            diffusion.noisers,
+            regressor_fn=_make_mock_regressor(batch),
+            corrector_steps=corrector_steps,
+            terminal_steps=terminal_steps,
+            terminal_dynamics="overdamped",
+        )
+        sampler.save_corrector_frames = True
+        sampler.step(batch, dt, last=True)
+        # corrector_steps sub-step frames + 1 bridge + terminal_steps
+        assert len(sampler._pending_frames) == corrector_steps + 1 + terminal_steps
+        assert sampler._pending_includes_final is True
+
+    def test_trajectory_frame_count_with_correctors(self, diffusion):
+        """Every corrector sub-step appears exactly once in the saved trajectory."""
+        steps = 3
+        corrector_steps = 2
+
+        out = diffusion.sample(
+            1,
+            steps=steps,
+            atomic_numbers=[6, 8, 8],
+            cell=np.diag([10.0, 10.0, 10.0]),
+            property={"property": 1.0},
+            corrector_steps=corrector_steps,
+            save_trajectory=True,
+            save_corrector_frames=True,
+        )
+
+        # Per outer step: 1 pre-step frame + corrector_steps sub-step frames,
+        # then the final structure.
+        assert len(out[0]) == steps * (1 + corrector_steps) + 1
+
+    def test_trajectory_frame_count_without_correctors_unchanged(self, diffusion):
+        """Default capture still yields exactly one frame per step plus the final."""
+        steps = 3
+
+        out = diffusion.sample(
+            1,
+            steps=steps,
+            atomic_numbers=[6, 8, 8],
+            cell=np.diag([10.0, 10.0, 10.0]),
+            property={"property": 1.0},
+            corrector_steps=2,
+            save_trajectory=True,
+        )
+
+        assert len(out[0]) == steps + 1
+
+    def test_no_duplicate_frames(self, diffusion):
+        """Every captured frame is a distinct state, with none recorded twice.
+
+        If capture also recorded the state ``step()`` returns, that state would
+        be snapshotted twice — once as the last sub-step frame of step *i*, once
+        as the pre-step frame of step *i+1* — leaving a duplicate at every step
+        boundary.
+
+        ``eps`` is raised well above its default here on purpose.  At the
+        default ``1e-3`` the final ``last=True`` update is smaller than float32
+        resolution at these coordinates and can round to no change at all, so
+        the last two frames come out bit-identical for reasons unrelated to
+        capture.  A larger ``eps`` keeps every step's update resolvable.
+        """
+        out = diffusion.sample(
+            1,
+            steps=3,
+            eps=0.1,
+            atomic_numbers=[6, 8, 8],
+            cell=np.diag([10.0, 10.0, 10.0]),
+            property={"property": 1.0},
+            corrector_steps=2,
+            save_trajectory=True,
+            save_corrector_frames=True,
+        )
+
+        trajectory = out[0]
+        for i in range(len(trajectory) - 1):
+            assert not torch.equal(
+                trajectory[i].pos, trajectory[i + 1].pos
+            ), f"frames {i} and {i + 1} are identical"
+
+    def test_ffpc_trajectory_frame_count_with_correctors_and_terminal(self, diffusion):
+        """ffpc end-to-end: corrector, bridge and terminal frames all appear once."""
+        steps = 3
+        corrector_steps = 2
+        terminal_steps = 3
+
+        def _mock_regressor(batch):
+            batch["forces_prediction"] = torch.zeros_like(batch.pos)
+            return batch
+
+        diffusion.regressor_model = _mock_regressor
+        try:
+            out = diffusion.sample(
+                1,
+                steps=steps,
+                atomic_numbers=[6, 8, 8],
+                cell=np.diag([10.0, 10.0, 10.0]),
+                property={"property": 1.0},
+                sampler="ffpc",
+                sampler_kwargs={
+                    "corrector_steps": corrector_steps,
+                    "terminal_steps": terminal_steps,
+                    "terminal_dynamics": "overdamped",
+                },
+                save_trajectory=True,
+                save_corrector_frames=True,
+            )
+        finally:
+            diffusion.regressor_model = None
+
+        # steps × (1 pre-step + corrector_steps) + 1 bridge + terminal_steps.
+        # The final structure is the last terminal frame, so it is not re-added.
+        assert len(out[0]) == steps * (1 + corrector_steps) + 1 + terminal_steps
+
+    def test_flag_ignored_without_save_trajectory(self, diffusion):
+        """save_corrector_frames alone must not turn on capture or change output."""
+        out = diffusion.sample(
+            1,
+            steps=3,
+            atomic_numbers=[6, 8, 8],
+            cell=np.diag([10.0, 10.0, 10.0]),
+            property={"property": 1.0},
+            corrector_steps=2,
+            save_corrector_frames=True,
+        )
+        assert len(out) == 1
+        assert out[0].pos.isfinite().all()
+
+
+class TestMissingRegressorWarning:
+    """ffpc must not silently drop its force-field behaviour."""
+
+    def test_warns_when_no_regressor(self, diffusion):
+        """Constructing ffpc without a forces model warns about the fallback."""
+        with pytest.warns(UserWarning, match="no force-field model available"):
+            ForcefieldCorrectorSampler(
+                diffusion.score_model, diffusion.noisers, regressor_fn=None
+            )
+
+    def test_warning_names_the_skipped_terminal_steps(self, diffusion):
+        """The warning states how many terminal steps are being dropped."""
+        with pytest.warns(UserWarning, match="all 200 terminal langevin_md steps"):
+            ForcefieldCorrectorSampler(
+                diffusion.score_model,
+                diffusion.noisers,
+                regressor_fn=None,
+                terminal_steps=200,
+                terminal_dynamics="langevin_md",
+                temperature=0.5,
+            )
+
+    def test_no_warning_when_regressor_present(self, diffusion):
+        """A model with a forces head must not trigger the fallback warning."""
+        batch, _ = _make_ffpc_batch(diffusion)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            ForcefieldCorrectorSampler(
+                diffusion.score_model,
+                diffusion.noisers,
+                regressor_fn=_make_mock_regressor(batch),
+                terminal_steps=10,
+                temperature=0.5,
+            )
+
+    def test_temperature_warning_suppressed_without_regressor(self, diffusion):
+        """Only the fallback warning fires; temperature is moot with no terminal phase."""
+        with pytest.warns(UserWarning) as record:
+            ForcefieldCorrectorSampler(
+                diffusion.score_model,
+                diffusion.noisers,
+                regressor_fn=None,
+                terminal_steps=10,
+            )
+        messages = [str(w.message) for w in record]
+        assert len(messages) == 1, messages
+        assert "no force-field model available" in messages[0]
+
+    def test_sample_warns_for_model_without_forces_head(self, diffusion):
+        """End-to-end: requesting terminal steps on a score-only model warns."""
+        assert diffusion.regressor_model is None
+        with pytest.warns(UserWarning, match="no force-field model available"):
+            diffusion.sample(
+                1,
+                steps=3,
+                atomic_numbers=[6, 8, 8],
+                cell=np.diag([10.0, 10.0, 10.0]),
+                property={"property": 1.0},
+                sampler="ffpc",
+                sampler_kwargs={"terminal_steps": 5, "temperature": 0.5},
+            )
+
+
+class TestPostDiffusionRelaxation:
+    """Relaxation is driven by max_extra_steps, not by the guidance scale."""
+
+    @staticmethod
+    def _unconverged_regressor(batch):
+        """Constant forces well above any threshold, so relaxation never converges."""
+        batch["forces_prediction"] = torch.ones_like(batch.pos)
+        return batch
+
+    def _sample(self, diffusion, guidance, max_extra_steps, steps=3, **kw):
+        from agedi.diffusion import ForcefieldGuidanceConfig
+
+        diffusion.regressor_model = self._unconverged_regressor
+        try:
+            return diffusion.sample(
+                1,
+                steps=steps,
+                atomic_numbers=[6, 8, 8],
+                cell=np.diag([10.0, 10.0, 10.0]),
+                property={"property": 1.0},
+                save_trajectory=True,
+                ff_guidance=ForcefieldGuidanceConfig(
+                    guidance=guidance,
+                    force_threshold=0.05,
+                    max_extra_steps=max_extra_steps,
+                ),
+                **kw,
+            )[0]
+        finally:
+            diffusion.regressor_model = None
+
+    def test_relaxation_runs_without_guidance(self, diffusion):
+        """max_extra_steps alone triggers relaxation; it used to be a silent no-op."""
+        steps, extra = 3, 5
+        traj = self._sample(diffusion, guidance=0.0, max_extra_steps=extra)
+        # steps pre-step frames + extra relaxation frames; the last relaxation
+        # frame is the final structure, so nothing is appended after it.
+        assert len(traj) == steps + extra
+
+    def test_no_relaxation_when_max_extra_steps_zero(self, diffusion):
+        """Without relaxation steps the trajectory is just the diffusion path."""
+        steps = 3
+        traj = self._sample(diffusion, guidance=0.0, max_extra_steps=0)
+        assert len(traj) == steps + 1
+
+    def test_guidance_still_triggers_relaxation(self, diffusion):
+        """The original guidance-driven path is unchanged."""
+        steps, extra = 3, 5
+        traj = self._sample(diffusion, guidance=1.0, max_extra_steps=extra)
+        assert len(traj) == steps + extra
+
+    def test_relaxation_without_guidance_gets_persistent_step_sizer(self, diffusion):
+        """A persistent L-BFGS sizer is allocated so curvature history accumulates.
+
+        Without it, post_diffusion_relaxation_step builds a throwaway sizer on
+        every call and the relaxation degenerates to fixed-size steps.
+        """
+        self._sample(diffusion, guidance=0.0, max_extra_steps=5)
+        assert diffusion.lbfgs_step_sizer is not None
+
+    def test_relaxation_runs_with_ffpc(self, diffusion):
+        """Relaxation composes with a sampler that has its own force-field use."""
+        steps, extra = 3, 5
+        traj = self._sample(
+            diffusion,
+            guidance=0.0,
+            max_extra_steps=extra,
+            steps=steps,
+            sampler="ffpc",
+            sampler_kwargs={
+                "corrector_steps": 1,
+                "terminal_steps": 0,
+                "temperature": 0.5,
+            },
+        )
+        assert len(traj) == steps + extra
+
+    def test_relaxation_skipped_when_already_converged(self, diffusion):
+        """Structures below force_threshold need no relaxation steps."""
+        from agedi.diffusion import ForcefieldGuidanceConfig
+
+        def _converged(batch):
+            batch["forces_prediction"] = torch.zeros_like(batch.pos)
+            return batch
+
+        steps = 3
+        diffusion.regressor_model = _converged
+        try:
+            traj = diffusion.sample(
+                1,
+                steps=steps,
+                atomic_numbers=[6, 8, 8],
+                cell=np.diag([10.0, 10.0, 10.0]),
+                property={"property": 1.0},
+                save_trajectory=True,
+                ff_guidance=ForcefieldGuidanceConfig(
+                    guidance=0.0, force_threshold=0.05, max_extra_steps=5
+                ),
+            )[0]
+        finally:
+            diffusion.regressor_model = None
+
+        assert len(traj) == steps + 1
+
+    def test_no_relaxation_without_regressor(self, diffusion):
+        """max_extra_steps cannot relax a model that has no forces head."""
+        from agedi.diffusion import ForcefieldGuidanceConfig
+
+        assert diffusion.regressor_model is None
+        steps = 3
+        traj = diffusion.sample(
+            1,
+            steps=steps,
+            atomic_numbers=[6, 8, 8],
+            cell=np.diag([10.0, 10.0, 10.0]),
+            property={"property": 1.0},
+            save_trajectory=True,
+            ff_guidance=ForcefieldGuidanceConfig(
+                guidance=0.0, force_threshold=0.05, max_extra_steps=5
+            ),
+        )[0]
+        assert len(traj) == steps + 1
+
+
+class TestTerminalConfinement:
+    """ffpc terminal dynamics must respect the z-confinement slab."""
+
+    CONF = (2.0, 8.0)
+
+    @staticmethod
+    def _push_up(batch):
+        """Strong constant +z force, enough to drive atoms through the wall."""
+        f = torch.zeros_like(batch.pos)
+        f[:, 2] = 50.0
+        batch["forces_prediction"] = f
+        return batch
+
+    def _sample(self, diffusion, **sampler_kwargs):
+        diffusion.regressor_model = self._push_up
+        try:
+            out = diffusion.sample(
+                2,
+                steps=4,
+                atomic_numbers=[6, 8, 8],
+                cell=np.diag([10.0, 10.0, 10.0]),
+                property={"property": 1.0},
+                confinement=self.CONF,
+                sampler="ffpc",
+                sampler_kwargs=sampler_kwargs,
+                save_trajectory=True,
+            )
+        finally:
+            diffusion.regressor_model = None
+        return out
+
+    def _assert_confined(self, trajectories):
+        """Assert every frame stays in the slab, except the initial prior draw.
+
+        Frame 0 is the raw sample from the positions prior.  Confinement is
+        imposed from the first denoise step onward, so an unconfined prior
+        (as in this fixture) can start outside the slab.
+        """
+        lo, hi = self.CONF
+        for traj in trajectories:
+            for i, frame in enumerate(traj[1:], start=1):
+                z = frame.pos[:, 2]
+                assert z.min() >= lo - 1e-4, f"frame {i}: z={z.min():.4f} below {lo}"
+                assert z.max() <= hi + 1e-4, f"frame {i}: z={z.max():.4f} above {hi}"
+
+    def test_terminal_overdamped_respects_confinement(self, diffusion):
+        """Overdamped terminal steps must not push atoms out of the slab."""
+        self._assert_confined(
+            self._sample(
+                diffusion,
+                corrector_steps=1,
+                terminal_steps=30,
+                terminal_dynamics="overdamped",
+                terminal_step_size=0.05,
+                temperature=0.1,
+            )
+        )
+
+    def test_terminal_langevin_md_respects_confinement(self, diffusion):
+        """BAOAB terminal steps must not push atoms out of the slab."""
+        self._assert_confined(
+            self._sample(
+                diffusion,
+                corrector_steps=1,
+                terminal_steps=30,
+                terminal_dynamics="langevin_md",
+                terminal_step_size=1.0,
+                temperature=0.1,
+            )
+        )
+
+    def test_unconfined_sampling_is_unaffected(self, diffusion):
+        """Without confinement the terminal phase is free to move atoms anywhere."""
+        diffusion.regressor_model = self._push_up
+        try:
+            out = diffusion.sample(
+                1,
+                steps=4,
+                atomic_numbers=[6, 8, 8],
+                cell=np.diag([10.0, 10.0, 10.0]),
+                property={"property": 1.0},
+                sampler="ffpc",
+                sampler_kwargs={
+                    "corrector_steps": 0,
+                    "terminal_steps": 30,
+                    "terminal_dynamics": "langevin_md",
+                    "terminal_step_size": 1.0,
+                    "temperature": 0.1,
+                },
+            )
+        finally:
+            diffusion.regressor_model = None
+        assert out[0].pos.isfinite().all()
+
+    def test_velocity_is_reflected_at_the_wall(self, diffusion):
+        """An atom driven into a wall must bounce, not stick to it.
+
+        A bare clamp leaves the velocity pointing into the wall, so the atom
+        stays pinned at the boundary for the rest of the run.
+        """
+        trajectories = self._sample(
+            diffusion,
+            corrector_steps=0,
+            terminal_steps=40,
+            terminal_dynamics="langevin_md",
+            terminal_step_size=1.0,
+            temperature=0.1,
+        )
+
+        # Terminal frames are the tail of the trajectory.
+        z_max_per_frame = [frame.pos[:, 2].max().item() for frame in trajectories[0]]
+        terminal = z_max_per_frame[-40:]
+
+        # With reflection the topmost atom leaves the wall again; pinned-at-the
+        # -ceiling would make every terminal frame sit exactly at z_max.
+        at_wall = sum(1 for z in terminal if abs(z - self.CONF[1]) < 1e-4)
+        assert at_wall < len(terminal), "every terminal frame is pinned at the wall"

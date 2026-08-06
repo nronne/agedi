@@ -185,6 +185,16 @@ click.rich_click.OPTION_GROUPS.update(
     "--save_trajectory", is_flag=True, help="Save entire diffusion trajectory"
 )
 @click.option(
+    "--save_corrector_frames",
+    is_flag=True,
+    help=(
+        "Also save every Langevin corrector sub-step in the trajectory, giving a "
+        "complete frame-by-frame record. Requires --save_trajectory and a sampler "
+        "with correctors (--sampler pc or ffpc). Multiplies trajectory length by "
+        "roughly the corrector count."
+    ),
+)
+@click.option(
     "--ff_guidance",
     type=float,
     default=0.0,
@@ -253,6 +263,7 @@ def sample(path: str, **kwargs) -> None:
         progress_bar=kwargs["progress_bar"],
         print_timings=kwargs["print_timings"],
         save_trajectory=kwargs["save_trajectory"],
+        save_corrector_frames=kwargs["save_corrector_frames"],
         confinement=kwargs["confinement"],
         ff_guidance=ff_guidance,
         as_atoms=True,
