@@ -41,6 +41,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `RegressorModel.loss` with `use_weighting=True` applied per-atom weights to
   the per-structure energy loss; energies now use per-structure weights.
 
+## [1.3.2] - 2026-08-06
+
+### Added
+- **`save_corrector_frames`** on `sample()` / `functional.sample()` /
+  `agedi sample --save_corrector_frames` — records every Langevin corrector
+  sub-step in the saved trajectory, giving a complete frame-by-frame record of
+  sampling.  Requires `save_trajectory` and a sampler that runs correctors
+  (`"pc"`, `"ffpc"`, or `corrector_steps > 0`).  Off by default because it
+  multiplies trajectory length by roughly the corrector count.
+
+  With capture on, one outer diffusion step contributes `1 + corrector_steps`
+  frames, so a run has `steps · (1 + corrector_steps) + 1` frames — plus
+  `1 + terminal_steps` when ffpc terminal dynamics are active.
+- `Sampler._capture_frame()` / `Sampler._reset_pending()` — frame-capture
+  helpers on the sampler base class, so custom samplers can contribute
+  sub-step frames to the trajectory.
+
+### Changed
+- **`LBFGSStepSizer` now mirrors `ase.optimize.LBFGS`.**  Verified to match
+  ASE's trajectory to float64 precision (`7e-15` over 20 steps on an EMT
+  cluster).  Three deviations were corrected:
+  - The step limit now scales the **whole** displacement by
+    `maxstep / longest_atom_step`, as ASE's `determine_step` does.  It
+    previously rescaled each atom independently, which rotated the search
+    direction instead of shortening the step — and with the old 0.1 Å cap it
+    was engaging on nearly every relaxation step.
+  - The inverse-Hessian seed `H0 = 1/alpha` is now constant, as in ASE.  It was
+    being updated each step by a Barzilai-Borwein estimate, which made the step
+    length oscillate.
+  - Defaults now match ASE: `maxstep=0.2` (was 0.1), `memory=100` (was 10),
+    `alpha=70.0`, `damping=1.0`.  Post-diffusion relaxation takes the full
+    L-BFGS step; it previously scaled every step by 0.1, roughly tenfold
+    slowing convergence.
+
+  `LBFGSStepSizer(memory_size=..., initial_step=...)` becomes
+  `LBFGSStepSizer(memory_size=..., maxstep=..., alpha=..., damping=...)`.
+
+### Fixed
+- `ffpc` terminal dynamics ignored the z-confinement slab, in both
+  `overdamped` and `langevin_md` modes.  They write `batch.pos` directly and so
+  never inherited the clamp that `PositionsNoiser._denoise` applies, letting
+  atoms drift out of the slab during the terminal phase.  (The diffusion steps,
+  correctors, force-field guidance and post-diffusion relaxation were all
+  unaffected.)  Atoms reaching a wall now have their z-velocity reflected
+  rather than only clamped, so they bounce instead of staying pinned to the
+  boundary for the rest of the run.
+- `BatchedLBFGSStepSizer.compute_step` assigned steps to the wrong structures
+  when any graph in the batch had no atoms: results were collected into a list
+  and re-indexed by list position rather than graph id, shifting every
+  subsequent graph's step onto its neighbour.
+- `save_trajectory` no longer appends a duplicate final frame when
+  post-diffusion relaxation ran; the relaxation loop already captured that
+  state.
+- Post-diffusion relaxation is no longer gated on `guidance > 0`.
+  `ForcefieldGuidanceConfig(guidance=0.0, max_extra_steps=200)` previously did
+  nothing at all; `max_extra_steps` now enables relaxation on its own, so the
+  final structures can be relaxed without guidance perturbing the diffusion
+  trajectory.  A persistent L-BFGS step sizer is allocated in that case too —
+  without one, each relaxation step built a throwaway sizer and no curvature
+  history accumulated.
+- `ForcefieldCorrectorSampler` now emits a `UserWarning` when the diffusion
+  model has no regressor (forces) head.  Previously `sampler="ffpc"` on a
+  score-only model silently dropped both the terminal dynamics and the
+  force-field blending in the corrector, degrading to plain
+  predictor-corrector sampling; the only symptom was a saved trajectory
+  missing all `terminal_steps` frames.  The warning names the number of
+  terminal steps being skipped.  The separate "temperature not set" warning is
+  suppressed in that case, since temperature only affects the terminal phase
+  that will not run.
+
 ## [1.3.1] - 2026-07-02
 
 ### Fixed

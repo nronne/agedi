@@ -220,7 +220,17 @@ during the corrector phase:
    \tilde{s}(x, t) = (1 - f(t))\,s_\theta(x) + f(t)\,F(x)
 
 where :math:`f(t) = (1-t)^\zeta`.  It optionally runs additional Langevin
-dynamics after the last diffusion step via ``terminal_steps``:
+dynamics after the last diffusion step via ``terminal_steps``.
+
+Terminal dynamics respect ``confinement``: atoms are kept inside the z-slab and
+bounce off its walls, and frozen (masked) template atoms never move.
+
+``ffpc`` requires a model trained with a forces head.  Without one there is no
+force field to blend or to drive the terminal dynamics, so the sampler warns
+and degrades to plain predictor-corrector sampling: ``mixing_zeta`` is ignored
+and no terminal steps run, leaving saved trajectories short by exactly
+``1 + terminal_steps`` frames.  If your trajectories are missing their terminal
+frames, check that the model actually has a regressor head.
 
 .. code-block:: python
 
@@ -278,6 +288,50 @@ Full list of ``ffpc`` kwargs:
 - ``terminal_dynamics`` (default ``"overdamped"``): ``"overdamped"`` or ``"langevin_md"``
 - ``terminal_step_size`` (default ``None``): auto-selected per mode
 - ``terminal_friction`` (default ``None``): auto-selected (``langevin_md`` only)
+
+
+.. _saving-every-step:
+
+Saving every sampling step
+---------------------------
+
+``save_trajectory=True`` records one frame per outer reverse-diffusion step,
+plus any ffpc terminal-dynamics frames and post-diffusion relaxation frames.
+Langevin corrector sub-steps happen *inside* one outer step and are not
+recorded by default — with ``corrector_steps=5`` you still get one frame per
+diffusion step.
+
+Add ``save_corrector_frames=True`` to record those too:
+
+.. code-block:: python
+
+   trajectories = sample(
+       diffusion,
+       n_samples=4,
+       formula="Pd4O4",
+       steps=200,
+       sampler="ffpc",
+       sampler_kwargs=dict(
+           corrector_steps=5,
+           terminal_steps=200,
+           terminal_dynamics="langevin_md",
+           temperature=0.026,
+       ),
+       save_trajectory=True,
+       save_corrector_frames=True,
+   )
+
+Each outer step then contributes ``1 + corrector_steps`` frames — the state
+entering the step, the post-predictor state, and each corrector state — so a
+run has ``steps * (1 + corrector_steps) + 1`` frames, plus
+``1 + terminal_steps`` when terminal dynamics are active.  For the example
+above that is ``200 * 6 + 1 + 200 = 1401`` frames per sample, versus ``401``
+without corrector capture.
+
+Because capture multiplies trajectory length by roughly the corrector count,
+it is off by default.  Turn it on when you need to inspect the Langevin
+relaxation itself — for instance when diagnosing a ``corrector_step_size``
+that is too large — rather than for routine production runs.
 
 
 Force-field training and prediction

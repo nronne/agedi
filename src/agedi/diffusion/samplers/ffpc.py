@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from typing import TYPE_CHECKING, Callable, ClassVar, List, Literal, Optional
 
 import torch
@@ -81,7 +82,10 @@ class ForcefieldCorrectorSampler(Sampler):
 
     When no regressor is attached (``regressor_fn=None``), the corrector falls
     back to a pure Langevin step with the neural score, and terminal steps are
-    skipped.
+    skipped — leaving this sampler equivalent to
+    :class:`~agedi.diffusion.samplers.PredictorCorrectorSampler`.  A
+    :class:`UserWarning` is emitted in that case, since the resulting
+    trajectory silently lacks the terminal frames that were asked for.
 
     Parameters
     ----------
@@ -92,7 +96,9 @@ class ForcefieldCorrectorSampler(Sampler):
     regressor_fn : callable or None
         Force-field model: ``regressor_fn(batch) -> batch`` with
         ``forces_prediction`` set.  Passed by
-        :meth:`~agedi.diffusion.Diffusion._resolve_sampler`.
+        :meth:`~agedi.diffusion.Diffusion._resolve_sampler`, which supplies the
+        model's regressor head — or ``None`` when it was trained without one,
+        which triggers the fallback warning described above.
     corrector_steps : int
         Number of Langevin corrector steps per predictor step.  Default: ``1``.
     corrector_step_size : float
@@ -174,8 +180,23 @@ class ForcefieldCorrectorSampler(Sampler):
         terminal_dynamics: Literal["overdamped", "langevin_md"] = "overdamped",
         terminal_friction: Optional[float] = None,
     ) -> None:
-        if temperature is None:
-            import warnings
+        if regressor_fn is None:
+            ignored = ["force-field blending in the corrector (mixing_zeta)"]
+            if terminal_steps > 0:
+                ignored.append(
+                    f"all {terminal_steps} terminal {terminal_dynamics} steps"
+                )
+            warnings.warn(
+                "ForcefieldCorrectorSampler: no force-field model available — the "
+                "diffusion model has no regressor (forces) head, so ffpc degrades "
+                "to plain predictor-corrector sampling. Ignored: "
+                + "; ".join(ignored)
+                + ". Saved trajectories will be correspondingly shorter. Train "
+                "with a forces head to enable these.",
+                UserWarning,
+                stacklevel=2,
+            )
+        elif temperature is None:
             warnings.warn(
                 "ForcefieldCorrectorSampler: temperature not set, defaulting to 1.0. "
                 "For physical terminal dynamics set temperature to k_B·T in the same "
@@ -183,6 +204,7 @@ class ForcefieldCorrectorSampler(Sampler):
                 UserWarning,
                 stacklevel=2,
             )
+        if temperature is None:
             temperature = 1.0
         super().__init__(score_fn, noisers)
         self.regressor_fn = regressor_fn
@@ -197,9 +219,6 @@ class ForcefieldCorrectorSampler(Sampler):
         # Cache the positions noiser for overdamped terminal steps.
         self._pos_noiser = next((n for n in noisers if n.key == "pos"), None)
         self._corrector_dt: Optional[torch.Tensor] = None
-        # Terminal frames collected during the last step; consumed by _sample_batch
-        # to extend the saved trajectory.  Cleared at the start of every step().
-        self._pending_frames: List = []
 
     def step(
         self,
@@ -214,10 +233,15 @@ class ForcefieldCorrectorSampler(Sampler):
         3. For each corrector iteration: evaluate neural score, blend with
            force-field gradient, apply Langevin step.
         4. If ``last`` and ``terminal_steps > 0``: terminal phase with the
-           chosen dynamics.  Intermediate frames are stored in
-           :attr:`_pending_frames` for trajectory capture.
+           chosen dynamics.
+
+        Terminal frames are always stored in ``_pending_frames`` for trajectory
+        capture.  Corrector frames are stored there too when
+        :attr:`~agedi.diffusion.samplers.Sampler.save_corrector_frames` is set;
+        the final corrector state is excluded because it is the return value,
+        which the outer loop records itself.
         """
-        self._pending_frames.clear()
+        self._reset_pending()
 
         # --- Step 1: EM predictor (neural score only) ---
         batch = self.score_fn(batch)
@@ -231,6 +255,8 @@ class ForcefieldCorrectorSampler(Sampler):
             if last and self.terminal_steps > 0 and self.regressor_fn is not None:
                 self._run_terminal(batch)
             return batch
+
+        self._capture_frame(batch)
 
         # Advance time to t_{i-1} for the corrector.
         batch.time = (batch.time - dt).clamp(min=0.0)
@@ -246,7 +272,7 @@ class ForcefieldCorrectorSampler(Sampler):
             )
 
         # --- Step 2: Corrector (Langevin with augmented score) ---
-        for _ in range(self.corrector_steps):
+        for i in range(self.corrector_steps):
             batch = self.score_fn(batch)
             if self.regressor_fn is not None:
                 batch = self.regressor_fn(batch)
@@ -261,6 +287,8 @@ class ForcefieldCorrectorSampler(Sampler):
             batch.wrap_positions()
             self._check_finite(batch, "FFPC augmented Langevin corrector step")
             batch.update_graph()
+            if i < self.corrector_steps - 1:
+                self._capture_frame(batch)
 
         # --- Step 3: Terminal phase (force-field only, last step) ---
         if last and self.terminal_steps > 0 and self.regressor_fn is not None:
@@ -271,16 +299,72 @@ class ForcefieldCorrectorSampler(Sampler):
     def _run_terminal(self, batch: "AtomsGraph") -> None:
         """Dispatch to the selected terminal dynamics.
 
-        Prepends a bridge frame (the denoised state before terminal dynamics
-        start) unless corrector frames already captured it as their last
-        entry — which is the case when ``corrector_steps > 0``.
+        Prepends a bridge frame holding the denoised state before terminal
+        dynamics start.  Corrector capture deliberately omits this state (it
+        would otherwise be the sampler's return value), so the bridge frame is
+        what keeps the trajectory gap-free in both capture modes.
         """
-        if not self._pending_frames:
-            self._pending_frames.append(batch.to_data_list())
+        self._pending_frames.append(batch.to_data_list())
         if self.terminal_dynamics == "langevin_md":
             self._terminal_langevin_md(batch)
         else:
             self._terminal_overdamped(batch)
+        # Terminal dynamics end on the state that step() returns, so the outer
+        # loop must not append it a second time.
+        self._pending_includes_final = True
+
+    @staticmethod
+    def _confine(
+        batch: "AtomsGraph",
+        new_pos: torch.Tensor,
+        vel: Optional[torch.Tensor] = None,
+    ) -> "tuple[torch.Tensor, Optional[torch.Tensor]]":
+        """Keep candidate positions inside the z-confinement slab.
+
+        Terminal dynamics write ``batch.pos`` directly instead of going through
+        :meth:`~agedi.diffusion.noisers.Noiser.denoise`, so they do not inherit
+        the confinement clamp that
+        :meth:`~agedi.diffusion.noisers.pos.PositionsNoiser._denoise` applies.
+        Without this, atoms drift out of the slab during the terminal phase.
+
+        Atoms that reach a wall have their z-velocity reflected rather than
+        merely zeroed by the clamp: a clamped atom whose velocity still points
+        into the wall would otherwise stay pinned there for the rest of the run.
+
+        Masked atoms need no special handling — the ``AtomsGraph.pos`` setter
+        restores them on assignment.
+
+        Parameters
+        ----------
+        batch : AtomsGraph
+            Batch being propagated; supplies ``confinement`` and ``batch``.
+        new_pos : torch.Tensor
+            Candidate positions, before assignment to ``batch.pos``.
+        vel : torch.Tensor, optional
+            Velocities to reflect.  ``None`` for overdamped dynamics, which
+            carry no momenta.
+
+        Returns
+        -------
+        tuple
+            The clamped positions and the (possibly reflected) velocities.
+        """
+        confinement = getattr(batch, "confinement", None)
+        if confinement is None:
+            return new_pos, vel
+
+        bounds = confinement[batch.batch]  # (n_atoms, 2)
+        z = new_pos[:, 2]
+        outside = (z < bounds[:, 0]) | (z > bounds[:, 1])
+
+        new_pos = new_pos.clone()
+        new_pos[:, 2] = torch.clamp(z, min=bounds[:, 0], max=bounds[:, 1])
+
+        if vel is not None:
+            vel = vel.clone()
+            vel[:, 2] = torch.where(outside, -vel[:, 2], vel[:, 2])
+
+        return new_pos, vel
 
     def _terminal_overdamped(self, batch: "AtomsGraph") -> None:
         """Overdamped Langevin terminal steps (no momenta).
@@ -300,9 +384,11 @@ class ForcefieldCorrectorSampler(Sampler):
             mean = batch.pos + eps * batch.forces_prediction
             if self._pos_noiser is not None:
                 w = self._pos_noiser.distribution.get_callable(batch)
-                batch.pos = w(mean, noise_std)
+                new_pos = w(mean, noise_std)
             else:
-                batch.pos = mean + noise_std * torch.randn_like(batch.pos)
+                new_pos = mean + noise_std * torch.randn_like(batch.pos)
+            new_pos, _ = self._confine(batch, new_pos)
+            batch.pos = new_pos
             batch.wrap_positions()
             self._check_finite(batch, "FFPC terminal overdamped Langevin step")
             batch.update_graph()
@@ -356,14 +442,18 @@ class ForcefieldCorrectorSampler(Sampler):
             # B: half-step velocity kick from forces.
             vel = vel + 0.5 * dt * forces / masses
 
-            # A: half-step position drift.
-            batch.pos = batch.pos + 0.5 * dt * vel
+            # A: half-step position drift.  Confinement is enforced after each
+            # drift rather than once per step, so an atom cannot leave the slab
+            # mid-step and have that excursion feed the thermostat.
+            new_pos, vel = self._confine(batch, batch.pos + 0.5 * dt * vel, vel)
+            batch.pos = new_pos
 
             # O: Ornstein-Uhlenbeck thermostat.
             vel = alpha * vel + sigma_ou * torch.randn_like(vel)
 
             # A: half-step position drift.
-            batch.pos = batch.pos + 0.5 * dt * vel
+            new_pos, vel = self._confine(batch, batch.pos + 0.5 * dt * vel, vel)
+            batch.pos = new_pos
             batch.wrap_positions()
             self._check_finite(batch, "FFPC terminal Langevin MD step (BAOAB)")
             batch.update_graph()

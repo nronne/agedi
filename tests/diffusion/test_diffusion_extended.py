@@ -13,7 +13,7 @@ from agedi.data import AtomsGraph
 
 class TestLBFGSStepSizer:
     def _make(self):
-        return LBFGSStepSizer(memory_size=5, initial_step=0.1)
+        return LBFGSStepSizer(memory_size=5)
 
     def test_first_step_uses_scaling(self):
         sizer = self._make()
@@ -44,7 +44,7 @@ class TestLBFGSStepSizer:
 
 class TestBatchedLBFGSStepSizer:
     def test_compute_step_correct_shape(self):
-        sizer = BatchedLBFGSStepSizer(batch_size=2, memory_size=3, initial_step=0.05)
+        sizer = BatchedLBFGSStepSizer(batch_size=2, memory_size=3)
         pos = torch.zeros((6, 3))
         forces = torch.ones((6, 3))
         batch_idx = torch.tensor([0, 0, 0, 1, 1, 1])
@@ -52,7 +52,7 @@ class TestBatchedLBFGSStepSizer:
         assert step.shape == pos.shape
 
     def test_reset_delegates(self):
-        sizer = BatchedLBFGSStepSizer(batch_size=2, memory_size=3, initial_step=0.05)
+        sizer = BatchedLBFGSStepSizer(batch_size=2, memory_size=3)
         pos = torch.zeros((4, 3))
         forces = torch.ones((4, 3))
         batch_idx = torch.tensor([0, 0, 1, 1])
@@ -255,3 +255,127 @@ def test_loss_respects_regressor_loss_weight(diffusion_with_regressor, batch):
     assert torch.isclose(losses_zero["loss"], diffusion_only["loss"]), (
         "With weight=0, combined loss should equal the diffusion-only loss"
     )
+
+
+class TestMatchesASELBFGS:
+    """The step sizer must reproduce ``ase.optimize.LBFGS`` step for step."""
+
+    @staticmethod
+    def _cluster():
+        from ase.calculators.emt import EMT
+        from ase.cluster import Icosahedron
+
+        atoms = Icosahedron("Cu", 2)
+        atoms.rattle(0.2, seed=1)
+        atoms.calc = EMT()
+        return atoms
+
+    def test_trajectory_matches_ase(self):
+        """20 steps on an EMT cluster must agree with ASE to float64 precision."""
+        import numpy as np
+        from ase.optimize import LBFGS
+
+        n_steps = 20
+
+        ase_atoms = self._cluster()
+        opt = LBFGS(ase_atoms, logfile=None)
+        ase_positions = []
+        for _ in range(n_steps):
+            opt.step()
+            ase_positions.append(ase_atoms.get_positions().copy())
+
+        our_atoms = self._cluster()
+        sizer = LBFGSStepSizer()
+        for i, ase_pos in enumerate(ase_positions):
+            step = sizer.compute_step(
+                torch.tensor(our_atoms.get_positions(), dtype=torch.float64),
+                torch.tensor(our_atoms.get_forces(), dtype=torch.float64),
+            ).numpy()
+            our_atoms.set_positions(our_atoms.get_positions() + step)
+            assert np.allclose(our_atoms.get_positions(), ase_pos, atol=1e-10), (
+                f"diverged from ASE at step {i}"
+            )
+
+    def test_defaults_match_ase(self):
+        """Defaults must track ASE's, or trajectories silently drift apart."""
+        from ase.optimize import LBFGS
+
+        sizer = LBFGSStepSizer()
+        assert sizer.maxstep == LBFGS.defaults["maxstep"] == 0.2
+        assert sizer.memory_size == 100
+        assert sizer.damping == 1.0
+        assert sizer.H0 == 1.0 / 70.0
+
+    def test_h0_is_constant(self):
+        """H0 is a fixed seed in ASE; an adaptive one makes the step oscillate."""
+        sizer = LBFGSStepSizer()
+        pos = torch.zeros((4, 3), dtype=torch.float64)
+        forces = torch.ones((4, 3), dtype=torch.float64)
+        h0_before = sizer.H0
+        for k in range(5):
+            sizer.compute_step(pos + 0.01 * k * forces, forces * (1.0 - 0.1 * k))
+        assert sizer.H0 == h0_before
+
+    def test_step_limit_preserves_direction(self):
+        """maxstep scales the whole step, so the direction is unchanged."""
+        sizer = LBFGSStepSizer(maxstep=0.05)
+        dr = torch.tensor(
+            [[10.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.1]],
+            dtype=torch.float64,
+        )
+        limited = sizer.determine_step(dr.clone())
+
+        assert torch.isclose(
+            torch.norm(limited, dim=1).max(), torch.tensor(0.05, dtype=torch.float64)
+        )
+        # Every atom scaled by the same factor => directions preserved.
+        ratios = torch.norm(limited, dim=1) / torch.norm(dr, dim=1)
+        assert torch.allclose(ratios, ratios[0])
+
+    def test_short_step_is_not_scaled_up(self):
+        """A step below maxstep is left alone rather than stretched to the limit."""
+        sizer = LBFGSStepSizer(maxstep=1.0)
+        dr = torch.tensor([[0.01, 0.0, 0.0]], dtype=torch.float64)
+        assert torch.allclose(sizer.determine_step(dr.clone()), dr)
+
+
+class TestBatchedStepIsolation:
+    """Each structure in a batch must be optimised independently."""
+
+    def test_per_graph_steps_do_not_leak(self):
+        """A graph's step must land on its own atoms, not a neighbour's rows."""
+        sizer = BatchedLBFGSStepSizer(batch_size=3)
+        pos = torch.zeros((6, 3), dtype=torch.float64)
+        forces = torch.zeros((6, 3), dtype=torch.float64)
+        # Graph 1 has no atoms; graphs 0 and 2 have distinct force directions.
+        batch_idx = torch.tensor([0, 0, 2, 2, 2, 2])
+        forces[batch_idx == 0] = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float64)
+        forces[batch_idx == 2] = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float64)
+
+        step = sizer.compute_step(pos, forces, batch_idx)
+
+        # Graph 0 moves only in x, graph 2 only in z.  Re-indexing results by
+        # position rather than graph id would put graph 2's step on graph 0.
+        assert torch.all(step[batch_idx == 0][:, 1:] == 0)
+        assert torch.all(step[batch_idx == 0][:, 0] > 0)
+        assert torch.all(step[batch_idx == 2][:, :2] == 0)
+        assert torch.all(step[batch_idx == 2][:, 2] > 0)
+
+    def test_maxstep_applied_per_structure(self):
+        """The step cap is per structure, as it would be relaxing each alone."""
+        sizer = BatchedLBFGSStepSizer(batch_size=2, maxstep=0.1)
+        pos = torch.zeros((4, 3), dtype=torch.float64)
+        forces = torch.zeros((4, 3), dtype=torch.float64)
+        batch_idx = torch.tensor([0, 0, 1, 1])
+        forces[batch_idx == 0] = torch.tensor([1000.0, 0.0, 0.0], dtype=torch.float64)
+        forces[batch_idx == 1] = torch.tensor([1e-6, 0.0, 0.0], dtype=torch.float64)
+
+        step = sizer.compute_step(pos, forces, batch_idx)
+
+        # The huge-force structure is capped; the tiny-force one is untouched
+        # rather than being dragged along by its batch-mate.
+        assert torch.isclose(
+            torch.norm(step[batch_idx == 0], dim=1).max(),
+            torch.tensor(0.1, dtype=torch.float64),
+        )
+        assert torch.norm(step[batch_idx == 1], dim=1).max() < 1e-7

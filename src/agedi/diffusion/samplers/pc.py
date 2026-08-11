@@ -64,7 +64,14 @@ class PredictorCorrectorSampler(Sampler):
         2. Advance ``batch.time`` to ``t - dt``.
         3. For each corrector iteration: evaluate score, apply Langevin step via
            ``noiser.langevin_step()``, wrap & rebuild.
+
+        When :attr:`~agedi.diffusion.samplers.Sampler.save_corrector_frames` is
+        set, the post-predictor state and every corrector state except the last
+        are recorded in ``_pending_frames``.  The last corrector state is the
+        return value, which the outer loop records itself.
         """
+        self._reset_pending()
+
         # --- Predictor (EM) ---
         batch = self.score_fn(batch)
         for noiser in self.noisers[::-1]:
@@ -75,6 +82,8 @@ class PredictorCorrectorSampler(Sampler):
 
         if self.corrector_steps == 0:
             return batch
+
+        self._capture_frame(batch)
 
         # Advance time to t_{i-1} for the corrector.
         batch.time = (batch.time - dt).clamp(min=0.0)
@@ -90,7 +99,7 @@ class PredictorCorrectorSampler(Sampler):
             )
 
         # --- Corrector (Langevin at t_{i-1}) ---
-        for _ in range(self.corrector_steps):
+        for i in range(self.corrector_steps):
             batch = self.score_fn(batch)
             for noiser in self.noisers[::-1]:
                 batch = noiser.langevin_step(batch, self._corrector_dt)
@@ -100,5 +109,7 @@ class PredictorCorrectorSampler(Sampler):
                 f"Langevin corrector step (corrector_step_size={self.corrector_step_size})",
             )
             batch.update_graph()
+            if i < self.corrector_steps - 1:
+                self._capture_frame(batch)
 
         return batch
