@@ -247,6 +247,25 @@ def _print_training_config(hparams: dict) -> None:
         meta.add_row("  repeat", str(repeat))
         meta.add_row("  repeat_epoch", str(hparams.get("repeat_epoch", "")))
 
+    if hparams.get("force_field"):
+        meta.add_row("", "")
+        meta.add_row("[bold]Force field[/bold]", "")
+        references = hparams.get("reference_energies")
+        meta.add_row(
+            "  reference_energies",
+            ", ".join(f"{s}: {e:.3f}" for s, e in references.items())
+            if references
+            else "none",
+        )
+        force_loss = hparams.get("force_loss")
+        if force_loss is not None:
+            detail = (
+                f"{force_loss} (delta={hparams.get('huber_delta')})"
+                if force_loss == "huber"
+                else str(force_loss)
+            )
+            meta.add_row("  force_loss", detail)
+
     meta.add_row("", "")
     meta.add_row("[bold]Trainer[/bold]", "")
     meta.add_row("  gradient_clip_val", str(hparams.get("gradient_clip_val", "")))

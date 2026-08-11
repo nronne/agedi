@@ -7,7 +7,7 @@ import warnings
 import torch
 from datetime import timedelta
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from ase import Atoms
 from lightning import Trainer
@@ -46,6 +46,9 @@ _TRAIN_FROM_ATOMS_KEYS = frozenset(
         "mask",
         "confinement",
         "force_field",
+        "reference_energies",
+        "force_loss",
+        "huber_delta",
         "batch_size",
         "train_split",
         "val_split",
@@ -81,6 +84,100 @@ _TRAINER_KEYS = frozenset(
         "repeat_epoch",
     ]
 )
+
+
+def _resolve_reference_energies(
+    reference_energies: Union[str, Mapping[Union[int, str], float], None],
+    *,
+    data: Sequence[Atoms],
+    regressor_data: Optional[Sequence[Atoms]] = None,
+    force_field: bool = False,
+) -> Optional[Dict[int, float]]:
+    """Resolve the ``reference_energies`` argument of :func:`train_from_atoms`.
+
+    Parameters
+    ----------
+    reference_energies:
+        ``"auto"`` (fit from the data), an explicit mapping keyed by chemical
+        symbol or atomic number, or ``None`` (disabled).
+    data:
+        Training structures used for the fit.
+    regressor_data:
+        Optional regressor-only structures; also included in the fit.
+    force_field:
+        When ``False`` no regressor is built and ``None`` is returned.
+
+    Returns
+    -------
+    Dict[int, float] or None
+        Reference energies keyed by atomic number, or ``None`` when disabled.
+
+    Raises
+    ------
+    ValueError
+        If *reference_energies* is a string other than ``"auto"``, or if an
+        explicit mapping contains unknown species or non-numeric values.
+    """
+    from agedi.utils.reference_energies import (
+        fit_reference_energies,
+        format_reference_energies,
+        normalize_reference_energies,
+    )
+
+    if not force_field or reference_energies is None:
+        return None
+
+    if isinstance(reference_energies, str):
+        if reference_energies.lower() != "auto":
+            raise ValueError(
+                f"reference_energies='{reference_energies}' is not recognized; "
+                'use "auto", a mapping from species to energy, or None.'
+            )
+        structures = list(data) + list(regressor_data or [])
+        fitted = fit_reference_energies(structures)
+        if fitted:
+            logging.getLogger(__name__).info(
+                "Fitted per-species reference energies: %s",
+                format_reference_energies(fitted),
+            )
+        return fitted or None
+
+    return normalize_reference_energies(reference_energies) or None
+
+
+def _forcefield_hparams(diffusion: "Agedi") -> Dict:
+    """Summarise the force-field settings of *diffusion* for ``hparams.yaml``.
+
+    Parameters
+    ----------
+    diffusion:
+        The (possibly checkpoint-loaded) model.
+
+    Returns
+    -------
+    dict
+        Display metadata: ``force_field`` and, when a regressor is attached,
+        ``reference_energies`` (keyed by chemical symbol), ``force_loss``, and
+        ``huber_delta``.
+    """
+    from ase.data import chemical_symbols
+
+    regressor = getattr(diffusion, "regressor_model", None)
+    if regressor is None:
+        return {"force_field": False}
+
+    info: Dict = {"force_field": True}
+    for head in getattr(regressor, "heads", []):
+        if getattr(head, "key", None) == "energy" and hasattr(head, "reference_energy_dict"):
+            references = head.reference_energy_dict
+            info["reference_energies"] = {
+                chemical_symbols[z]: value for z, value in sorted(references.items())
+            } or None
+    if hasattr(regressor, "get_config"):
+        config = regressor.get_config()
+        info["force_loss"] = config["force_loss"]
+        info["huber_delta"] = config["huber_delta"]
+    return info
 
 
 def create_trainer(
@@ -303,6 +400,9 @@ def train_from_atoms(
     mask: str = "none",
     confinement: Optional[Tuple[float, float]] = None,
     force_field: bool = False,
+    reference_energies: Union[str, Mapping[Union[int, str], float], None] = "auto",
+    force_loss: str = "huber",
+    huber_delta: float = 0.01,
     batch_size: int = 64,
     train_split: Union[float, int] = 0.9,
     val_split: Union[float, int] = 0.1,
@@ -379,6 +479,28 @@ def train_from_atoms(
         guided sampling via :class:`~agedi.diffusion.ForcefieldGuidanceConfig`.
         The training data must contain DFT (or other) forces and energy.
         Default: ``False``.
+    reference_energies:
+        Per-species reference energies subtracted from the energy target when
+        ``force_field=True``.  Accepts:
+
+        * ``"auto"`` (default) – fit ``E_total ≈ Σ_Z n_Z E⁰_Z`` by linear
+          least squares over the training structures (including
+          *regressor_data*) that carry an energy.
+        * a mapping keyed by chemical symbol or atomic number, e.g.
+          ``{"Cu": -3.72, "O": -4.95}`` – use these values directly.
+        * ``None`` – no reference subtraction.
+
+        The offset is applied inside the energy head, so predicted energies
+        remain on the absolute scale of the training data.  Ignored when
+        *force_field* is ``False`` or when a *checkpoint* is given (the values
+        are then restored from the checkpoint).
+    force_loss:
+        Point-wise loss for the forces head: ``"huber"`` (default), ``"mse"``,
+        or ``"mae"``.  The Huber loss is quadratic below *huber_delta* and
+        linear above, which keeps a few large force labels from dominating the
+        gradient.
+    huber_delta:
+        Transition point of the Huber force loss in eV/Å.  Default: ``0.01``.
     batch_size:
         Mini-batch size used during training.  Default: ``64``.
     train_split:
@@ -490,6 +612,13 @@ def train_from_atoms(
             else:
                 type_map = detected_map
 
+        resolved_reference_energies = _resolve_reference_energies(
+            reference_energies,
+            data=data,
+            regressor_data=regressor_data,
+            force_field=force_field,
+        )
+
         diffusion = create_diffusion(
             model=model,
             cutoff=cutoff,
@@ -502,6 +631,9 @@ def train_from_atoms(
             conditioning_type=conditioning_type,
             confinement=confinement,
             force_field=force_field,
+            reference_energies=resolved_reference_energies,
+            force_loss=force_loss,
+            huber_delta=huber_delta,
             lr=lr,
             lr_factor=lr_factor,
             lr_patience=lr_patience,
@@ -561,7 +693,7 @@ def train_from_atoms(
         "repeat_epoch": trainer_kwargs.get("repeat_epoch"),
         "data_path": data_path,
         "checkpoint": str(checkpoint) if checkpoint is not None else None,
-    } | _extract_data_info(list(data))
+    } | _forcefield_hparams(diffusion) | _extract_data_info(list(data))
 
     _print_training_config(hparams)
 

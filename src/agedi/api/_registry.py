@@ -346,6 +346,9 @@ def _build_regressor(
     translator: "Translator",
     representation: "Representation",
     feature_size: int,
+    reference_energies: Optional[Dict[int, float]] = None,
+    force_loss: str = "huber",
+    huber_delta: float = 0.01,
 ) -> "RegressorModel":
     """Build a :class:`~agedi.models.regressor.RegressorModel` with an Energy and a Forces head.
 
@@ -366,6 +369,15 @@ def _build_regressor(
         The representation from the score model (shared, not copied).
     feature_size : int
         Embedding/feature dimension of the shared representation.
+    reference_energies : Dict[int, float], optional
+        Per-species reference energies (keyed by atomic number) that the Energy
+        head adds back to its prediction, so the network only learns the
+        residual.  ``None`` (default) disables the offset.
+    force_loss : str, optional
+        Point-wise loss for the forces head: ``"huber"`` (default), ``"mse"``,
+        or ``"mae"``.
+    huber_delta : float, optional
+        Transition point of the Huber force loss in eV/Å.  Defaults to ``0.01``.
 
     Returns
     -------
@@ -375,10 +387,14 @@ def _build_regressor(
     from agedi.models.regressor import RegressorModel
     from agedi.models.schnetpack.regressor_heads import Energy, Forces
 
-    energy_head = Energy(input_dim_scalar=feature_size)
+    energy_head = Energy(
+        input_dim_scalar=feature_size, reference_energies=reference_energies
+    )
     forces_head = Forces(input_dim_scalar=feature_size, input_dim_vector=feature_size)
     return RegressorModel(
         translator=translator,
         representation=representation,
         heads=[energy_head, forces_head],
+        force_loss=force_loss,
+        huber_delta=huber_delta,
     )

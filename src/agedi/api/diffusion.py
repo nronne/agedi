@@ -1,7 +1,7 @@
 """Diffusion model creation and loading."""
 
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import List, Mapping, Optional, Sequence, Tuple, Union
 
 import torch
 import yaml
@@ -27,6 +27,9 @@ def create_diffusion(
     conditioning_type: str = "scalar",
     confinement: Optional[Tuple[float, float]] = None,
     force_field: bool = False,
+    reference_energies: Optional[Mapping[Union[int, str], float]] = None,
+    force_loss: str = "huber",
+    huber_delta: float = 0.01,
     lr: float = 1e-4,
     lr_factor: float = 0.95,
     lr_patience: int = 100,
@@ -90,6 +93,21 @@ def create_diffusion(
         DFT (or other) energy and forces).  The trained forces head enables force-field guided
         sampling via :class:`~agedi.diffusion.ForcefieldGuidanceConfig`.
         Defaults to ``False``.
+    reference_energies : Mapping, optional
+        Per-species reference energies keyed by chemical symbol (``"Cu"``) or
+        atomic number (``29``), in the energy unit of the training data.  The
+        Energy head subtracts them from the regression target (equivalently:
+        adds them back to its output), so the network only has to learn the
+        residual while predictions stay on the absolute energy scale.
+        ``None`` (default) disables the offset.  :func:`train_from_atoms`
+        fits these from the training data automatically when *force_field* is
+        enabled.  Only used when ``force_field=True``.
+    force_loss : str, optional
+        Point-wise loss for the forces head: ``"huber"`` (default), ``"mse"``,
+        or ``"mae"``.  Only used when ``force_field=True``.
+    huber_delta : float, optional
+        Transition point of the Huber force loss in eV/Å — below it the loss is
+        quadratic, above it linear.  Defaults to ``0.01``.
     lr : float, optional
         Learning rate.  Defaults to ``1e-4``.
     lr_factor : float, optional
@@ -167,6 +185,9 @@ def create_diffusion(
             translator=translator,
             representation=representation,
             feature_size=feature_size,
+            reference_energies=reference_energies,
+            force_loss=force_loss,
+            huber_delta=huber_delta,
         )
 
     return Agedi(
