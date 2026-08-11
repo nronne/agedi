@@ -5,6 +5,51 @@ All notable changes to AGeDi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Feature-space novelty guidance** — repels samples away from structures that
+  have already been found, for global-optimisation loops where the model is
+  retrained on its own discoveries and tends to re-propose the same minima.
+  Enabled via ``novelty_guidance=NoveltyGuidanceConfig(...)`` and
+  ``novelty_reference=[...]`` on ``sample()``.
+  - Each structure is summarised by its pooled (mobile-atom) backbone scalar
+    representation, and a sum-of-Gaussians potential is descended in that
+    feature space during the reverse trajectory — a metadynamics history bias
+    applied during denoising, equivalently
+    [Particle Guidance](https://arxiv.org/abs/2310.13102) (Corso et al.,
+    ICLR 2024) extended with a persistent archive term.
+  - Samples are repelled both from the archive and from each other within the
+    batch (``include_batch``, on by default), which prevents a whole batch from
+    collapsing into a single new basin.
+  - ``sigma`` sets the "too similar" radius: the force is zero at zero feature
+    distance, peaks at ``d = sigma``, and decays beyond, so structures that are
+    already novel are left alone.
+  - ``zeta`` weights the guidance by ``t**zeta`` — deliberately the opposite end
+    of the trajectory from ``ForcefieldGuidanceConfig``'s ``(1 - t)**zeta``,
+    since which basin a sample falls into is decided at high noise.
+  - New public API in ``agedi.diffusion``: ``NoveltyGuidanceConfig``,
+    ``FeatureArchive``, ``structure_features``, ``novelty_guidance_step``.
+- ``Translator.translate_input()`` accepts an optional ``positions`` override,
+  applied before the input modules so that position-derived quantities are
+  recomputed from it.  This allows a backbone pass that is differentiable with
+  respect to the atomic positions while reusing the batch's existing neighbour
+  list.  Backends supply the position key via the new ``_set_positions()`` hook.
+- ``Translator.extract_representation()`` returns a representation from a
+  backbone output without storing it on the batch (unlike
+  ``add_representation()``).
+- ``sample()`` gained a ``cutoff`` parameter (default ``6.0``), now forwarded to
+  the sampling call and used when featurising ``novelty_reference``.
+
+### Notes
+- Novelty guidance costs roughly one extra score-model forward *and* backward
+  per reverse step (~2x measured), and is incompatible with ``compile=True``
+  (a clear ``ValueError`` is raised).
+- Features live in the backbone's activation space and are only comparable
+  within one model generation.  ``FeatureArchive`` must be rebuilt after every
+  retraining; passing ``novelty_reference`` to ``sample()`` does this
+  automatically.
+
 ## [1.3.1] - 2026-07-02
 
 ### Fixed

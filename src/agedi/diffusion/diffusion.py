@@ -28,6 +28,7 @@ from .guidance import (
     force_field_guidance_step,
     post_diffusion_relaxation_step,
 )
+from .novelty import FeatureArchive, NoveltyGuidanceConfig, novelty_guidance_step
 
 
 @dataclasses.dataclass
@@ -40,6 +41,7 @@ class SamplingTimings:
     wrap_positions: float = 0.0
     neighbor_list: float = 0.0
     force_field_guidance: float = 0.0
+    novelty_guidance: float = 0.0
     guidance_wrap_positions: float = 0.0
     guidance_neighbor_list: float = 0.0
     post_diffusion_force_eval: float = 0.0
@@ -51,6 +53,7 @@ class SamplingTimings:
     reverse_step_calls: int = 0
     score_model_calls: int = 0
     force_field_calls: int = 0
+    novelty_guidance_calls: int = 0
     neighbor_list_calls: int = 0
     neighbor_list_rebuilds: int = 0
     guidance_neighbor_list_calls: int = 0
@@ -633,6 +636,14 @@ class Diffusion:
                     timings.guidance_neighbor_list_calls,
                 )
             )
+        if timings.novelty_guidance_calls > 0:
+            print(
+                self._format_timing_line(
+                    "novelty guidance",
+                    timings.novelty_guidance,
+                    timings.novelty_guidance_calls,
+                )
+            )
         if timings.post_diffusion_force_eval > 0:
             print(
                 self._format_timing_line(
@@ -725,6 +736,8 @@ class Diffusion:
         is_compiled: bool = False,
         sampler=None,
         sampler_kwargs=None,
+        novelty_guidance: Optional[NoveltyGuidanceConfig] = None,
+        novelty_archive: Optional[FeatureArchive] = None,
     ) -> List[AtomsGraph]:
         """Run the reverse-diffusion loop for a pre-built batch.
 
@@ -772,6 +785,12 @@ class Diffusion:
             Extra constructor arguments forwarded to the sampler when *sampler*
             is a string alias.  Keys override the defaults supplied by
             *corrector_steps* / *corrector_step_size*.
+        novelty_guidance : NoveltyGuidanceConfig, optional
+            Feature-space novelty guidance configuration.  ``None`` (default)
+            disables it.  Not supported on the compiled path.
+        novelty_archive : FeatureArchive, optional
+            Features of already-found structures to repel from.  When ``None``,
+            only the in-batch repulsion term contributes.
 
         Returns
         -------
@@ -781,6 +800,17 @@ class Diffusion:
         """
         if reverse_step_fn is None:
             reverse_step_fn = self.reverse_step
+
+        novelty_enabled = (
+            novelty_guidance is not None and novelty_guidance.guidance != 0.0
+        )
+        if novelty_enabled and is_compiled:
+            raise ValueError(
+                "Novelty guidance is not supported with compile=True. It "
+                "differentiates the backbone with respect to the atomic "
+                "positions, which the compiled reverse step does not expose. "
+                "Sample with compile=False to use novelty guidance."
+            )
 
         if steps < 2:
             return batch.to_data_list()
@@ -922,6 +952,31 @@ class Diffusion:
                         batch.wrap_positions()
                         batch.update_graph()
 
+                # Feature-space novelty guidance, applied after the sampler
+                # step on the same footing as the force-field guidance above.
+                if novelty_enabled:
+                    if timings is not None:
+                        batch = self._time_sampling_call(
+                            batch.pos.device,
+                            timings,
+                            "novelty_guidance",
+                            novelty_guidance_step,
+                            batch,
+                            self.score_model,
+                            novelty_archive,
+                            novelty_guidance,
+                        )
+                        timings.novelty_guidance_calls += 1
+                    else:
+                        batch = novelty_guidance_step(
+                            batch,
+                            self.score_model,
+                            novelty_archive,
+                            novelty_guidance,
+                        )
+                    batch.wrap_positions()
+                    batch.update_graph()
+
                 # Append terminal frames (e.g. from ForcefieldCorrectorSampler)
                 # to the trajectory.  These are produced inside sampler.step()
                 # on the last diffusion step and exposed via _pending_frames.
@@ -1043,6 +1098,8 @@ class Diffusion:
         compile: bool = False,
         sampler=None,
         sampler_kwargs=None,
+        novelty_guidance: Optional[NoveltyGuidanceConfig] = None,
+        novelty_archive: Optional[FeatureArchive] = None,
         **kwargs,
     ) -> List[AtomsGraph]:
         """Build *N* graphs from priors and run the sampling loop.
@@ -1135,6 +1192,8 @@ class Diffusion:
             is_compiled=compile,
             sampler=sampler,
             sampler_kwargs=sampler_kwargs,
+            novelty_guidance=novelty_guidance,
+            novelty_archive=novelty_archive,
         )
         self._sync_for_timing(batch.pos.device)
         timings.total_wall = time.perf_counter() - total_start
@@ -1163,6 +1222,8 @@ class Diffusion:
         confinement: Optional[Tuple[float, float]] = None,
         compile: bool = False,
         ff_guidance: Optional[ForcefieldGuidanceConfig] = None,
+        novelty_guidance: Optional[NoveltyGuidanceConfig] = None,
+        novelty_archive: Optional[FeatureArchive] = None,
         property: Optional[Dict] = None,
         progress_bar: Optional[bool] = False,
         save_trajectory: Optional[bool] = False,
@@ -1222,6 +1283,15 @@ class Diffusion:
             step for improved throughput on CUDA hardware.
         ff_guidance : ForcefieldGuidanceConfig, optional
             Force-field guidance configuration.
+        novelty_guidance : NoveltyGuidanceConfig, optional
+            Feature-space novelty guidance configuration, which repels samples
+            from already-found structures.  ``None`` (default) disables it.
+            Incompatible with ``compile=True``.
+        novelty_archive : FeatureArchive, optional
+            Features of the already-found structures to repel from, built with
+            :meth:`~agedi.diffusion.novelty.FeatureArchive.from_structures`.
+            Must be rebuilt whenever the score model is retrained.  When
+            ``None``, only the in-batch repulsion term contributes.
         property : dict, optional
             Conditioning properties (key -> scalar tensor).
         progress_bar : bool, optional
@@ -1313,6 +1383,8 @@ class Diffusion:
             "compile": compile,
             "sampler": sampler,
             "sampler_kwargs": sampler_kwargs,
+            "novelty_guidance": novelty_guidance,
+            "novelty_archive": novelty_archive,
         }
         self.zeta = ff_guidance.zeta
 

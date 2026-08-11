@@ -98,6 +98,41 @@ class Translator(ABC):
         """
         pass
 
+    def _set_positions(self, translated: Any, pos: torch.Tensor) -> Any:
+        """Replace the atomic positions inside an already-translated batch.
+
+        Called by :meth:`translate_input` *before* the input modules run, so
+        that any quantity derived from the positions (e.g. pairwise distances)
+        is recomputed from *pos*.  This makes it possible to run the backbone
+        on a positions tensor that carries gradients without touching
+        ``batch.pos`` — whose setter clears the neighbour list and applies the
+        fixed-atom mask in place, both of which would break autograd.
+
+        The base implementation raises :class:`NotImplementedError`; subclasses
+        must override it with the position key of their backend.
+
+        Parameters
+        ----------
+        translated: Any
+            The output of :meth:`_translate`, before input modules are applied.
+        pos: torch.Tensor
+            The positions to substitute, of shape ``(n_nodes, 3)``.
+
+        Returns
+        -------
+        Any
+            The translated batch with the positions replaced.
+
+        Raises
+        ------
+        NotImplementedError
+            If the subclass has not implemented this method.
+
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement _set_positions()"
+        )
+
     @abstractmethod
     def _get_representation(self, batch: "AtomsGraph", out: Any) -> Representation:
         """Get the representation of the batch of data.
@@ -172,7 +207,9 @@ class Translator(ABC):
             
         return out
 
-    def translate_input(self, batch: "AtomsGraph") -> "AtomsGraph":
+    def translate_input(
+        self, batch: "AtomsGraph", positions: Optional[torch.Tensor] = None
+    ) -> "AtomsGraph":
         """Translate the batch without injecting any stored representation.
 
         Unlike :meth:`__call__`, this method always skips the
@@ -185,6 +222,15 @@ class Translator(ABC):
         ----------
         batch: AtomsGraph
             The batch of data to translate.
+        positions: torch.Tensor, optional
+            When given, these positions are substituted for ``batch.pos``
+            before the input modules run, so that everything derived from the
+            positions is recomputed from them.  The batch's own neighbour list
+            (``edge_index`` and ``shift_vectors``) is reused as-is, so
+            *positions* must correspond to the same connectivity.  Used by
+            :func:`~agedi.diffusion.novelty.structure_features` to obtain a
+            backbone forward pass that is differentiable with respect to the
+            positions.
 
         Returns
         -------
@@ -195,6 +241,8 @@ class Translator(ABC):
             raise ValueError("Batch must be of type AtomsGraph")
 
         out = self._translate(batch)
+        if positions is not None:
+            out = self._set_positions(out, positions)
         for module in self.input_modules:
             out = module(out)
         return out
@@ -227,6 +275,29 @@ class Translator(ABC):
             out = module(out)
         out = self._translate_representation(batch.representation, out)
         return out
+
+    def extract_representation(self, batch: "AtomsGraph", out: Any) -> Representation:
+        """Return the representation from a backbone output without storing it.
+
+        Same conversion as :meth:`add_representation`, but leaves *batch*
+        untouched.  Use this when the representation is needed for a side
+        computation and must not overwrite the one the score model has already
+        attached to the batch.
+
+        Parameters
+        ----------
+        batch: AtomsGraph
+            The original batch of data.
+        out: Any
+            The output of the backbone.
+
+        Returns
+        -------
+        Representation
+            The representation given by the model.
+
+        """
+        return self._get_representation(batch, out)
 
     def add_representation(self, batch: "AtomsGraph", out: Any) -> "AtomsGraph":
         """Adds the representation given by the model to the original batch of data.
