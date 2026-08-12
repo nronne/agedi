@@ -69,6 +69,24 @@ confinement: null
 # use force-field guidance during sampling (agedi sample --ff_guidance <scale>).
 force_field: false
 
+# Per-species reference energies subtracted from the energy target (only used
+# when force_field is true).  Removing the large composition-dependent offset
+# from the total energies makes the energy head much easier to fit; predicted
+# energies stay on the absolute scale of the training data.
+#   auto  : fit E_total ≈ Σ_Z n_Z·E⁰_Z from the training data (default)
+#   null  : disable the subtraction
+#   map   : explicit values keyed by chemical symbol or atomic number, e.g.
+#             reference_energies:
+#               Cu: -3.72
+#               O:  -4.95
+reference_energies: auto
+
+# Loss used for the forces head: huber (default) | mse | mae.
+# Huber is quadratic below huber_delta (in eV/Å) and linear above, so a few
+# large force labels cannot dominate the gradient.
+force_loss: huber
+huber_delta: 0.01
+
 # ---------------------------------------------------------------------------
 # Dataset splits and augmentation
 # ---------------------------------------------------------------------------

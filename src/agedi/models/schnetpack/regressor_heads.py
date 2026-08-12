@@ -4,10 +4,16 @@ import schnetpack.nn as snn
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from schnetpack.properties import Z, idx_m, n_atoms
 
 import math
 
 from agedi.models.head import Head
+from agedi.utils.reference_energies import (
+    ReferenceEnergySpec,
+    reference_energies_to_tensor,
+    tensor_to_reference_energies,
+)
 
 
 def build_gated_equivariant_mlp(
@@ -188,10 +194,26 @@ class Forces(Head):
 class Energy(Head):
     """Predict the potential energy of the structure.
 
+    The network output is interpreted as the energy *relative* to a fixed
+    per-species reference: the predicted total energy is
+
+    .. math::
+
+        E = \\sum_i \\left( \\varepsilon_\\theta(i) + E^0_{Z_i} \\right),
+
+    where :math:`E^0_Z` are the (non-trainable) reference energies supplied via
+    *reference_energies*.  Because the offset is constant it does not affect
+    forces, and predictions remain on the absolute energy scale of the training
+    data while the network only has to learn the much smaller residual.
+    See :mod:`agedi.utils.reference_energies`.
+
     Parameters
     ----------
     input_dim_scalar: int
         The dimension of the scalar input.
+    reference_energies: Mapping or None
+        Per-species reference energies keyed by chemical symbol or atomic
+        number.  ``None`` (default) disables the offset.
 
     Returns
     -------
@@ -202,7 +224,10 @@ class Energy(Head):
     _key = "energy"
 
     def __init__(
-        self, input_dim_scalar: int = 64, **kwargs
+        self,
+        input_dim_scalar: int = 64,
+        reference_energies: ReferenceEnergySpec = None,
+        **kwargs,
     ) -> None:
         """Initialize the energy prediction head.
 
@@ -210,6 +235,9 @@ class Energy(Head):
         ----------
         input_dim_scalar : int, optional
             Dimension of the scalar input features.
+        reference_energies : Mapping or None, optional
+            Per-species reference energies keyed by chemical symbol or atomic
+            number.  Stored as a non-trainable buffer indexed by atomic number.
         **kwargs
             Additional keyword arguments forwarded to :class:`~agedi.models.head.Head`.
         """
@@ -220,6 +248,20 @@ class Energy(Head):
             nn.SiLU(),
             nn.Linear(input_dim_scalar // 2, 1, bias=False),
         )
+        # Non-persistent: the reference energies are configuration (they are
+        # carried in ``hparams.yaml`` via :meth:`get_hparams`), not learned
+        # weights.  Keeping them out of the state dict also lets checkpoints
+        # written before this head gained references load unchanged.
+        self.register_buffer(
+            "reference_energies",
+            reference_energies_to_tensor(reference_energies),
+            persistent=False,
+        )
+
+    @property
+    def reference_energy_dict(self) -> Dict[int, float]:
+        """The non-zero reference energies as a ``{atomic number: energy}`` dict."""
+        return tensor_to_reference_energies(self.reference_energies)
 
     def get_hparams(self) -> Dict:
         """Return hyperparameters sufficient to reconstruct this head.
@@ -232,10 +274,11 @@ class Energy(Head):
         return {
             **super().get_hparams(),
             "input_dim_scalar": self.input_dim_scalar,
+            "reference_energies": self.reference_energy_dict or None,
         }
 
     def _score(self, translated_batch: dict) -> torch.Tensor:
-        """Predict the force on the atoms in the structure.
+        """Predict the total energy of each structure in the batch.
 
         Parameters
         ----------
@@ -245,19 +288,24 @@ class Energy(Head):
         Returns
         -------
         torch.Tensor
-            The predicted forces tensor.
+            The predicted per-structure energies.
 
         """
         scalar_representation = translated_batch["scalar_representation"]
 
 
-        atomic_energies = self.net(scalar_representation)
-        idx = translated_batch["_idx_m"]
+        atomic_energies = self.net(scalar_representation).squeeze(-1)
+        idx = translated_batch[idx_m]
 
-        num_classes = idx.max().item() + 1
-        energy = torch.zeros(num_classes, dtype=atomic_energies.dtype, device=atomic_energies.device)
-        
-        energy.scatter_add_(dim=0, index=idx, src=atomic_energies.squeeze(-1))
+        num_structures = translated_batch[n_atoms].shape[0]
+
+        atomic_energies = (
+            atomic_energies + self.reference_energies[translated_batch[Z].long()]
+        )
+
+        energy = torch.zeros(num_structures, dtype=atomic_energies.dtype, device=atomic_energies.device)
+
+        energy.scatter_add_(dim=0, index=idx, src=atomic_energies)
 
         return energy
 

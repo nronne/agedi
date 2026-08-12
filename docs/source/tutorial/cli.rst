@@ -150,6 +150,10 @@ Important options:
 - ``--steps``, ``--eps`` for reverse diffusion resolution
 - ``--save_trajectory``: save the full reverse-diffusion trajectory for each sample
   (one file per sample rather than only the final structures)
+- ``--save_corrector_frames``: with ``--save_trajectory``, also save every Langevin
+  corrector sub-step, giving a complete frame-by-frame record.  Only has an effect
+  with a sampler that runs correctors (``--sampler pc`` or ``ffpc``); multiplies
+  trajectory length by roughly the corrector count
 - ``--print_timings``: print a per-stage timing breakdown after each sampling batch
   (useful for profiling GPU bottlenecks)
 - ``--compile``: compile the reverse-diffusion step with ``torch.compile`` for faster
@@ -249,6 +253,39 @@ and total energy (e.g. loaded from a
 VASP/GPAW calculation via ASE).  The force field is trained jointly with the
 diffusion score.
 
+**Per-species reference energies**
+
+Total DFT energies carry a large composition-dependent offset that says nothing
+about the structure.  By default AGeDi fits per-species reference energies
+(``E_total ≈ Σ_Z n_Z·E⁰_Z``) from the training data by linear least squares and
+subtracts them from the energy target, leaving the network only the much
+smaller residual to learn.  Predicted energies remain on the absolute scale of
+the training data, since the offset is added back inside the energy head.
+
+- ``--reference_energies auto`` (default): fit from the training data.
+- ``--reference_energies none``: disable the subtraction.
+- ``--reference_energies Pd:-3.72,O:-4.95``: use explicit values (chemical
+  symbols or atomic numbers).
+
+The fitted values are printed in the run-configuration panel and stored in
+``hparams.yaml``, so they are restored automatically when the model is loaded.
+
+**Force loss**
+
+The forces head uses a Huber loss by default — quadratic below ``--huber_delta``
+(in eV/Å), linear above — which keeps a few large force labels from dominating
+the gradient.
+
+- ``--force_loss``: ``huber`` (default), ``mse``, or ``mae``.
+- ``--huber_delta``: transition point in eV/Å (default ``0.01``).
+
+.. code-block:: console
+
+   agedi train --force_field --reference_energies auto --force_loss huber --huber_delta 0.01 training_data.traj
+
+The equivalent keys in ``train.yaml`` are ``reference_energies``,
+``force_loss``, and ``huber_delta``.
+
 **Regressor-only dataset**
 
 You can optionally supply a second dataset that is used *exclusively* to train
@@ -319,8 +356,52 @@ In Python this is equivalent to:
 - ``zeta`` (float): time-weight exponent ``(1-t)**zeta``; default ``3.0``.
 - ``force_threshold`` (float): convergence criterion (max per-atom force in eV/Å)
   for the optional post-diffusion relaxation; default ``0.05``.
-- ``max_extra_steps`` (int): maximum extra relaxation steps performed after the main
-  diffusion trajectory when ``guidance > 0``; default ``0`` (disabled).
+- ``max_extra_steps`` (int): maximum L-BFGS relaxation steps performed after the main
+  diffusion trajectory; default ``0`` (disabled).
+
+Relaxing without guidance
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``max_extra_steps`` is independent of ``guidance``.  Set it alone to relax the
+final structures while leaving the diffusion trajectory itself untouched:
+
+.. code-block:: python
+
+   structures = sample(
+       diffusion,
+       n_samples=10,
+       formula="Pd2O2",
+       ff_guidance=ForcefieldGuidanceConfig(
+           guidance=0.0,           # no guidance during diffusion
+           max_extra_steps=200,    # L-BFGS relaxation afterwards
+           force_threshold=0.05,   # stop early once forces drop below this
+       ),
+   )
+
+Each step is one :class:`ase.optimize.LBFGS` step, applied to every structure
+in the batch independently and with ASE's defaults (``maxstep=0.2 Å``,
+``memory=100``, ``alpha=70``).  Relaxation stops as soon as the maximum
+per-atom force falls below ``force_threshold``, and is skipped entirely when
+the structures are already converged.  It requires a model with a regressor
+(forces) head.  With ``save_trajectory=True`` the relaxation steps appear as
+extra frames at the end of each trajectory.
+
+Pick ``force_threshold`` to suit the model, not the DFT convention.  The
+default ``0.05`` eV/Å assumes the regressor can resolve near-zero forces, which
+requires relaxed structures in its training set.  A model trained only on
+high-force configurations cannot predict forces below the range it has seen, so
+relaxation will plateau above the threshold and always consume every step.
+Compare against the force distribution of the training data before choosing a
+value.  Note also that the ``Forces`` head predicts forces directly rather than
+as :math:`-\partial E/\partial R`, so the predicted field is not conservative
+and has no exact zero-force fixed point; over many steps the relaxation can
+drift away from the lowest-energy structure it visited.
+
+Note that guidance and the ``ffpc`` sampler both apply the same force field by
+different routes — ``ffpc`` blends forces into the corrector score, guidance
+takes a separate L-BFGS-sized step after each sampler step, each on its own
+``zeta`` schedule.  Combining them compounds the force-field pull in a way
+neither parameter's default accounts for; prefer one mechanism at a time.
 
 Predicting energies and forces
 -------------------------------

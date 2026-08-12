@@ -64,6 +64,36 @@ class Sampler(abc.ABC):
     ) -> None:
         self.score_fn = score_fn
         self.noisers = noisers
+        #: Set by ``_sample_batch`` from ``sample(save_corrector_frames=...)``.
+        #: When ``True``, samplers with sub-steps capture each intermediate
+        #: state via :meth:`_capture_frame`.
+        self.save_corrector_frames = False
+        #: Intermediate frames produced during the most recent :meth:`step`,
+        #: consumed by ``_sample_batch`` to extend the saved trajectory.
+        self._pending_frames: List = []
+        #: Whether the last entry of :attr:`_pending_frames` is the state that
+        #: :meth:`step` returned.  ``_sample_batch`` uses this to decide whether
+        #: the final structure still needs appending after the loop ends.
+        self._pending_includes_final: bool = False
+
+    def _reset_pending(self) -> None:
+        """Clear frame-capture state.  Call at the top of every :meth:`step`."""
+        self._pending_frames.clear()
+        self._pending_includes_final = False
+
+    def _capture_frame(self, batch: "AtomsGraph") -> None:
+        """Record an intermediate sub-step state when capture is enabled.
+
+        Frames are only recorded when :attr:`save_corrector_frames` is
+        ``True``; capture multiplies trajectory length by the number of
+        sub-steps per outer step.
+
+        Callers must not capture the state that :meth:`step` returns — the
+        outer loop already records it at the start of the next iteration, so
+        capturing it here would duplicate a frame per step.
+        """
+        if self.save_corrector_frames:
+            self._pending_frames.append(batch.to_data_list())
 
     @classmethod
     def register(cls, name: str, factory: Callable[..., "Sampler"]) -> None:

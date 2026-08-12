@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 import yaml
 from ase.build import molecule
@@ -753,3 +754,202 @@ def test_types_noiser_hparams_roundtrip_with_type_map():
     assert "type_map" in types_noiser_hparams
     assert types_noiser_hparams["type_map"] == [0, 1, 8]
     assert types_noiser_hparams["n_classes"] == 3
+
+
+# ---------------------------------------------------------------------------
+# force-field reference energies / force loss
+# ---------------------------------------------------------------------------
+
+
+def _test_atoms_with_labels(energy: float, seed: int = 0):
+    """H2O structure carrying a total energy and per-atom forces."""
+    from ase.calculators.singlepoint import SinglePointCalculator
+
+    atoms = _test_atoms()
+    rng = np.random.default_rng(seed)
+    atoms.calc = SinglePointCalculator(
+        atoms, energy=energy, forces=rng.normal(0, 0.1, (len(atoms), 3))
+    )
+    return atoms
+
+
+def test_create_diffusion_force_field_defaults():
+    """The force-field regressor uses a Huber force loss by default."""
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+
+    assert diffusion.regressor_model.force_loss == "huber"
+    assert diffusion.regressor_model.huber_delta == 0.01
+    energy_head = next(h for h in diffusion.regressor_model.heads if h.key == "energy")
+    assert energy_head.reference_energy_dict == {}
+
+
+def test_create_diffusion_force_field_reference_energies_and_loss():
+    diffusion = create_diffusion(
+        noisers=("cell_positions",),
+        force_field=True,
+        reference_energies={"O": -4.95, 1: -0.6},
+        force_loss="mse",
+        huber_delta=0.05,
+    )
+
+    energy_head = next(h for h in diffusion.regressor_model.heads if h.key == "energy")
+    assert energy_head.reference_energy_dict == {1: pytest.approx(-0.6), 8: pytest.approx(-4.95)}
+    assert diffusion.regressor_model.force_loss == "mse"
+    assert diffusion.regressor_model.huber_delta == 0.05
+
+
+def test_force_field_hparams_round_trip(tmp_path):
+    """Reference energies and loss settings survive a save/load cycle."""
+    diffusion = create_diffusion(
+        noisers=("cell_positions",),
+        force_field=True,
+        reference_energies={"O": -4.95, "H": -0.6},
+        force_loss="mae",
+    )
+    log_dir = tmp_path / "logs" / "version_0"
+    (log_dir / "checkpoints").mkdir(parents=True)
+    with open(log_dir / "hparams.yaml", "w") as fh:
+        yaml.dump({"diffusion": diffusion.get_hparams()}, fh, default_flow_style=False)
+    torch.save(
+        {"state_dict": diffusion.state_dict()},
+        log_dir / "checkpoints" / "last_model.ckpt",
+    )
+
+    loaded = load_diffusion(log_dir)
+
+    energy_head = next(h for h in loaded.regressor_model.heads if h.key == "energy")
+    assert energy_head.reference_energy_dict == {1: pytest.approx(-0.6), 8: pytest.approx(-4.95)}
+    assert loaded.regressor_model.force_loss == "mae"
+
+
+def test_force_field_checkpoint_without_reference_energies_still_loads():
+    """State dicts from before reference energies existed remain loadable."""
+    without = create_diffusion(noisers=("cell_positions",), force_field=True)
+    with_reference = create_diffusion(
+        noisers=("cell_positions",), force_field=True, reference_energies={"O": -4.95}
+    )
+
+    with_reference.load_state_dict(without.state_dict())
+
+    energy_head = next(h for h in with_reference.regressor_model.heads if h.key == "energy")
+    assert energy_head.reference_energy_dict == {8: pytest.approx(-4.95)}
+
+
+def test_resolve_reference_energies_auto_fits_from_data():
+    from agedi.api.training import _resolve_reference_energies
+
+    # E = n_H * (-0.6) + n_O * (-4.95); H2O has 2 H and 1 O.
+    data = [_test_atoms_with_labels(2 * -0.6 + -4.95)]
+
+    resolved = _resolve_reference_energies("auto", data=data, force_field=True)
+
+    assert resolved.keys() == {1, 8}
+    assert 2 * resolved[1] + resolved[8] == pytest.approx(2 * -0.6 + -4.95)
+
+
+def test_resolve_reference_energies_disabled_and_explicit():
+    from agedi.api.training import _resolve_reference_energies
+
+    data = [_test_atoms_with_labels(-6.15)]
+
+    assert _resolve_reference_energies(None, data=data, force_field=True) is None
+    assert _resolve_reference_energies("auto", data=data, force_field=False) is None
+    assert _resolve_reference_energies({"O": -4.95}, data=data, force_field=True) == {8: -4.95}
+
+    with pytest.raises(ValueError, match="not recognized"):
+        _resolve_reference_energies("fitted", data=data, force_field=True)
+
+
+def test_train_from_atoms_fits_reference_energies():
+    """train_from_atoms(force_field=True) fits references from the labelled data."""
+
+    class DummyTrainer:
+        def fit(self, model, data):
+            pass
+
+    data = [_test_atoms_with_labels(-6.15, seed=i) for i in range(3)]
+    diffusion, _, _ = train_from_atoms(
+        data,
+        noisers=("cell_positions",),
+        force_field=True,
+        trainer=DummyTrainer(),
+    )
+
+    energy_head = next(h for h in diffusion.regressor_model.heads if h.key == "energy")
+    references = energy_head.reference_energy_dict
+    assert references.keys() == {1, 8}
+    assert 2 * references[1] + references[8] == pytest.approx(-6.15, abs=1e-4)
+
+
+def test_train_from_atoms_reference_energies_reduce_energy_loss():
+    """Subtracting references shrinks the initial energy loss by orders of magnitude."""
+    from torch_geometric.data import Batch
+
+    class DummyTrainer:
+        def fit(self, model, data):
+            pass
+
+    data = [_test_atoms_with_labels(-2000.0, seed=i) for i in range(3)]
+    kwargs = dict(noisers=("cell_positions",), force_field=True, trainer=DummyTrainer())
+
+    with_reference, _, _ = train_from_atoms(data, **kwargs)
+    without_reference, _, _ = train_from_atoms(data, reference_energies=None, **kwargs)
+
+    graphs = []
+    for atoms in data:
+        graph = AtomsGraph.from_atoms(atoms)
+        graph.energy = torch.tensor(atoms.get_potential_energy(), dtype=torch.float32)
+        graph.forces = torch.tensor(atoms.get_forces(), dtype=torch.float32)
+        graphs.append(graph)
+    batch = Batch.from_data_list(graphs)
+
+    referenced_loss = float(with_reference.regressor_model.loss(batch)["energy_loss"])
+    raw_loss = float(without_reference.regressor_model.loss(batch)["energy_loss"])
+
+    assert referenced_loss < raw_loss / 1000
+
+
+def test_config_forwards_force_field_keys(tmp_path):
+    """reference_energies / force_loss / huber_delta are recognised config keys."""
+    from agedi.api.training import _TRAIN_FROM_ATOMS_KEYS
+
+    assert {"reference_energies", "force_loss", "huber_delta"} <= _TRAIN_FROM_ATOMS_KEYS
+
+    class DummyTrainer:
+        def fit(self, model, data):
+            pass
+
+    cfg = {
+        "noisers": ["cell_positions"],
+        "force_field": True,
+        "reference_energies": {"H": -0.6, "O": -4.95},
+        "force_loss": "mse",
+        "huber_delta": 0.2,
+    }
+    train_kwargs = {k: v for k, v in cfg.items() if k in _TRAIN_FROM_ATOMS_KEYS}
+
+    diffusion, _, _ = train_from_atoms(
+        [_test_atoms_with_labels(-6.15)],
+        trainer=DummyTrainer(),
+        **train_kwargs,
+    )
+
+    energy_head = next(h for h in diffusion.regressor_model.heads if h.key == "energy")
+    assert energy_head.reference_energy_dict == {1: pytest.approx(-0.6), 8: pytest.approx(-4.95)}
+    assert diffusion.regressor_model.force_loss == "mse"
+    assert diffusion.regressor_model.huber_delta == 0.2
+
+
+def test_cli_parse_reference_energies():
+    import click
+
+    from agedi.cli.train import _parse_reference_energies
+
+    assert _parse_reference_energies("auto") == "auto"
+    assert _parse_reference_energies("none") is None
+    assert _parse_reference_energies("Cu:-3.72, O:-4.95") == {"Cu": -3.72, "O": -4.95}
+
+    with pytest.raises(click.BadParameter):
+        _parse_reference_energies("Cu")
+    with pytest.raises(click.BadParameter):
+        _parse_reference_energies("Cu:abc")
