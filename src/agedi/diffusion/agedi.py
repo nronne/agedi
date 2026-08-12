@@ -52,6 +52,10 @@ class Agedi(LightningModule, Diffusion):
         built internally using these heads while **sharing** the translator
         and representation from ``score_model``.  Use this parameter (instead
         of ``regressor_model``) when the backbone should be shared.
+    regressor_kwargs : dict, optional
+        Extra keyword arguments forwarded to
+        :class:`~agedi.models.regressor.RegressorModel` when it is built from
+        ``regressor_heads`` (e.g. ``force_loss``, ``huber_delta``).
     regressor_loss_weight : float, optional
         Weight applied to the regressor loss.  Defaults to ``1.0``.
     optim_config : dict, optional
@@ -69,6 +73,7 @@ class Agedi(LightningModule, Diffusion):
         noisers: List[Noiser],
         regressor_model: Optional[torch.nn.Module] = None,
         regressor_heads: Optional[List] = None,
+        regressor_kwargs: Optional[Dict] = None,
         regressor_loss_weight: float = 1.0,
         optim_config: Optional[Dict] = None,
         scheduler_config: Optional[Dict] = None,
@@ -92,6 +97,7 @@ class Agedi(LightningModule, Diffusion):
                 translator=score_model.translator,
                 representation=score_model.representation,
                 heads=list(regressor_heads),
+                **(regressor_kwargs or {}),
             )
             self._regressor_shares_backbone = True
         elif regressor_model is not None:
@@ -157,6 +163,8 @@ class Agedi(LightningModule, Diffusion):
                 hparams["regressor_heads"] = [
                     h.get_hparams() for h in self.regressor_model.heads
                 ]
+                if hasattr(self.regressor_model, "get_config"):
+                    hparams["regressor_kwargs"] = self.regressor_model.get_config()
             else:
                 hparams["regressor_model"] = self.regressor_model.get_hparams()
         return hparams

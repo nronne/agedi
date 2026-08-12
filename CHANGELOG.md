@@ -5,6 +5,42 @@ All notable changes to AGeDi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-08-11
+
+### Added
+- **Per-species reference energies for force-field training** — when
+  `force_field=True`, the energy target is offset by per-species reference
+  energies `E⁰_Z` so the network only learns the (much smaller) residual.
+  By default (`reference_energies="auto"`) they are fitted from the training
+  data by linear least squares on `E_total ≈ Σ_Z n_Z·E⁰_Z`; explicit values can
+  be supplied as a mapping keyed by chemical symbol or atomic number, and
+  `None` disables the offset.  The offset is applied inside
+  `agedi.models.schnetpack.regressor_heads.Energy`, so predicted energies stay
+  on the absolute scale of the training data and forces are unaffected.
+  Available as `reference_energies` on `create_diffusion()` /
+  `train_from_atoms()` / the training config, and as
+  `agedi train --reference_energies` (`auto` | `none` | `Cu:-3.72,O:-4.95`).
+- **`agedi.utils.reference_energies`** — `fit_reference_energies()`,
+  `normalize_reference_energies()`, and helpers for the reference-energy table.
+- Force-field settings (reference energies, force loss) are shown in the
+  training run-configuration panel and stored in `hparams.yaml`.
+
+### Changed
+- **The force-field forces head is now trained with a Huber loss by default**
+  (`force_loss="huber"`, `huber_delta=0.01` eV/Å) instead of MSE: the loss is
+  quadratic below `huber_delta` and linear above, so a few large force labels
+  cannot dominate the gradient.  Select `"mse"` or `"mae"` via `force_loss` on
+  `create_diffusion()` / `train_from_atoms()` / the config, or
+  `agedi train --force_loss`.
+- `RegressorModel` gained `force_loss`, `huber_delta`, and `energy_loss`
+  parameters plus `get_config()`; the loss configuration is now carried through
+  `Agedi.get_hparams()` (as `regressor_kwargs`) so it survives a save/load
+  cycle for shared-backbone regressors.
+
+### Fixed
+- `RegressorModel.loss` with `use_weighting=True` applied per-atom weights to
+  the per-structure energy loss; energies now use per-structure weights.
+
 ## [1.3.2] - 2026-08-06
 
 ### Added

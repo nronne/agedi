@@ -14,6 +14,14 @@ click.rich_click.OPTION_GROUPS.update(
                 "options": ["--noisers", "--sde", "--conditioning", "--conditioning_type", "--force_field", "--n_classes"],
             },
             {
+                "name": "Force Field Options",
+                "options": [
+                    "--reference_energies",
+                    "--force_loss",
+                    "--huber_delta",
+                ],
+            },
+            {
                 "name": "Training Options",
                 "options": [
                     "--epochs",
@@ -146,6 +154,32 @@ _DEFAULT_NOISER = "CellPositions"
         "Train a force field jointly with the diffusion score. Make sure the training data contains energy and force labels. "
         "Enables force-field guided sampling (--ff_guidance)."
     ),
+)
+@click.option(
+    "--reference_energies",
+    type=str,
+    default="auto",
+    show_default=True,
+    help=(
+        "Per-species reference energies subtracted from the energy target when "
+        "--force_field is used. 'auto' fits them from the training data by linear "
+        "least squares, 'none' disables the subtraction, or give explicit values as "
+        "a comma-separated list such as 'Cu:-3.72,O:-4.95'."
+    ),
+)
+@click.option(
+    "--force_loss",
+    type=click.Choice(["huber", "mse", "mae"]),
+    default="huber",
+    show_default=True,
+    help="Loss function used for the forces head of the force field.",
+)
+@click.option(
+    "--huber_delta",
+    type=float,
+    default=0.01,
+    show_default=True,
+    help="Transition point (eV/Å) of the Huber force loss: quadratic below, linear above.",
 )
 @click.option(
     "--epochs",
@@ -374,6 +408,9 @@ def train(**params) -> None:
             conditioning=params["conditioning"],
             conditioning_type=params["conditioning_type"],
             force_field=params["force_field"],
+            reference_energies=_parse_reference_energies(params["reference_energies"]),
+            force_loss=params["force_loss"],
+            huber_delta=params["huber_delta"],
             mask=params["mask"],
             confinement=params["confinement"],
             batch_size=params["batch_size"],
@@ -401,6 +438,60 @@ def train(**params) -> None:
     console.print(f"\n[green]✓ Training complete.[/green]")
     console.print(f"To sample from the model run:")
     console.print(f"  [bold]agedi sample {log_dir} -f ...[/bold]")
+
+
+def _parse_reference_energies(raw: str):
+    """Parse the ``--reference_energies`` option value.
+
+    Accepts ``"auto"`` (fit from the training data), ``"none"``/``"null"``
+    (disabled), or a comma-separated list of ``SPECIES:ENERGY`` pairs such as
+    ``"Cu:-3.72,O:-4.95"``.
+
+    Parameters
+    ----------
+    raw : str
+        The raw option string.
+
+    Returns
+    -------
+    str, dict, or None
+        A value accepted by :func:`~agedi.functional.train_from_atoms`.
+
+    Raises
+    ------
+    click.BadParameter
+        If the string is neither a keyword nor a valid list of pairs.
+    """
+    text = (raw or "").strip()
+    if text.lower() == "auto":
+        return "auto"
+    if text.lower() in ("none", "null", "off", ""):
+        return None
+
+    reference: dict = {}
+    for pair in text.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        species, sep, value = pair.partition(":")
+        if not sep:
+            raise click.BadParameter(
+                f"'{pair}' is not a SPECIES:ENERGY pair (e.g. 'Cu:-3.72').",
+                param_hint="'--reference_energies'",
+            )
+        try:
+            reference[species.strip()] = float(value)
+        except ValueError:
+            raise click.BadParameter(
+                f"'{value.strip()}' is not a number in '{pair}'.",
+                param_hint="'--reference_energies'",
+            ) from None
+
+    if not reference:
+        raise click.BadParameter(
+            "No SPECIES:ENERGY pairs found.", param_hint="'--reference_energies'"
+        )
+    return reference
 
 
 def _parse_override_value(raw: str):

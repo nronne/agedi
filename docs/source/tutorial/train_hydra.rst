@@ -77,6 +77,16 @@ default so you only need to set the values that differ from those defaults.
    # use force-field guidance during sampling.
    force_field: false
 
+   # Per-species reference energies subtracted from the energy target (force_field
+   # only).  'auto' fits them from the training data, null disables them, or give
+   # explicit values keyed by chemical symbol / atomic number.
+   reference_energies: auto
+
+   # Loss for the forces head: huber (default) | mse | mae, and the Huber
+   # transition point in eV/Å.
+   force_loss: huber
+   huber_delta: 0.01
+
    # Number of element-type classes for the Types noiser (excluding the absorbing
    # state at index 0).  When null, all distinct element types in the training data
    # are used automatically.  Only relevant when 'Types' is in noisers.

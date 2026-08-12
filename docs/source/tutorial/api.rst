@@ -358,6 +358,47 @@ DFT calculation loaded via ASE):
        max_time=2,
    )
 
+**Per-species reference energies**
+
+Total DFT energies are dominated by a large composition-dependent offset that
+carries no structural information.  By default (``reference_energies="auto"``)
+AGeDi fits per-species reference energies :math:`E^0_Z` from the training data
+by linear least squares on
+
+.. math::
+
+   E_\text{total} \approx \sum_Z n_Z E^0_Z
+
+and subtracts them from the energy target, so the network only has to learn the
+much smaller residual.  The offset is applied *inside* the energy head, so
+predicted energies stay on the absolute scale of the training data.
+
+Supply your own values (e.g. isolated-atom energies) with a mapping keyed by
+chemical symbol or atomic number, or pass ``None`` to disable the subtraction:
+
+.. code-block:: python
+
+   diffusion, dataset, trainer = train_from_atoms(
+       data,
+       force_field=True,
+       reference_energies={"Pd": -3.72, "O": -4.95},   # or "auto" / None
+   )
+
+**Force loss**
+
+The forces head is trained with a Huber loss by default: quadratic below
+``huber_delta`` (in eV/Å) and linear above it, so a handful of large force
+labels cannot dominate the gradient.  Both settings are configurable:
+
+.. code-block:: python
+
+   diffusion, dataset, trainer = train_from_atoms(
+       data,
+       force_field=True,
+       force_loss="huber",   # "huber" (default) | "mse" | "mae"
+       huber_delta=0.01,     # eV/Å
+   )
+
 Once trained, use :func:`~agedi.functional.predict` to run energy and force
 predictions on existing structures.  The results are returned as ASE
 :class:`~ase.Atoms` objects with a

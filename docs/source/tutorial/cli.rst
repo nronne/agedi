@@ -253,6 +253,39 @@ and total energy (e.g. loaded from a
 VASP/GPAW calculation via ASE).  The force field is trained jointly with the
 diffusion score.
 
+**Per-species reference energies**
+
+Total DFT energies carry a large composition-dependent offset that says nothing
+about the structure.  By default AGeDi fits per-species reference energies
+(``E_total ≈ Σ_Z n_Z·E⁰_Z``) from the training data by linear least squares and
+subtracts them from the energy target, leaving the network only the much
+smaller residual to learn.  Predicted energies remain on the absolute scale of
+the training data, since the offset is added back inside the energy head.
+
+- ``--reference_energies auto`` (default): fit from the training data.
+- ``--reference_energies none``: disable the subtraction.
+- ``--reference_energies Pd:-3.72,O:-4.95``: use explicit values (chemical
+  symbols or atomic numbers).
+
+The fitted values are printed in the run-configuration panel and stored in
+``hparams.yaml``, so they are restored automatically when the model is loaded.
+
+**Force loss**
+
+The forces head uses a Huber loss by default — quadratic below ``--huber_delta``
+(in eV/Å), linear above — which keeps a few large force labels from dominating
+the gradient.
+
+- ``--force_loss``: ``huber`` (default), ``mse``, or ``mae``.
+- ``--huber_delta``: transition point in eV/Å (default ``0.01``).
+
+.. code-block:: console
+
+   agedi train --force_field --reference_energies auto --force_loss huber --huber_delta 0.01 training_data.traj
+
+The equivalent keys in ``train.yaml`` are ``reference_energies``,
+``force_loss``, and ``huber_delta``.
+
 **Regressor-only dataset**
 
 You can optionally supply a second dataset that is used *exclusively* to train
