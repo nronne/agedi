@@ -19,6 +19,7 @@ click.rich_click.OPTION_GROUPS.update(
                     "--reference_energies",
                     "--force_loss",
                     "--huber_delta",
+                    "--regressor_loss_weight",
                 ],
             },
             {
@@ -180,6 +181,18 @@ _DEFAULT_NOISER = "CellPositions"
     default=0.01,
     show_default=True,
     help="Transition point (eV/Å) of the Huber force loss: quadratic below, linear above.",
+)
+@click.option(
+    "--regressor_loss_weight",
+    type=float,
+    default=1.0,
+    show_default=True,
+    help=(
+        "Weight of the force-field loss relative to the diffusion loss: "
+        "loss = diffusion_loss + weight * regressor_loss. Raise it to prioritise "
+        "energy/force accuracy, lower it to keep the force field from dominating "
+        "the score model."
+    ),
 )
 @click.option(
     "--epochs",
@@ -411,6 +424,7 @@ def train(**params) -> None:
             reference_energies=_parse_reference_energies(params["reference_energies"]),
             force_loss=params["force_loss"],
             huber_delta=params["huber_delta"],
+            regressor_loss_weight=params["regressor_loss_weight"],
             mask=params["mask"],
             confinement=params["confinement"],
             batch_size=params["batch_size"],

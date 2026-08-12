@@ -22,8 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agedi train --reference_energies` (`auto` | `none` | `Cu:-3.72,O:-4.95`).
 - **`agedi.utils.reference_energies`** — `fit_reference_energies()`,
   `normalize_reference_energies()`, and helpers for the reference-energy table.
-- Force-field settings (reference energies, force loss) are shown in the
-  training run-configuration panel and stored in `hparams.yaml`.
+- **`regressor_loss_weight` is now reachable from the public API** — the weight
+  balancing the force-field loss against the diffusion loss
+  (`loss = diffusion_loss + regressor_loss_weight · regressor_loss`) existed on
+  `Agedi` but could only be set by constructing the model by hand.  It is now a
+  parameter of `create_diffusion()` and `train_from_atoms()`, a
+  `regressor_loss_weight` config key, and `agedi train --regressor_loss_weight`.
+  Default `1.0` (unchanged behaviour).
+- Force-field settings (reference energies, force loss, regressor loss weight)
+  are shown in the training run-configuration panel and stored in
+  `hparams.yaml`.
 
 ### Changed
 - **The force-field forces head is now trained with a Huber loss by default**

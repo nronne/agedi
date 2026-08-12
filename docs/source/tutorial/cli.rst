@@ -279,12 +279,23 @@ the gradient.
 - ``--force_loss``: ``huber`` (default), ``mse``, or ``mae``.
 - ``--huber_delta``: transition point in eV/Å (default ``0.01``).
 
+**Balancing the force field against the diffusion loss**
+
+The total objective is
+``loss = diffusion_loss + regressor_loss_weight · regressor_loss``.  Use
+``--regressor_loss_weight`` (default ``1.0``) to raise the priority of
+energy/force accuracy, or lower it to keep the force field from dominating the
+score model.  Both terms are logged separately (``train/regressor_loss``
+alongside the per-noiser losses), so the balance can be inspected during
+training.
+
 .. code-block:: console
 
-   agedi train --force_field --reference_energies auto --force_loss huber --huber_delta 0.01 training_data.traj
+   agedi train --force_field --reference_energies auto --force_loss huber \
+       --huber_delta 0.01 --regressor_loss_weight 10 training_data.traj
 
 The equivalent keys in ``train.yaml`` are ``reference_energies``,
-``force_loss``, and ``huber_delta``.
+``force_loss``, ``huber_delta``, and ``regressor_loss_weight``.
 
 **Regressor-only dataset**
 

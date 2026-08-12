@@ -49,6 +49,7 @@ _TRAIN_FROM_ATOMS_KEYS = frozenset(
         "reference_energies",
         "force_loss",
         "huber_delta",
+        "regressor_loss_weight",
         "batch_size",
         "train_split",
         "val_split",
@@ -157,8 +158,8 @@ def _forcefield_hparams(diffusion: "Agedi") -> Dict:
     -------
     dict
         Display metadata: ``force_field`` and, when a regressor is attached,
-        ``reference_energies`` (keyed by chemical symbol), ``force_loss``, and
-        ``huber_delta``.
+        ``reference_energies`` (keyed by chemical symbol), ``force_loss``,
+        ``huber_delta``, and ``regressor_loss_weight``.
     """
     from ase.data import chemical_symbols
 
@@ -166,7 +167,10 @@ def _forcefield_hparams(diffusion: "Agedi") -> Dict:
     if regressor is None:
         return {"force_field": False}
 
-    info: Dict = {"force_field": True}
+    info: Dict = {
+        "force_field": True,
+        "regressor_loss_weight": float(getattr(diffusion, "regressor_loss_weight", 1.0)),
+    }
     for head in getattr(regressor, "heads", []):
         if getattr(head, "key", None) == "energy" and hasattr(head, "reference_energy_dict"):
             references = head.reference_energy_dict
@@ -403,6 +407,7 @@ def train_from_atoms(
     reference_energies: Union[str, Mapping[Union[int, str], float], None] = "auto",
     force_loss: str = "huber",
     huber_delta: float = 0.01,
+    regressor_loss_weight: float = 1.0,
     batch_size: int = 64,
     train_split: Union[float, int] = 0.9,
     val_split: Union[float, int] = 0.1,
@@ -501,6 +506,15 @@ def train_from_atoms(
         gradient.
     huber_delta:
         Transition point of the Huber force loss in eV/Å.  Default: ``0.01``.
+    regressor_loss_weight:
+        Weight of the force-field loss relative to the diffusion loss:
+        ``loss = diffusion_loss + regressor_loss_weight * regressor_loss``.
+        Raise it to prioritise energy/force accuracy, lower it to keep the
+        force field from dominating the score model.  Both terms are logged
+        separately (``train/regressor_loss`` and the per-noiser losses), so the
+        balance can be checked during training.  Ignored when *force_field* is
+        ``False`` or when a *checkpoint* is given (the value is then restored
+        from the checkpoint).  Default: ``1.0``.
     batch_size:
         Mini-batch size used during training.  Default: ``64``.
     train_split:
@@ -634,6 +648,7 @@ def train_from_atoms(
             reference_energies=resolved_reference_energies,
             force_loss=force_loss,
             huber_delta=huber_delta,
+            regressor_loss_weight=regressor_loss_weight,
             lr=lr,
             lr_factor=lr_factor,
             lr_patience=lr_patience,

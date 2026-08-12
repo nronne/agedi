@@ -399,6 +399,31 @@ labels cannot dominate the gradient.  Both settings are configurable:
        huber_delta=0.01,     # eV/Å
    )
 
+**Balancing the force field against the diffusion loss**
+
+The two objectives are summed as
+
+.. math::
+
+   \mathcal{L} = \mathcal{L}_\text{diffusion}
+                 + w \, \mathcal{L}_\text{regressor}
+
+with ``regressor_loss_weight`` (:math:`w`, default ``1.0``).  Raise it to
+prioritise energy/force accuracy, lower it to keep the force field from
+dominating the score model:
+
+.. code-block:: python
+
+   diffusion, dataset, trainer = train_from_atoms(
+       data,
+       force_field=True,
+       regressor_loss_weight=10.0,
+   )
+
+Both terms are logged separately (``train/regressor_loss`` alongside the
+per-noiser losses such as ``train/pos_loss``), so the balance can be inspected
+in TensorBoard/WandB before settling on a value.
+
 Once trained, use :func:`~agedi.functional.predict` to run energy and force
 predictions on existing structures.  The results are returned as ASE
 :class:`~ase.Atoms` objects with a

@@ -87,6 +87,12 @@ reference_energies: auto
 force_loss: huber
 huber_delta: 0.01
 
+# Weight of the force-field loss relative to the diffusion loss:
+#   loss = diffusion_loss + regressor_loss_weight * regressor_loss
+# Raise it to prioritise energy/force accuracy, lower it to keep the force field
+# from dominating the score model.
+regressor_loss_weight: 1.0
+
 # ---------------------------------------------------------------------------
 # Dataset splits and augmentation
 # ---------------------------------------------------------------------------

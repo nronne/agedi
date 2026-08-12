@@ -30,6 +30,7 @@ def create_diffusion(
     reference_energies: Optional[Mapping[Union[int, str], float]] = None,
     force_loss: str = "huber",
     huber_delta: float = 0.01,
+    regressor_loss_weight: float = 1.0,
     lr: float = 1e-4,
     lr_factor: float = 0.95,
     lr_patience: int = 100,
@@ -108,6 +109,13 @@ def create_diffusion(
     huber_delta : float, optional
         Transition point of the Huber force loss in eV/Å — below it the loss is
         quadratic, above it linear.  Defaults to ``0.01``.
+    regressor_loss_weight : float, optional
+        Weight of the force-field (regressor) loss relative to the diffusion
+        loss in the total training objective:
+        ``loss = diffusion_loss + regressor_loss_weight * regressor_loss``.
+        Raise it to prioritise energy/force accuracy, lower it to keep the
+        force field from dominating the score model.  Defaults to ``1.0``.
+        Only used when ``force_field=True``.
     lr : float, optional
         Learning rate.  Defaults to ``1e-4``.
     lr_factor : float, optional
@@ -194,6 +202,7 @@ def create_diffusion(
         score_model=score_model,
         noisers=noiser_modules,
         regressor_model=regressor_model,
+        regressor_loss_weight=regressor_loss_weight,
         optim_config={"lr": lr, "weight_decay": weight_decay},
         scheduler_config={"factor": lr_factor, "patience": lr_patience},
         eps=eps,

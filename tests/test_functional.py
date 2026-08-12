@@ -953,3 +953,68 @@ def test_cli_parse_reference_energies():
         _parse_reference_energies("Cu")
     with pytest.raises(click.BadParameter):
         _parse_reference_energies("Cu:abc")
+
+
+def test_create_diffusion_regressor_loss_weight():
+    diffusion = create_diffusion(
+        noisers=("cell_positions",), force_field=True, regressor_loss_weight=7.5
+    )
+
+    assert diffusion.regressor_loss_weight == 7.5
+    assert diffusion.get_hparams()["regressor_loss_weight"] == 7.5
+
+
+def test_regressor_loss_weight_scales_total_loss():
+    """loss = diffusion_loss + regressor_loss_weight * regressor_loss."""
+    from torch_geometric.data import Batch
+
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+
+    atoms = _test_atoms_with_labels(-6.15)
+    graph = AtomsGraph.from_atoms(atoms)
+    graph.energy = torch.tensor(atoms.get_potential_energy(), dtype=torch.float32)
+    graph.forces = torch.tensor(atoms.get_forces(), dtype=torch.float32)
+    batch = Batch.from_data_list([graph])
+
+    torch.manual_seed(0)
+    unit = diffusion.loss(batch, 0)
+    diffusion.regressor_loss_weight = 3.0
+    torch.manual_seed(0)
+    weighted = diffusion.loss(batch, 0)
+
+    regressor = float(unit["regressor_loss"])
+    assert float(weighted["loss"]) == pytest.approx(
+        float(unit["loss"]) + 2.0 * regressor, rel=1e-5
+    )
+
+
+def test_train_from_atoms_forwards_regressor_loss_weight():
+    class DummyTrainer:
+        def fit(self, model, data):
+            pass
+
+    diffusion, _, _ = train_from_atoms(
+        [_test_atoms_with_labels(-6.15)],
+        noisers=("cell_positions",),
+        force_field=True,
+        regressor_loss_weight=0.1,
+        trainer=DummyTrainer(),
+    )
+
+    assert diffusion.regressor_loss_weight == 0.1
+
+
+def test_forcefield_hparams_reports_regressor_loss_weight():
+    from agedi.api.training import _forcefield_hparams
+
+    diffusion = create_diffusion(
+        noisers=("cell_positions",), force_field=True, regressor_loss_weight=4.0
+    )
+
+    info = _forcefield_hparams(diffusion)
+
+    assert info["force_field"] is True
+    assert info["regressor_loss_weight"] == 4.0
+    assert _forcefield_hparams(create_diffusion(noisers=("cell_positions",))) == {
+        "force_field": False
+    }

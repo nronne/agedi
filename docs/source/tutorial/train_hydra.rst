@@ -87,6 +87,10 @@ default so you only need to set the values that differ from those defaults.
    force_loss: huber
    huber_delta: 0.01
 
+   # Weight of the force-field loss relative to the diffusion loss:
+   #   loss = diffusion_loss + regressor_loss_weight * regressor_loss
+   regressor_loss_weight: 1.0
+
    # Number of element-type classes for the Types noiser (excluding the absorbing
    # state at index 0).  When null, all distinct element types in the training data
    # are used automatically.  Only relevant when 'Types' is in noisers.
