@@ -95,6 +95,9 @@ def sample(
         Already-found structures to repel from.  Featurised here with the
         *current* score model — features are only comparable within one model
         generation, so pass the reference set afresh after every retraining.
+        When *template* is given, each reference structure must start with the
+        same template atoms (as the sampled structures do); they are excluded
+        from the pooling on both sides so the features stay comparable.
         When ``None`` (and *novelty_guidance* is enabled), samples are only
         repelled from each other within the batch.
     compile:
@@ -134,6 +137,10 @@ def sample(
     # Featurise the reference structures with the current score model.  The
     # archive is deliberately rebuilt on every call: features live in the
     # backbone's activation space and are meaningless across retrainings.
+    #
+    # n_template matters: sampled structures put the template first and mask it
+    # out of the pooling, so the references must exclude the same leading atoms
+    # or the two sides of the comparison are not the same quantity.
     _archive = None
     if novelty_reference is not None and len(novelty_reference) > 0:
         from agedi.diffusion.novelty import FeatureArchive
@@ -143,6 +150,7 @@ def sample(
             novelty_reference,
             cutoff=cutoff,
             pool=novelty_guidance.pool if novelty_guidance is not None else "mean",
+            n_template=0 if template is None else int(template.x.shape[0]),
         )
 
     # Determine display name for the top-level sampler algorithm.

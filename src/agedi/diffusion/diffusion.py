@@ -1321,8 +1321,11 @@ class Diffusion:
         novelty_archive : FeatureArchive, optional
             Features of the already-found structures to repel from, built with
             :meth:`~agedi.diffusion.novelty.FeatureArchive.from_structures`.
-            Must be rebuilt whenever the score model is retrained.  When
-            ``None``, only the in-batch repulsion term contributes.
+            Must be rebuilt whenever the score model is retrained, and — when
+            sampling on a *template* — built with ``n_template`` set to the
+            template's atom count, so the references are pooled over the same
+            atoms as the samples.  When ``None``, only the in-batch repulsion
+            term contributes.
         property : dict, optional
             Conditioning properties (key -> scalar tensor).
         progress_bar : bool, optional

@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - ``zeta`` weights the guidance by ``t**zeta`` — deliberately the opposite end
     of the trajectory from ``ForcefieldGuidanceConfig``'s ``(1 - t)**zeta``,
     since which basin a sample falls into is decided at high noise.
+  - When sampling on a template, the reference structures are featurised with
+    the template atoms excluded from the pooling, matching how the samples
+    themselves are pooled (``FeatureArchive.from_structures(n_template=...)``,
+    set automatically by ``sample()``).  Pooling over the template as well
+    would average in atoms that are identical across every structure, which
+    offsets the references from the samples and collapses them towards each
+    other.
   - New public API in ``agedi.diffusion``: ``NoveltyGuidanceConfig``,
     ``FeatureArchive``, ``structure_features``, ``novelty_guidance_step``.
 - ``Translator.translate_input()`` accepts an optional ``positions`` override,

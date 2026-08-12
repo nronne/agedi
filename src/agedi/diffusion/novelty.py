@@ -247,6 +247,14 @@ class FeatureArchive:
        computed by a previous model silently compares vectors from two
        different spaces.
 
+    .. warning::
+
+       Features are also only comparable when pooled over the *same* set of
+       atoms.  Sampled structures built on a template carry a mask that excludes
+       the template atoms from the pooling, so reference structures must be
+       featurised with the matching ``n_template`` — see
+       :meth:`from_structures`.
+
     Parameters
     ----------
     features : torch.Tensor, optional
@@ -270,6 +278,7 @@ class FeatureArchive:
         cutoff: float = 6.0,
         batch_size: int = 64,
         pool: str = "mean",
+        n_template: int = 0,
         device: Optional[torch.device] = None,
     ) -> "FeatureArchive":
         """Build an archive by featurising a set of ASE structures.
@@ -287,6 +296,15 @@ class FeatureArchive:
             Number of structures featurised per forward pass.
         pool : str, optional
             Pooling mode, forwarded to :func:`structure_features`.
+        n_template : int, optional
+            Number of leading atoms that are template atoms and must be excluded
+            from the pooling, matching how sampled structures are built (the
+            template comes first, and its atoms are masked).  **Getting this
+            wrong silently breaks the archive**: pooling over the template as
+            well averages in atoms that are identical across every structure,
+            which both offsets the reference features away from the sampled
+            ones and collapses the references towards each other.  ``0`` (the
+            default) is correct only for template-free sampling.
         device : torch.device, optional
             Device to run on.  Defaults to the score model's device.
 
@@ -294,11 +312,30 @@ class FeatureArchive:
         -------
         FeatureArchive
             An archive holding one feature vector per input structure.
+
+        Raises
+        ------
+        ValueError
+            If *n_template* is negative, or if some structure has no atoms left
+            once the leading *n_template* are excluded.
         """
         from torch_geometric.data import Batch
 
+        if n_template < 0:
+            raise ValueError(f"n_template must be non-negative, got {n_template}")
+
         if len(structures) == 0:
             return cls(None)
+
+        if n_template > 0:
+            too_small = [len(a) for a in structures if len(a) <= n_template]
+            if too_small:
+                raise ValueError(
+                    f"n_template={n_template} leaves no mobile atoms for "
+                    f"{len(too_small)} reference structure(s) with "
+                    f"{sorted(set(too_small))} atoms. Reference structures must "
+                    "contain the template followed by at least one mobile atom."
+                )
 
         if device is None:
             device = next(score_model.parameters()).device
@@ -311,6 +348,13 @@ class FeatureArchive:
                     for atoms in structures[start : start + batch_size]
                 ]
                 for graph in graphs:
+                    if n_template > 0:
+                        # Build the mask outright rather than mutating whatever
+                        # from_atoms happened to initialise, so the exclusion
+                        # holds regardless of how the graph was constructed.
+                        mask = torch.zeros(graph.x.shape[0], dtype=torch.bool)
+                        mask[:n_template] = True
+                        graph.mask = mask
                     graph.update_graph()
                 batch = Batch.from_data_list(graphs).to(device)
                 chunks.append(structure_features(batch, score_model, pool=pool))

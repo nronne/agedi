@@ -6,6 +6,7 @@ import torch
 from ase.build import fcc111, molecule
 from torch_geometric.data import Batch
 
+from agedi import sample
 from agedi.data import AtomsGraph
 from agedi.diffusion.novelty import (
     FeatureArchive,
@@ -394,3 +395,123 @@ def test_archive_to_device(score_model, water):
     archive = FeatureArchive.from_structures(score_model, [water])
     assert archive.to(torch.device("cpu")) is archive
     assert archive.features.device.type == "cpu"
+
+
+# ---------------------------------------------------------------------------
+# Archive / sample pooling consistency
+# ---------------------------------------------------------------------------
+
+
+def _adsorbate_structures(n_configs, seed=0):
+    """A fixed Au(111) template with *n_configs* different Pt2 placements."""
+    from ase import Atoms
+
+    surf = fcc111("Au", (3, 3, 2), vacuum=8.0)
+    surf.set_pbc(True)
+    rng = np.random.default_rng(seed)
+    z = surf.positions[:, 2].max()
+
+    structures = []
+    for _ in range(n_configs):
+        offsets = rng.uniform([0.0, 0.0, 2.0], [6.0, 6.0, 4.0], size=(2, 3))
+        full = surf + Atoms("Pt2", positions=offsets + [0.0, 0.0, z])
+        full.set_cell(surf.get_cell())
+        full.set_pbc(True)
+        structures.append(full)
+    return surf, structures
+
+
+def test_archive_pooling_matches_sampled_pooling_with_template(score_model):
+    """A reference structure must featurise the same way a sample would.
+
+    Sampled structures carry the template first with its atoms masked out of
+    the pooling.  ``from_structures`` must exclude the same atoms, otherwise the
+    two sides of the archive comparison are different quantities and the
+    repulsion no longer measures similarity to what was already found.
+    """
+    surf, (structure,) = _adsorbate_structures(1)
+    n_template = len(surf)
+
+    # The sampling path: template atoms masked.
+    sampled = make_batch([structure], mask_first=n_template)
+    with torch.no_grad():
+        f_sampled = structure_features(sampled, score_model)
+
+    archive = FeatureArchive.from_structures(
+        score_model, [structure], cutoff=CUTOFF, n_template=n_template
+    )
+
+    assert torch.allclose(f_sampled, archive.features, atol=1e-5)
+
+
+def test_archive_with_template_separates_distinct_configurations(score_model):
+    """Excluding the template keeps the references distinguishable.
+
+    Pooling over the template as well averages in atoms that are identical
+    across every structure, which collapses the references towards each other
+    and destroys the novelty signal.
+    """
+    surf, structures = _adsorbate_structures(6, seed=1)
+    n_template = len(surf)
+
+    masked = FeatureArchive.from_structures(
+        score_model, structures, cutoff=CUTOFF, n_template=n_template
+    )
+    unmasked = FeatureArchive.from_structures(score_model, structures, cutoff=CUTOFF)
+
+    def median_pairwise(features):
+        d = torch.cdist(features, features)
+        iu = torch.triu_indices(len(structures), len(structures), 1)
+        return d[iu[0], iu[1]].median().item()
+
+    assert median_pairwise(masked.features) > 5.0 * median_pairwise(unmasked.features)
+
+
+def test_archive_rejects_template_covering_whole_structure(score_model, water):
+    with pytest.raises(ValueError, match="no mobile atoms"):
+        FeatureArchive.from_structures(score_model, [water], n_template=len(water))
+
+
+def test_archive_rejects_negative_n_template(score_model, water):
+    with pytest.raises(ValueError, match="non-negative"):
+        FeatureArchive.from_structures(score_model, [water], n_template=-1)
+
+
+def test_sample_excludes_the_template_when_building_the_archive(
+    score_model, monkeypatch
+):
+    """``sample()`` must pass the template size through to the archive.
+
+    Without it the archive is pooled over the template as well, and a reference
+    lands far away in feature space from a sample of the very same structure,
+    so the archive term stops measuring novelty at all.
+    """
+    from agedi.diffusion import Agedi
+    from agedi.diffusion.noisers import CellPositions
+    from agedi.diffusion.novelty import FeatureArchive as RealArchive
+
+    surf, structures = _adsorbate_structures(2, seed=2)
+    captured = {}
+
+    class SpyArchive(RealArchive):
+        @classmethod
+        def from_structures(cls, *args, **kwargs):
+            captured.update(kwargs)
+            return RealArchive.from_structures(*args, **kwargs)
+
+    monkeypatch.setattr("agedi.diffusion.novelty.FeatureArchive", SpyArchive)
+
+    diffusion = Agedi(score_model, [CellPositions()])
+    sample(
+        diffusion,
+        n_samples=2,
+        formula="Pt2",
+        template=surf,
+        confinement=(surf.positions[:, 2].max(), surf.positions[:, 2].max() + 4.0),
+        steps=3,
+        cutoff=CUTOFF,
+        novelty_guidance=NoveltyGuidanceConfig(guidance=1.0, sigma=0.1),
+        novelty_reference=structures,
+    )
+
+    assert captured["n_template"] == len(surf)
