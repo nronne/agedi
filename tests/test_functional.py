@@ -1018,3 +1018,193 @@ def test_forcefield_hparams_reports_regressor_loss_weight():
     assert _forcefield_hparams(create_diffusion(noisers=("cell_positions",))) == {
         "force_field": False
     }
+
+
+# ---------------------------------------------------------------------------
+# loss_balance: relative diffusion / regressor split
+# ---------------------------------------------------------------------------
+
+
+def _labelled_batch(energy: float, force_scale: float, seed: int = 0):
+    """Single-structure batch with energy/forces of a controllable magnitude."""
+    from ase.calculators.singlepoint import SinglePointCalculator
+    from torch_geometric.data import Batch
+
+    atoms = _test_atoms()
+    rng = np.random.default_rng(seed)
+    atoms.calc = SinglePointCalculator(
+        atoms, energy=energy, forces=rng.normal(0, force_scale, (len(atoms), 3))
+    )
+    graph = AtomsGraph.from_atoms(atoms)
+    graph.energy = torch.tensor(energy, dtype=torch.float32)
+    graph.forces = torch.tensor(atoms.get_forces(), dtype=torch.float32)
+    return Batch.from_data_list([graph])
+
+
+def _mean_regressor_fraction(diffusion, batch, warmup=200, samples=600):
+    """Average share of the total loss contributed by the regressor term."""
+    diffusion.train()
+    for _ in range(warmup):
+        diffusion.loss(batch, 0)
+    fractions = [
+        float(diffusion.loss(batch, 0)["regressor_fraction"]) for _ in range(samples)
+    ]
+    return float(np.mean(fractions))
+
+
+def test_loss_balance_default_is_absolute_weighting():
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+
+    assert diffusion.loss_balance is None
+    assert diffusion.get_hparams()["loss_balance"] is None
+
+
+def test_loss_balance_is_normalized_and_serialised():
+    diffusion = create_diffusion(
+        noisers=("cell_positions",), force_field=True, loss_balance="80:20"
+    )
+
+    assert diffusion.loss_balance == pytest.approx((0.8, 0.2))
+    assert diffusion.get_hparams()["loss_balance"] == pytest.approx([0.8, 0.2])
+
+
+def test_loss_balance_round_trips_through_hparams(tmp_path):
+    diffusion = create_diffusion(
+        noisers=("cell_positions",), force_field=True, loss_balance=(3, 1)
+    )
+    log_dir = tmp_path / "logs" / "version_0"
+    (log_dir / "checkpoints").mkdir(parents=True)
+    with open(log_dir / "hparams.yaml", "w") as fh:
+        yaml.dump({"diffusion": diffusion.get_hparams()}, fh, default_flow_style=False)
+    torch.save(
+        {"state_dict": diffusion.state_dict()},
+        log_dir / "checkpoints" / "last_model.ckpt",
+    )
+
+    loaded = load_diffusion(log_dir)
+
+    assert loaded.loss_balance == pytest.approx((0.75, 0.25))
+
+
+def test_loss_balance_buffers_do_not_break_old_checkpoints():
+    """The running loss scales must stay out of the state dict."""
+    diffusion = create_diffusion(
+        noisers=("cell_positions",), force_field=True, loss_balance="50:50"
+    )
+    plain = create_diffusion(noisers=("cell_positions",), force_field=True)
+
+    assert not any("_loss_scales" in key for key in diffusion.state_dict())
+    diffusion.load_state_dict(plain.state_dict())
+    plain.load_state_dict(diffusion.state_dict())
+
+
+def test_loss_balance_split_is_independent_of_loss_scale():
+    """The same split holds for labels that differ by three orders of magnitude."""
+    small = create_diffusion(
+        noisers=("cell_positions",), force_field=True, feature_size=16, n_blocks=1,
+        reference_energies=None, loss_balance="50:50",
+    )
+    huge = create_diffusion(
+        noisers=("cell_positions",), force_field=True, feature_size=16, n_blocks=1,
+        reference_energies=None, loss_balance="50:50",
+    )
+    huge.load_state_dict(small.state_dict())
+
+    torch.manual_seed(0)
+    small_fraction = _mean_regressor_fraction(small, _labelled_batch(-6.0, 0.1))
+    torch.manual_seed(0)
+    huge_fraction = _mean_regressor_fraction(huge, _labelled_batch(-6000.0, 50.0))
+
+    # Both near the requested half, and — the point of the feature — the same
+    # for wildly different label magnitudes.
+    assert small_fraction == pytest.approx(0.5, abs=0.1)
+    assert huge_fraction == pytest.approx(small_fraction, abs=0.02)
+
+
+def test_loss_balance_respects_requested_split():
+    """An 80/20 split puts materially less weight on the regressor than 50/50."""
+    balanced = create_diffusion(
+        noisers=("cell_positions",), force_field=True, feature_size=16, n_blocks=1,
+        reference_energies=None, loss_balance="50:50",
+    )
+    skewed = create_diffusion(
+        noisers=("cell_positions",), force_field=True, feature_size=16, n_blocks=1,
+        reference_energies=None, loss_balance="80:20",
+    )
+    skewed.load_state_dict(balanced.state_dict())
+
+    torch.manual_seed(0)
+    half = _mean_regressor_fraction(balanced, _labelled_batch(-6.0, 0.1))
+    torch.manual_seed(0)
+    fifth = _mean_regressor_fraction(skewed, _labelled_batch(-6.0, 0.1))
+
+    assert fifth == pytest.approx(0.2, abs=0.1)
+    assert fifth < half
+
+
+def test_loss_balance_scales_not_updated_during_validation():
+    diffusion = create_diffusion(
+        noisers=("cell_positions",), force_field=True, feature_size=16, n_blocks=1,
+        loss_balance="50:50",
+    )
+    batch = _labelled_batch(-6.0, 0.1)
+
+    diffusion.eval()
+    diffusion.loss(batch, 0)
+    assert not bool(diffusion._loss_scales_initialized)
+
+    diffusion.train()
+    diffusion.loss(batch, 0)
+    assert bool(diffusion._loss_scales_initialized)
+
+    diffusion.eval()
+    frozen = diffusion._loss_scales.clone()
+    diffusion.loss(batch, 0)
+    assert torch.equal(diffusion._loss_scales, frozen)
+
+
+def test_absolute_weighting_untouched_when_balance_disabled():
+    """Without loss_balance the objective is exactly the old weighted sum."""
+    diffusion = create_diffusion(
+        noisers=("cell_positions",), force_field=True, feature_size=16, n_blocks=1
+    )
+    batch = _labelled_batch(-6.0, 0.1)
+
+    torch.manual_seed(0)
+    losses = diffusion.loss(batch, 0)
+    expected = float(losses["pos_loss"]) + float(losses["regressor_loss"])
+
+    assert float(losses["loss"]) == pytest.approx(expected, rel=1e-5)
+    assert "regressor_fraction" not in losses
+
+
+def test_train_from_atoms_forwards_loss_balance():
+    class DummyTrainer:
+        def fit(self, model, data):
+            pass
+
+    diffusion, _, _ = train_from_atoms(
+        [_test_atoms_with_labels(-6.15)],
+        noisers=("cell_positions",),
+        force_field=True,
+        loss_balance="80:20",
+        trainer=DummyTrainer(),
+    )
+
+    assert diffusion.loss_balance == pytest.approx((0.8, 0.2))
+
+
+def test_forcefield_hparams_reports_loss_balance():
+    from agedi.api.training import _forcefield_hparams
+
+    balanced = _forcefield_hparams(
+        create_diffusion(noisers=("cell_positions",), force_field=True, loss_balance="80:20")
+    )
+    absolute = _forcefield_hparams(
+        create_diffusion(noisers=("cell_positions",), force_field=True)
+    )
+
+    assert balanced["loss_balance"] == pytest.approx([0.8, 0.2])
+    assert "regressor_loss_weight" not in balanced
+    assert absolute["regressor_loss_weight"] == 1.0
+    assert "loss_balance" not in absolute

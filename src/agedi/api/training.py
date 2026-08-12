@@ -15,6 +15,7 @@ from lightning.pytorch.callbacks import Callback, LearningRateMonitor, ModelChec
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 
 from agedi.data import Dataset
+from agedi.utils.loss_balance import LossBalanceSpec
 from agedi.data.callbacks import (
     EpochProgressPrinter,
     GradNormLogger,
@@ -50,6 +51,8 @@ _TRAIN_FROM_ATOMS_KEYS = frozenset(
         "force_loss",
         "huber_delta",
         "regressor_loss_weight",
+        "loss_balance",
+        "loss_balance_momentum",
         "batch_size",
         "train_split",
         "val_split",
@@ -159,7 +162,8 @@ def _forcefield_hparams(diffusion: "Agedi") -> Dict:
     dict
         Display metadata: ``force_field`` and, when a regressor is attached,
         ``reference_energies`` (keyed by chemical symbol), ``force_loss``,
-        ``huber_delta``, and ``regressor_loss_weight``.
+        ``huber_delta``, and whichever of ``loss_balance`` /
+        ``regressor_loss_weight`` is in effect.
     """
     from ase.data import chemical_symbols
 
@@ -167,10 +171,14 @@ def _forcefield_hparams(diffusion: "Agedi") -> Dict:
     if regressor is None:
         return {"force_field": False}
 
-    info: Dict = {
-        "force_field": True,
-        "regressor_loss_weight": float(getattr(diffusion, "regressor_loss_weight", 1.0)),
-    }
+    balance = getattr(diffusion, "loss_balance", None)
+    info: Dict = {"force_field": True}
+    if balance is None:
+        info["regressor_loss_weight"] = float(
+            getattr(diffusion, "regressor_loss_weight", 1.0)
+        )
+    else:
+        info["loss_balance"] = list(balance)
     for head in getattr(regressor, "heads", []):
         if getattr(head, "key", None) == "energy" and hasattr(head, "reference_energy_dict"):
             references = head.reference_energy_dict
@@ -408,6 +416,8 @@ def train_from_atoms(
     force_loss: str = "huber",
     huber_delta: float = 0.01,
     regressor_loss_weight: float = 1.0,
+    loss_balance: "LossBalanceSpec" = None,
+    loss_balance_momentum: float = 0.99,
     batch_size: int = 64,
     train_split: Union[float, int] = 0.9,
     val_split: Union[float, int] = 0.1,
@@ -507,14 +517,28 @@ def train_from_atoms(
     huber_delta:
         Transition point of the Huber force loss in eV/Å.  Default: ``0.01``.
     regressor_loss_weight:
-        Weight of the force-field loss relative to the diffusion loss:
+        *Absolute* weight of the force-field loss:
         ``loss = diffusion_loss + regressor_loss_weight * regressor_loss``.
         Raise it to prioritise energy/force accuracy, lower it to keep the
         force field from dominating the score model.  Both terms are logged
         separately (``train/regressor_loss`` and the per-noiser losses), so the
-        balance can be checked during training.  Ignored when *force_field* is
-        ``False`` or when a *checkpoint* is given (the value is then restored
-        from the checkpoint).  Default: ``1.0``.
+        balance can be checked during training.  Ignored when *loss_balance*
+        is given, when *force_field* is ``False``, or when a *checkpoint* is
+        given (the value is then restored from the checkpoint).
+        Default: ``1.0``.
+    loss_balance:
+        *Relative* split between the diffusion and force-field losses, as an
+        alternative to *regressor_loss_weight*.  Accepts ``"50:50"``,
+        ``"80:20"``, ``(0.8, 0.2)``, or a single number giving the regressor
+        fraction.  Each term is divided by a running estimate of its own
+        magnitude before the fractions are applied, so the same split transfers
+        between systems whose raw loss scales differ — which an absolute weight
+        does not.  The achieved fractions are logged as
+        ``train/diffusion_fraction`` and ``train/regressor_fraction``.
+        ``None`` (default) keeps the absolute weighting.
+    loss_balance_momentum:
+        Momentum of the running loss-magnitude averages used by
+        *loss_balance*.  Default: ``0.99``.
     batch_size:
         Mini-batch size used during training.  Default: ``64``.
     train_split:
@@ -649,6 +673,8 @@ def train_from_atoms(
             force_loss=force_loss,
             huber_delta=huber_delta,
             regressor_loss_weight=regressor_loss_weight,
+            loss_balance=loss_balance,
+            loss_balance_momentum=loss_balance_momentum,
             lr=lr,
             lr_factor=lr_factor,
             lr_patience=lr_patience,

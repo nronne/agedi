@@ -20,6 +20,7 @@ click.rich_click.OPTION_GROUPS.update(
                     "--force_loss",
                     "--huber_delta",
                     "--regressor_loss_weight",
+                    "--loss_balance",
                 ],
             },
             {
@@ -188,10 +189,21 @@ _DEFAULT_NOISER = "CellPositions"
     default=1.0,
     show_default=True,
     help=(
-        "Weight of the force-field loss relative to the diffusion loss: "
+        "Absolute weight of the force-field loss: "
         "loss = diffusion_loss + weight * regressor_loss. Raise it to prioritise "
         "energy/force accuracy, lower it to keep the force field from dominating "
-        "the score model."
+        "the score model. Ignored when --loss_balance is given."
+    ),
+)
+@click.option(
+    "--loss_balance",
+    type=str,
+    default=None,
+    help=(
+        "Relative split between the diffusion and force-field losses, e.g. "
+        "'50:50' or '80:20' (diffusion:regressor). Each term is normalised by a "
+        "running estimate of its own magnitude first, so the same split transfers "
+        "between systems — unlike --regressor_loss_weight. Not set by default."
     ),
 )
 @click.option(
@@ -425,6 +437,7 @@ def train(**params) -> None:
             force_loss=params["force_loss"],
             huber_delta=params["huber_delta"],
             regressor_loss_weight=params["regressor_loss_weight"],
+            loss_balance=params["loss_balance"],
             mask=params["mask"],
             confinement=params["confinement"],
             batch_size=params["batch_size"],

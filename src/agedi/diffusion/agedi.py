@@ -12,7 +12,7 @@ Force-field guidance utilities are provided by
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 from lightning import LightningModule
@@ -21,6 +21,7 @@ import torch
 from agedi.data import AtomsGraph
 from agedi.diffusion.noisers import Noiser
 from agedi.models import ScoreModel
+from agedi.utils.loss_balance import LossBalanceSpec, normalize_loss_balance
 
 # Re-export from new locations for backwards compatibility
 from .guidance import (  # noqa: F401
@@ -57,7 +58,22 @@ class Agedi(LightningModule, Diffusion):
         :class:`~agedi.models.regressor.RegressorModel` when it is built from
         ``regressor_heads`` (e.g. ``force_loss``, ``huber_delta``).
     regressor_loss_weight : float, optional
-        Weight applied to the regressor loss.  Defaults to ``1.0``.
+        Absolute weight applied to the regressor loss:
+        ``loss = diffusion_loss + regressor_loss_weight * regressor_loss``.
+        Ignored when ``loss_balance`` is set.  Defaults to ``1.0``.
+    loss_balance : float, str, sequence, or None, optional
+        Relative split between the diffusion and regressor losses, e.g.
+        ``"50:50"``, ``"80:20"``, ``(0.8, 0.2)``, or a single number giving the
+        regressor fraction.  Each term is divided by a running estimate of its
+        own magnitude before the fractions are applied, so the split means the
+        same thing regardless of the raw loss scales of the system being
+        studied.  ``None`` (default) uses the absolute
+        ``regressor_loss_weight`` instead.  See
+        :mod:`agedi.utils.loss_balance`.
+    loss_balance_momentum : float, optional
+        Momentum of the exponential moving averages tracking the two loss
+        magnitudes.  Higher values average over more steps.  Defaults to
+        ``0.99``.
     optim_config : dict, optional
         Keyword arguments forwarded to :class:`torch.optim.AdamW`.
     scheduler_config : dict, optional
@@ -75,6 +91,8 @@ class Agedi(LightningModule, Diffusion):
         regressor_heads: Optional[List] = None,
         regressor_kwargs: Optional[Dict] = None,
         regressor_loss_weight: float = 1.0,
+        loss_balance: "LossBalanceSpec" = None,
+        loss_balance_momentum: float = 0.99,
         optim_config: Optional[Dict] = None,
         scheduler_config: Optional[Dict] = None,
         eps: float = 1e-5,
@@ -114,10 +132,21 @@ class Agedi(LightningModule, Diffusion):
 
         # Lightning-specific training attributes
         self.regressor_loss_weight = regressor_loss_weight
+        self.loss_balance = normalize_loss_balance(loss_balance)
+        self.loss_balance_momentum = float(loss_balance_momentum)
         self.optim_config = optim_config
         self.scheduler_config = scheduler_config
         self._regressor_training = False
         self.fully_connected = fully_connected
+
+        # Running magnitudes of the two loss terms, used to make `loss_balance`
+        # scale-free.  Non-persistent so that checkpoints written before this
+        # existed still load; the averages re-initialise from the first
+        # training batch after a resume.
+        self.register_buffer("_loss_scales", torch.ones(2), persistent=False)
+        self.register_buffer(
+            "_loss_scales_initialized", torch.zeros((), dtype=torch.bool), persistent=False
+        )
 
     # ------------------------------------------------------------------
     # Lightning hooks
@@ -156,6 +185,8 @@ class Agedi(LightningModule, Diffusion):
             "scheduler_config": dict(self.scheduler_config),
             "eps": self.eps,
             "regressor_loss_weight": float(self.regressor_loss_weight),
+            "loss_balance": list(self.loss_balance) if self.loss_balance is not None else None,
+            "loss_balance_momentum": float(self.loss_balance_momentum),
             "fully_connected": self.fully_connected,
         }
         if self.regressor_model is not None:
@@ -196,13 +227,113 @@ class Agedi(LightningModule, Diffusion):
     # Loss computation
     # ------------------------------------------------------------------
 
+    #: Floor applied to the running loss magnitudes, so that a term collapsing
+    #: to zero cannot blow up the balanced loss.
+    _LOSS_SCALE_EPS = 1e-12
+
+    @torch.no_grad()
+    def _update_loss_scales(
+        self,
+        diffusion_loss: torch.Tensor,
+        regressor_loss: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Update and return the running magnitudes of the two loss terms.
+
+        The averages are only advanced while training, so validation reuses the
+        scales learned from the training batches and its reported loss stays
+        comparable across epochs.
+
+        Parameters
+        ----------
+        diffusion_loss : torch.Tensor
+            The current diffusion loss.
+        regressor_loss : torch.Tensor, optional
+            The current regressor loss, or ``None`` when the batch carries no
+            force labels (its scale is then left untouched).
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor of shape ``(2,)`` with the ``(diffusion, regressor)``
+            magnitudes, floored at :attr:`_LOSS_SCALE_EPS`.
+        """
+        scales = self._loss_scales
+        if self.training:
+            observed = scales.clone()
+            observed[0] = diffusion_loss.detach().abs()
+            if regressor_loss is not None:
+                observed[1] = regressor_loss.detach().abs()
+
+            if bool(self._loss_scales_initialized):
+                momentum = self.loss_balance_momentum
+                scales.mul_(momentum).add_(observed, alpha=1.0 - momentum)
+            else:
+                scales.copy_(observed)
+                self._loss_scales_initialized.fill_(True)
+
+        return scales.clamp_min(self._LOSS_SCALE_EPS)
+
+    def _combine_losses(
+        self,
+        diffusion_loss: torch.Tensor,
+        regressor_loss: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Dict]:
+        """Combine the diffusion and regressor losses into the training objective.
+
+        With ``loss_balance`` unset this is the plain weighted sum
+        ``diffusion_loss + regressor_loss_weight * regressor_loss``.  With
+        ``loss_balance`` set, each term is first divided by a running estimate
+        of its own magnitude, so the requested fractions describe the actual
+        contributions irrespective of the raw loss scales.
+
+        Parameters
+        ----------
+        diffusion_loss : torch.Tensor
+            The diffusion (denoising score-matching) loss.
+        regressor_loss : torch.Tensor, optional
+            The force-field loss, or ``None`` when unavailable for this batch.
+
+        Returns
+        -------
+        Tuple[torch.Tensor, Dict]
+            The total loss and a dict of extra metrics to log (the achieved
+            contribution fractions, when balancing is active).
+        """
+        balance = self.loss_balance if self.regressor_model is not None else None
+
+        if balance is None:
+            if regressor_loss is None:
+                return diffusion_loss, {}
+            return diffusion_loss + self.regressor_loss_weight * regressor_loss, {}
+
+        diffusion_weight, regressor_weight = balance
+        scales = self._update_loss_scales(diffusion_loss, regressor_loss)
+
+        diffusion_term = diffusion_weight * diffusion_loss / scales[0]
+        total = diffusion_term
+        if regressor_loss is None:
+            return total, {}
+
+        regressor_term = regressor_weight * regressor_loss / scales[1]
+        total = total + regressor_term
+
+        # Report what the split actually came out as this step, so the
+        # requested balance can be verified during training.
+        denominator = total.detach().abs().clamp_min(self._LOSS_SCALE_EPS)
+        metrics = {
+            "diffusion_fraction": diffusion_term.detach() / denominator,
+            "regressor_fraction": regressor_term.detach() / denominator,
+        }
+        return total, metrics
+
     def loss(self, batch: AtomsGraph, batch_idx: torch.Tensor) -> Dict:
         """Compute the combined diffusion + regressor loss.
 
         Always computes the diffusion (denoising) loss on a noised copy of
         the batch.  When a regressor model is present and the batch contains
-        force labels, the regressor loss is added with weight
-        ``regressor_loss_weight``.
+        force labels, the regressor loss is combined in according to
+        ``loss_balance`` (relative split) or ``regressor_loss_weight``
+        (absolute weight); see :meth:`_combine_losses`.
 
         Parameters
         ----------
@@ -220,11 +351,10 @@ class Agedi(LightningModule, Diffusion):
 
         if self.regressor_model is not None and hasattr(batch, "forces"):
             reg_losses = self.regressor_loss(batch, batch_idx)
-            losses["loss"] = (
-                losses["loss"] + self.regressor_loss_weight * reg_losses["loss"]
-            )
-            reg_losses.pop("loss")
+            total, metrics = self._combine_losses(losses["loss"], reg_losses.pop("loss"))
+            losses["loss"] = total
             losses |= reg_losses
+            losses |= metrics
 
         return losses
 
@@ -343,8 +473,10 @@ class Agedi(LightningModule, Diffusion):
 
                 if n_reg_batches > 0:
                     reg_loss_avg = reg_loss_total / n_reg_batches
-                    losses["loss"] = losses["loss"] + self.regressor_loss_weight * reg_loss_avg
+                    total, metrics = self._combine_losses(losses["loss"], reg_loss_avg)
+                    losses["loss"] = total
                     losses["regressor_loss"] = reg_loss_avg
+                    losses |= metrics
 
             total_batch_size = main_batch.num_graphs + regressor_batch.num_graphs
         else:

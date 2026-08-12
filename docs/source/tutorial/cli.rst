@@ -281,21 +281,34 @@ the gradient.
 
 **Balancing the force field against the diffusion loss**
 
-The total objective is
-``loss = diffusion_loss + regressor_loss_weight · regressor_loss``.  Use
-``--regressor_loss_weight`` (default ``1.0``) to raise the priority of
-energy/force accuracy, or lower it to keep the force field from dominating the
-score model.  Both terms are logged separately (``train/regressor_loss``
-alongside the per-noiser losses), so the balance can be inspected during
-training.
+Two options, depending on whether you want an absolute or a relative knob.
+
+``--regressor_loss_weight W`` (default ``1.0``) forms
+``loss = diffusion_loss + W · regressor_loss``.  Simple, but a good ``W``
+depends on how large the two losses happen to be for your system, so a value
+tuned on one dataset rarely transfers to another.
+
+``--loss_balance D:R`` instead states the split you want — ``50:50``, ``80:20``
+— and divides each term by a running estimate of its own magnitude before
+applying the fractions.  Each term then contributes its requested share of the
+total whatever the raw scales are, so the same setting carries over between
+systems:
 
 .. code-block:: console
 
    agedi train --force_field --reference_energies auto --force_loss huber \
-       --huber_delta 0.01 --regressor_loss_weight 10 training_data.traj
+       --huber_delta 0.01 --loss_balance 80:20 training_data.traj
+
+The achieved split is logged as ``train/diffusion_fraction`` and
+``train/regressor_fraction``.  Per-step values fluctuate — the diffusion loss
+varies strongly with the sampled diffusion time — but average to the requested
+fractions.  Note that balancing makes the total loss O(1) regardless of the raw
+scales, so the effective learning rate (and how ``--gradient_clip_val`` bites)
+differs from an unbalanced run.
 
 The equivalent keys in ``train.yaml`` are ``reference_energies``,
-``force_loss``, ``huber_delta``, and ``regressor_loss_weight``.
+``force_loss``, ``huber_delta``, ``regressor_loss_weight``, and
+``loss_balance``.
 
 **Regressor-only dataset**
 
