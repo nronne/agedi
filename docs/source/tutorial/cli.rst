@@ -16,6 +16,7 @@ Main commands
 - ``agedi train``: train a diffusion model from a trajectory file or YAML config
 - ``agedi sample``: sample structures from a saved training run
 - ``agedi predict``: predict energies and forces for input structures (requires ``--force_field`` training)
+- ``agedi relax``: relax structures with the trained force field (requires ``--force_field`` training)
 - ``agedi inspect``: print ``hparams.yaml`` from a run directory
 
 To get information about options for each use
@@ -435,6 +436,47 @@ In Python this is equivalent to:
    structures = read("structures.traj", index=":")
    predicted = predict(diffusion, structures)
    write("predicted.traj", predicted)
+
+Relaxing structures
+-------------------
+
+The same L-BFGS optimiser that drives the post-diffusion relaxation is also
+available on its own, with no diffusion sampling involved:
+
+.. code-block:: console
+
+   agedi relax logs/agedi/version_0 structures.traj --fmax 0.05
+
+This reads all structures from ``structures.traj``, relaxes each of them with
+the model's force-field regressor, and writes the results to ``relaxed.traj``.
+Structures are relaxed in batches; each one is optimised by its own L-BFGS
+instance and drops out of the batch as soon as its own maximum force falls
+below ``--fmax``.  ASE ``FixAtoms`` constraints on the input are respected.
+
+Important options:
+
+- ``--fmax``: convergence criterion, maximum per-atom force in eV/Å (default: ``0.05``)
+- ``--steps``: maximum number of optimiser steps per structure (default: ``200``)
+- ``--max_step_size``: maximum single-atom displacement per step, in Å (default: ``0.2``)
+- ``-b/--batch_size``: number of structures relaxed simultaneously (default: ``64``)
+- ``--save_trajectory``: write every optimiser step instead of only the final structure
+
+In Python:
+
+.. code-block:: python
+
+   from ase.io import read, write
+   from agedi import load_diffusion, relax
+
+   diffusion = load_diffusion("logs/agedi/version_0")
+   structures = read("structures.traj", index=":")
+   relaxed = relax(diffusion, structures, fmax=0.05)
+   write("relaxed.traj", relaxed)
+
+The same caveats as for post-diffusion relaxation apply: pick ``fmax`` to suit
+the model's force range, and remember that the ``Forces`` head predicts forces
+directly rather than as :math:`-\partial E/\partial R`, so the field is not
+conservative and has no exact zero-force fixed point.
 
 Inspect run metadata
 --------------------
