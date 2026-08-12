@@ -9,6 +9,7 @@ from .dataset import create_dataset as create_dataset
 from .diffusion import create_diffusion as create_diffusion
 from .diffusion import load_diffusion as load_diffusion
 from .prediction import predict as predict
+from .relaxation import relax as relax
 from .sampling import sample as sample
 from .training import create_trainer as create_trainer
 from .training import train as train
@@ -22,6 +23,7 @@ __all__ = [
     "load_diffusion",
     "predict",
     "register_model",
+    "relax",
     "sample",
     "train",
     "train_from_atoms",

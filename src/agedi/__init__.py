@@ -18,6 +18,7 @@ from .functional import (
     load_diffusion as load_diffusion,
     predict as predict,
     register_model as register_model,
+    relax as relax,
     sample as sample,
     train as train,
     train_from_atoms as train_from_atoms,
@@ -45,5 +46,6 @@ __all__ = [
     "train_from_config",
     "load_diffusion",
     "predict",
+    "relax",
     "sample",
 ]

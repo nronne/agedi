@@ -26,6 +26,7 @@ from .guidance import (
     BatchedLBFGSStepSizer,
     ForcefieldGuidanceConfig,
     force_field_guidance_step,
+    max_force_per_graph,
     post_diffusion_relaxation_step,
 )
 
@@ -440,6 +441,8 @@ class Diffusion:
         batch: AtomsGraph,
         scale: float = 1.0,
         max_step_size: float = 0.2,
+        forces: Optional[torch.Tensor] = None,
+        active: Optional[torch.Tensor] = None,
     ) -> AtomsGraph:
         """Perform one L-BFGS relaxation step, as ``ase.optimize.LBFGS`` would.
 
@@ -453,6 +456,12 @@ class Diffusion:
         max_step_size : float, optional
             Maximum single-atom displacement per step, in Å.  Defaults to
             ``0.2``, matching ASE.
+        forces : torch.Tensor, optional
+            Forces at the current positions.  Supplying them skips the
+            regressor call inside the step.
+        active : torch.Tensor, optional
+            Boolean mask over graphs; structures marked ``False`` are left
+            untouched.
 
         Returns
         -------
@@ -465,6 +474,8 @@ class Diffusion:
             self.lbfgs_step_sizer,
             scale=scale,
             max_step_size=max_step_size,
+            forces=forces,
+            active=active,
         )
 
     # ------------------------------------------------------------------
@@ -981,7 +992,13 @@ class Diffusion:
                     self.regressor_model,
                     batch,
                 )
-            max_forces = torch.norm(batch.forces_prediction, dim=1).max(dim=0)[0]
+            # Convergence is tracked per structure: a batch-wide maximum keeps
+            # every structure stepping until the worst one is done, jostling
+            # the ones that already converged.
+            per_graph_forces = max_force_per_graph(
+                batch.forces_prediction, batch.batch, batch.num_graphs
+            )
+            max_forces = per_graph_forces.max()
 
             if max_forces > force_threshold and max_extra_steps > 0:
                 if progress_bar:
@@ -1000,11 +1017,21 @@ class Diffusion:
                 )
 
                 for i in extra_iterator:
+                    # Structures already below the threshold sit out the rest
+                    # of the relaxation instead of being stepped further.
+                    active = per_graph_forces > force_threshold
+                    # The forces were evaluated at exactly these positions by
+                    # the convergence check (or the initial eval above), so
+                    # they are passed in rather than recomputed.
+                    forces = batch.forces_prediction
+
                     # Full L-BFGS step (ASE damping=1.0).  Scaling the step
                     # down here would slow convergence without improving
                     # stability — the maxstep limit is what bounds the step.
                     if timings is None:
-                        batch = self.post_diffusion_relaxation_step(batch)
+                        batch = self.post_diffusion_relaxation_step(
+                            batch, forces=forces, active=active
+                        )
                     else:
                         batch = self._time_sampling_call(
                             batch.pos.device,
@@ -1012,6 +1039,8 @@ class Diffusion:
                             "post_diffusion_relaxation",
                             self.post_diffusion_relaxation_step,
                             batch,
+                            forces=forces,
+                            active=active,
                         )
                         timings.post_diffusion_relaxation_steps += 1
 
@@ -1025,9 +1054,10 @@ class Diffusion:
                             self.regressor_model,
                             batch,
                         )
-                    max_forces = torch.norm(batch.forces_prediction, dim=1).max(
-                        dim=0
-                    )[0]
+                    per_graph_forces = max_force_per_graph(
+                        batch.forces_prediction, batch.batch, batch.num_graphs
+                    )
+                    max_forces = per_graph_forces.max()
 
                     if save_trajectory:
                         path.append(batch.to_data_list())
