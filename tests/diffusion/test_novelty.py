@@ -397,6 +397,50 @@ def test_archive_to_device(score_model, water):
     assert archive.features.device.type == "cpu"
 
 
+def test_archive_fully_connected_uses_fc_topology(score_model, water):
+    """``fully_connected=True`` must reach ``AtomsGraph.from_atoms`` and
+    change the graph actually fed to the backbone.
+
+    A water molecule is small enough that a 6 A cutoff neighbour list is
+    already fully connected internally, so use a cutoff that only spans O-H
+    (about 1 A) and not H-H (about 1.6 A): the cutoff-graph and the
+    fully-connected graph then have a genuinely different edge count, and the
+    resulting pooled features must differ. This is the regression test for
+    the bug where reference structures were always featurised on a
+    cutoff-based graph regardless of whether the score model was trained
+    ``fully_connected=True`` (e.g. gas-phase clusters trained with
+    ``create_diffusion(fully_connected=True, cutoff=12.0)``), silently
+    running the backbone on out-of-distribution topology.
+    """
+    narrow_cutoff = 1.2
+
+    cutoff_graph = AtomsGraph.from_atoms(water, cutoff=narrow_cutoff)
+    cutoff_graph.update_graph()
+    n_edges_cutoff = cutoff_graph.edge_index.shape[1]
+
+    fc_graph = AtomsGraph.from_atoms(
+        water, cutoff=narrow_cutoff, fully_connected=True
+    )
+    fc_graph.update_graph()
+    n_edges_fc = fc_graph.edge_index.shape[1]
+
+    assert n_edges_fc > n_edges_cutoff, (
+        "test setup: the narrow cutoff must NOT already be fully connected, "
+        "otherwise this test cannot distinguish the two code paths"
+    )
+
+    archive_cutoff = FeatureArchive.from_structures(
+        score_model, [water], cutoff=narrow_cutoff, fully_connected=False
+    )
+    archive_fc = FeatureArchive.from_structures(
+        score_model, [water], cutoff=narrow_cutoff, fully_connected=True
+    )
+
+    assert not torch.allclose(
+        archive_cutoff.features, archive_fc.features, atol=1e-5
+    ), "fully_connected=True did not change the featurised graph"
+
+
 # ---------------------------------------------------------------------------
 # Archive / sample pooling consistency
 # ---------------------------------------------------------------------------

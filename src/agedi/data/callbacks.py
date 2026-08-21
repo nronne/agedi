@@ -320,3 +320,120 @@ class TrainingPhase(Callback):
             The model being trained.
         """
         self._prepare_epoch(trainer, model)
+
+
+class EMACallback(Callback):
+    """Maintains an exponential moving average (EMA) of the model's trainable
+    parameters, and installs it into the live model once training stops.
+
+    For a diffusion model that is retrained on a small, shifting dataset
+    every outer iteration (as GO-Diff does on its replay buffer), the raw
+    weights at the end of one ``trainer.fit()`` call are a noisy snapshot
+    that can overfit the current buffer. EMA keeps a shadow copy of every
+    trainable parameter,
+
+    .. math::
+
+        \\theta_{\\text{shadow}} \\leftarrow \\text{decay} \\cdot
+        \\theta_{\\text{shadow}} + (1 - \\text{decay}) \\cdot \\theta,
+
+    updated after every optimizer step, and copies that shadow back into the
+    live model when training ends. Every downstream consumer of the model
+    -- sampling, the checkpoint saved right after ``train()`` returns, and
+    (deliberately) the next call to ``trainer.fit()`` -- then sees the
+    smoothed weights rather than the last noisy gradient step.
+
+    The shadow is **not** reset between calls to ``trainer.fit()`` on the
+    same :class:`~lightning.Trainer`: it is only initialised once, from
+    whatever the live weights are the first time training starts. This is
+    what makes it accumulate across GO-Diff's outer iterations (which reuse
+    one ``Trainer`` for the whole run) instead of restarting from scratch
+    every time.
+
+    Parameters
+    ----------
+    decay : float
+        EMA decay rate, in ``(0, 1)``. Values closer to 1 average over more
+        history and move more slowly. Default: ``0.999``.
+    """
+
+    def __init__(self, decay: float = 0.999, **kwargs):
+        """Initializes the callback."""
+        super().__init__(**kwargs)
+        if not (0.0 < decay < 1.0):
+            raise ValueError(f"decay must be in (0, 1), got {decay!r}")
+        self.decay = decay
+        self._shadow: Dict[str, torch.Tensor] = {}
+
+    @staticmethod
+    def _trainable_float_params(pl_module: LightningModule):
+        """Yield ``(name, param)`` for every trainable floating-point parameter."""
+        for name, p in pl_module.named_parameters():
+            if p.requires_grad and torch.is_floating_point(p):
+                yield name, p
+
+    def on_train_start(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Seed the shadow from the live weights, but only the first time.
+
+        Parameters
+        ----------
+        trainer : Trainer
+            The active Lightning trainer (unused, required by the callback API).
+        pl_module : LightningModule
+            The model being trained.
+        """
+        if self._shadow:
+            return
+        with torch.no_grad():
+            for name, p in self._trainable_float_params(pl_module):
+                self._shadow[name] = p.detach().clone()
+
+    def on_train_batch_end(self, trainer: Trainer, pl_module: LightningModule, outputs, batch, batch_idx: int) -> None:
+        """Update the shadow towards the current live weights.
+
+        Parameters
+        ----------
+        trainer : Trainer
+            The active Lightning trainer (unused, required by the callback API).
+        pl_module : LightningModule
+            The model being trained.
+        outputs, batch, batch_idx
+            Unused, required by the callback API.
+        """
+        with torch.no_grad():
+            for name, p in self._trainable_float_params(pl_module):
+                shadow = self._shadow.get(name)
+                if shadow is None:
+                    # A parameter that did not exist when the shadow was
+                    # seeded (e.g. a lazily-built head): start tracking it now.
+                    self._shadow[name] = p.detach().clone()
+                    continue
+                if shadow.device != p.device:
+                    shadow = shadow.to(p.device)
+                shadow.mul_(self.decay).add_(p.detach(), alpha=1.0 - self.decay)
+                self._shadow[name] = shadow
+
+    def on_train_end(self, trainer: Trainer, pl_module: LightningModule) -> None:
+        """Copy the shadow weights into the live model in place.
+
+        Parameters
+        ----------
+        trainer : Trainer
+            The active Lightning trainer (unused, required by the callback API).
+        pl_module : LightningModule
+            The model being trained.
+        """
+        with torch.no_grad():
+            for name, p in self._trainable_float_params(pl_module):
+                shadow = self._shadow.get(name)
+                if shadow is not None:
+                    p.copy_(shadow.to(p.device))
+
+    def state_dict(self) -> Dict:
+        """Return the callback's state for checkpointing (Lightning callback API)."""
+        return {"decay": self.decay, "shadow": self._shadow}
+
+    def load_state_dict(self, state_dict: Dict) -> None:
+        """Restore the callback's state from a checkpoint (Lightning callback API)."""
+        self.decay = state_dict.get("decay", self.decay)
+        self._shadow = state_dict.get("shadow", {})

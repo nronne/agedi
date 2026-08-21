@@ -280,6 +280,7 @@ class FeatureArchive:
         pool: str = "mean",
         n_template: int = 0,
         device: Optional[torch.device] = None,
+        fully_connected: bool = False,
     ) -> "FeatureArchive":
         """Build an archive by featurising a set of ASE structures.
 
@@ -307,6 +308,14 @@ class FeatureArchive:
             default) is correct only for template-free sampling.
         device : torch.device, optional
             Device to run on.  Defaults to the score model's device.
+        fully_connected : bool, optional
+            Build each reference graph with the fully-connected backbone
+            topology instead of a *cutoff*-based neighbour list.  Must match
+            how the sampled structures being compared against were built
+            (:func:`agedi.sample` sets this from ``diffusion.fully_connected``
+            automatically).  Getting it wrong is silent: both sides still
+            produce a feature vector, they are just off the manifold the
+            backbone was trained on.  Defaults to ``False``.
 
         Returns
         -------
@@ -344,7 +353,9 @@ class FeatureArchive:
         with torch.no_grad():
             for start in range(0, len(structures), batch_size):
                 graphs = [
-                    AtomsGraph.from_atoms(atoms, cutoff=cutoff)
+                    AtomsGraph.from_atoms(
+                        atoms, cutoff=cutoff, fully_connected=fully_connected
+                    )
                     for atoms in structures[start : start + batch_size]
                 ]
                 for graph in graphs:

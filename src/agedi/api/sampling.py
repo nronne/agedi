@@ -151,6 +151,7 @@ def sample(
             cutoff=cutoff,
             pool=novelty_guidance.pool if novelty_guidance is not None else "mean",
             n_template=0 if template is None else int(template.x.shape[0]),
+            fully_connected=getattr(diffusion, "fully_connected", False),
         )
 
     # Determine display name for the top-level sampler algorithm.
