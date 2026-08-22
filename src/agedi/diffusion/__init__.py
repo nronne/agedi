@@ -4,6 +4,7 @@ from .novelty import (
     FeatureArchive,
     NoveltyGuidanceConfig,
     novelty_guidance_step,
+    resolve_novelty_config,
     structure_features,
 )
 from .samplers import (
@@ -24,6 +25,7 @@ __all__ = [
     "FeatureArchive",
     "structure_features",
     "novelty_guidance_step",
+    "resolve_novelty_config",
     "Sampler",
     "EulerMaruyamaSampler",
     "PredictorCorrectorSampler",

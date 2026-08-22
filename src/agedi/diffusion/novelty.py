@@ -15,10 +15,26 @@ applied in that feature space during the reverse trajectory:
     \\Phi_g = \\sum_{j} \\exp\\left(
         -\\frac{\\lVert \\hat f_g - \\hat f_j \\rVert^2}{2\\sigma^2}\\right),
     \\qquad
-    \\Delta x = -\\eta(t)\\, \\nabla_x \\sum_g \\Phi_g
+    \\Delta x = -\\eta\\, w(t)\\, \\mathrm{d}t\\,
+        \\nabla_x \\sum_g \\frac{\\Phi_g}{\\max(1, \\Phi_g)}
 
 where :math:`j` runs over a persistent *archive* of already-found structures
-and over the other members of the current batch.
+and over the other members of the current batch, and :math:`w(t)` is a bell
+window over diffusion time.
+
+Three details of that expression are deliberate.  The :math:`\\mathrm{d}t`
+makes the accumulated bias a property of the trajectory rather than of how
+finely it is discretised.  The :math:`\\max(1, \\Phi_g)` denominator — detached,
+so it rescales the potential rather than reshaping it — stops the repulsion
+from growing with the density of the archive, which would otherwise make a
+fixed :math:`\\eta` steadily more aggressive as a global-optimisation campaign
+fills the archive up; below one effective neighbour it does nothing, so a
+structure far from everything is still left alone.  And :math:`w(t)` is a bell
+rather than the front-loaded :math:`t^\\zeta`, because the guidance is only
+meaningful in a window: at :math:`t \\to 1` the samples are a noise gas whose
+features sit far from every archive entry, so the kernel is dead and the
+in-batch term merely amplifies noise, while at :math:`t \\to 0` the basin is
+already committed and repulsion only distorts a finished geometry.
 
 The potential is a plain sum of Gaussians — the bias metadynamics deposits —
 and *not* its logarithm.  This matters: for a single reference,
@@ -38,6 +54,7 @@ This module provides:
 - :class:`NoveltyGuidanceConfig` – configuration dataclass.
 - :func:`structure_features` – pooled backbone features for a batch.
 - :class:`FeatureArchive` – reference features of already-found structures.
+- :func:`resolve_novelty_config` – calibrate ``sigma`` against the archive.
 - :func:`novelty_guidance_step` – one guidance step (module-level).
 """
 
@@ -63,48 +80,113 @@ class NoveltyGuidanceConfig:
     Parameters
     ----------
     guidance : float
-        Scale of the repulsion applied at each reverse step.  Dimensionless,
-        like :attr:`~agedi.diffusion.guidance.ForcefieldGuidanceConfig.guidance`
-        — the raw gradient magnitude depends on the backbone activations, so
-        this needs calibrating per model against ``max_step_size``.
-        Set to ``0.0`` (the default) to disable novelty guidance entirely.
-    sigma : float
+        Scale of the repulsion, expressed **per unit diffusion time**: the step
+        applied at each reverse step is multiplied by ``dt``, so the total
+        accumulated bias is independent of how many ``steps`` the trajectory
+        uses.  The raw gradient magnitude still depends on the backbone
+        activations, so this needs calibrating per model against
+        ``max_step_size``.  Set to ``0.0`` (the default) to disable novelty
+        guidance entirely.
+    sigma : float or None
         Bandwidth of the Gaussian kernel in unit-normalised feature space,
         where distances lie in ``[0, 2]``.
 
         The repulsive force on a structure at feature distance ``d`` from a
         reference goes as ``d * exp(-d**2 / (2 * sigma**2))``: it is **zero at
         ``d = 0``**, peaks at ``d = sigma``, and decays beyond.  So ``sigma``
-        sets the radius of "too similar" — pick it near the feature distance
-        that separates structures you consider duplicates, and anything more
-        than a few ``sigma`` away is left alone.  Calibrate against the
-        observed distribution of pairwise feature distances in the archive
-        rather than guessing.
+        sets the radius of "too similar" — it should sit near the feature
+        distance that separates structures you consider duplicates, and
+        anything more than a few ``sigma`` away is left alone.
+
+        ``None`` (the default) calibrates it automatically from the archive's
+        own pairwise-distance distribution, at the ``sigma_quantile``
+        quantile — see :func:`resolve_novelty_config`.  A fixed value in a feature
+        space that is rebuilt on every retraining is a guess; the quantile is
+        not.
+    sigma_quantile : float
+        Quantile of the archive's pairwise feature-distance distribution used
+        as ``sigma`` when the latter is ``None``.  The default ``0.05`` reads
+        as "the closest 5% of archive pairs are what I mean by duplicates".
+        Ignored when ``sigma`` is set explicitly.
+    schedule : str
+        Shape of the time-dependent weight:
+
+        ``"gaussian"`` (default)
+            ``exp(-(t - t_center)**2 / (2 * t_width**2))`` — a bell centred at
+            ``t_center``.  This is the right shape because the guidance is only
+            *meaningful* in a window: at ``t -> 1`` the samples are a noise gas
+            whose features sit far from every archive entry, so the kernel is
+            dead and the in-batch term merely amplifies noise, while at
+            ``t -> 0`` the basin is already committed and repulsion only
+            distorts a finished geometry.
+        ``"power"``
+            ``t**zeta`` — the original front-loaded schedule, kept for
+            reproducing earlier runs.
+    t_center : float
+        Centre of the Gaussian time window.  Ignored unless
+        ``schedule="gaussian"``.
+    t_width : float
+        Standard deviation of the Gaussian time window.  Ignored unless
+        ``schedule="gaussian"``.
     zeta : float
-        Exponent for the time-dependent weight factor ``t**zeta``.  Note this
-        is the *opposite* end of the trajectory from
-        :class:`~agedi.diffusion.guidance.ForcefieldGuidanceConfig`, which uses
-        ``(1 - t)**zeta``: which basin a sample falls into is decided at high
-        noise, so novelty guidance must be front-loaded.  Late repulsion only
-        distorts an already-committed geometry.
+        Exponent of the ``t**zeta`` weight.  Ignored unless
+        ``schedule="power"``.
     max_step_size : float
-        Hard cap on the per-atom displacement magnitude (Å).  Because the raw
-        gradient is used unnormalised, this is what bounds a single step.
+        Cap on the per-atom displacement magnitude (Å).  Applied as a *single*
+        rescaling per structure — the largest per-atom displacement in a
+        structure is brought down to this value and every atom of that
+        structure is scaled by the same factor — so the applied step stays
+        parallel to the gradient instead of being sheared by per-atom clipping.
     include_batch : bool
         Whether to also repel the members of the current batch from each other.
         Costs nothing extra — the features are already computed — and prevents
         a whole batch from collapsing into the same new basin.
+    batch_weight : float
+        Relative weight of the in-batch repulsion against the archive term.
+        In-batch pairs are counted once, like archive pairs, so ``1.0`` (the
+        default) means an in-batch neighbour repels exactly as hard as an
+        archive entry at the same feature distance.
+    normalize_density : bool
+        Divide each structure's repulsion by its own kernel sum — the
+        "effective number of references within ``sigma``" — clamped below at
+        ``1.0``.  Without this, the gradient magnitude grows with the local
+        density of the archive, so the same ``guidance`` becomes steadily more
+        aggressive as a global-optimisation campaign fills the archive up.  The
+        denominator is detached, and the clamp means a sample far from
+        everything is unaffected: the force still decays to zero with the
+        Gaussian tail.  Set to ``False`` for the plain sum-of-Gaussians bias.
     pool : str
         How to pool per-atom features into a structure feature: ``"mean"``
         (default, size-invariant) or ``"sum"``.
     """
 
     guidance: float = 0.0
-    sigma: float = 0.5
+    sigma: Optional[float] = None
+    sigma_quantile: float = 0.05
+    schedule: str = "gaussian"
+    t_center: float = 0.5
+    t_width: float = 0.2
     zeta: float = 1.0
     max_step_size: float = 0.1
     include_batch: bool = True
+    batch_weight: float = 1.0
+    normalize_density: bool = True
     pool: str = "mean"
+
+    def __post_init__(self) -> None:
+        """Validate the schedule name and the bandwidth parameters."""
+        if self.schedule not in ("gaussian", "power"):
+            raise ValueError(
+                f"schedule must be 'gaussian' or 'power', got {self.schedule!r}"
+            )
+        if self.schedule == "gaussian" and self.t_width <= 0.0:
+            raise ValueError(f"t_width must be positive, got {self.t_width}")
+        if self.sigma is not None and self.sigma <= 0.0:
+            raise ValueError(f"sigma must be positive, got {self.sigma}")
+        if not 0.0 < self.sigma_quantile < 1.0:
+            raise ValueError(
+                f"sigma_quantile must lie in (0, 1), got {self.sigma_quantile}"
+            )
 
 
 def _mobile_node_weights(batch: AtomsGraph) -> Optional[torch.Tensor]:
@@ -389,28 +471,163 @@ class FeatureArchive:
             self.features = self.features.to(device)
         return self
 
+    def distance_quantiles(
+        self,
+        quantiles: Sequence[float] = (0.01, 0.05, 0.5),
+        max_references: int = 512,
+        generator: Optional[torch.Generator] = None,
+    ) -> Optional[torch.Tensor]:
+        """Quantiles of the pairwise feature distances within the archive.
+
+        This is the distribution ``sigma`` has to be calibrated against: it is
+        the only thing that says what "too similar" means in a feature space
+        that is rebuilt from scratch on every retraining.
+
+        The archive is subsampled to *max_references* entries before the
+        ``O(n**2)`` distance matrix is formed, so this stays cheap for the
+        large archives a global-optimisation campaign accumulates.
+
+        Parameters
+        ----------
+        quantiles : Sequence[float], optional
+            Quantiles to evaluate, each in ``[0, 1]``.
+        max_references : int, optional
+            Cap on the number of archive entries used.  When the archive is
+            larger, a random subset of this size is drawn.
+        generator : torch.Generator, optional
+            Generator for the subsampling, for reproducibility.
+
+        Returns
+        -------
+        torch.Tensor or None
+            One distance per requested quantile, or ``None`` when the archive
+            holds fewer than two structures (no pair to measure).
+        """
+        if self.features is None or self.features.shape[0] < 2:
+            return None
+
+        features = self.features
+        if features.shape[0] > max_references:
+            idx = torch.randperm(
+                features.shape[0], generator=generator, device=features.device
+            )[:max_references]
+            features = features[idx]
+
+        n = features.shape[0]
+        d2 = _squared_distances(features, features)
+        # Off-diagonal entries only: the self-distances are structurally zero
+        # and would swamp the low quantiles.
+        off_diagonal = ~torch.eye(n, dtype=torch.bool, device=d2.device)
+        distances = d2[off_diagonal].sqrt()
+
+        q = torch.tensor(
+            list(quantiles), dtype=distances.dtype, device=distances.device
+        )
+        return torch.quantile(distances, q)
+
+
+def resolve_novelty_config(
+    config: NoveltyGuidanceConfig,
+    archive: Optional[FeatureArchive],
+) -> NoveltyGuidanceConfig:
+    """Fill in the parameters that have to be read off the archive.
+
+    Currently that is only ``sigma``: when it is ``None`` it is set to the
+    ``config.sigma_quantile`` quantile of the archive's pairwise feature
+    distances, so the "too similar" radius tracks whatever feature space the
+    current model generation happens to define.  A config whose ``sigma`` is
+    already set is returned unchanged.
+
+    Parameters
+    ----------
+    config : NoveltyGuidanceConfig
+        The configuration to resolve.
+    archive : FeatureArchive or None
+        The archive to calibrate against.
+
+    Returns
+    -------
+    NoveltyGuidanceConfig
+        A copy with ``sigma`` set to a concrete value.
+
+    Raises
+    ------
+    ValueError
+        If ``sigma`` is ``None`` and the archive holds fewer than two
+        structures, so there is no distance distribution to calibrate against.
+    """
+    if config.sigma is not None:
+        return config
+
+    quantile = None
+    if archive is not None:
+        quantile = archive.distance_quantiles((config.sigma_quantile,))
+
+    if quantile is None:
+        raise ValueError(
+            "sigma=None calibrates the kernel bandwidth from the archive's "
+            "pairwise feature distances, but the archive holds fewer than two "
+            "structures. Pass an explicit sigma, or supply at least two "
+            "reference structures."
+        )
+
+    return dataclasses.replace(config, sigma=float(quantile[0]))
+
+
+def _time_factor(
+    config: NoveltyGuidanceConfig, time: torch.Tensor
+) -> torch.Tensor:
+    """Weight of the guidance at diffusion time *time*.
+
+    Parameters
+    ----------
+    config : NoveltyGuidanceConfig
+        Guidance configuration; ``schedule`` selects the shape.
+    time : torch.Tensor
+        Diffusion time, ``1`` at the noisy end and ``~0`` at the clean end.
+
+    Returns
+    -------
+    torch.Tensor
+        Weight with the same shape as *time*, in ``[0, 1]``.
+    """
+    if config.schedule == "power":
+        return time**config.zeta
+    return torch.exp(
+        -((time - config.t_center) ** 2) / (2.0 * config.t_width**2)
+    )
+
 
 def novelty_guidance_step(
     batch: AtomsGraph,
     score_model: "ScoreModel",
     archive: Optional[FeatureArchive],
     config: NoveltyGuidanceConfig,
+    dt: float = 1.0,
 ) -> AtomsGraph:
     """Apply one feature-space repulsion step.
 
-    The raw gradient is used directly, scaled by ``config.guidance`` and the
-    time factor and then capped at ``config.max_step_size``.  It is
-    deliberately *not* renormalised per structure: the magnitude of
-    :math:`\\nabla\\Phi` decays with the Gaussian tail as a structure moves away
-    from the reference set, which is precisely the desired behaviour — a sample
-    that is already novel should be left alone.  Rescaling every structure to a
-    common step size would throw that signal away and would amplify numerical
-    noise for samples whose repulsion has legitimately vanished.
+    The gradient is scaled by ``config.guidance``, by the time-window weight
+    (:func:`_time_factor`) and by *dt*, then capped at ``config.max_step_size``.
+    Scaling by *dt* is what makes ``guidance`` a property of the trajectory
+    rather than of its discretisation: without it the accumulated bias grows
+    linearly with the number of reverse steps, and a value tuned at 200 steps
+    is 2.5x too strong at 500.
 
-    Because the repulsion is bounded and short-ranged, a ``guidance`` value
-    large enough to matter for near-duplicates will saturate
-    ``max_step_size`` for them; that is expected, and structures further than a
-    few ``sigma`` from anything known will still barely move.
+    Within a structure the raw gradient is used unnormalised — the magnitude of
+    :math:`\\nabla\\Phi` decays with the Gaussian tail as a structure moves away
+    from the reference set, which is exactly the desired behaviour: a sample
+    that is already novel should be left alone.  The cap is applied as one
+    rescaling per structure, so it bounds the step without rotating it; per-atom
+    clipping would shear the structure, since the pooled-feature gradient is
+    typically concentrated on a handful of atoms.
+
+    With ``config.normalize_density`` the per-structure repulsion is divided by
+    its own kernel sum, clamped below at ``1.0``.  This keeps the force from
+    growing with the density of the archive — otherwise the same ``guidance``
+    silently gets more aggressive every iteration of a global-optimisation
+    campaign — while leaving structures far from everything untouched, since
+    their kernel sum is far below the clamp.
 
     One consequence worth knowing: for two *exactly* identical structures the
     gradient is exactly zero — coincident features sit at an unstable
@@ -431,13 +648,26 @@ def novelty_guidance_step(
         Features of already-found structures to repel from.  May be ``None``
         or empty, in which case only the in-batch term contributes.
     config : NoveltyGuidanceConfig
-        Guidance configuration.
+        Guidance configuration.  ``config.sigma`` must be resolved to a
+        concrete value first — see :func:`resolve_novelty_config`.
+    dt : float, optional
+        Length of the current reverse-diffusion step in diffusion time.
+        Defaults to ``1.0``, which reproduces the unscaled behaviour for
+        callers driving the step by hand.
 
     Returns
     -------
     AtomsGraph
         The batch with updated positions.  The caller is responsible for
         wrapping positions and rebuilding the neighbour list.
+
+    Raises
+    ------
+    ValueError
+        If ``config.sigma`` is still ``None``.
+    RuntimeError
+        If the feature gradient is non-finite — which means the backbone has
+        already diverged, and stepping on it would only hide where.
     """
     if config.guidance == 0.0:
         return batch
@@ -450,6 +680,13 @@ def novelty_guidance_step(
     # With a single structure and no archive there is nothing to repel from.
     if not has_archive and not has_batch_term:
         return batch
+
+    if config.sigma is None:
+        raise ValueError(
+            "config.sigma is None. Call "
+            "agedi.diffusion.novelty.resolve_novelty_config(config, archive) to "
+            "calibrate it against the archive before stepping."
+        )
 
     with torch.enable_grad():
         pos = batch.pos.detach().clone().requires_grad_(True)
@@ -466,26 +703,68 @@ def novelty_guidance_step(
             # leaving it in would add a constant 1.0 per structure for no
             # reason.
             self_pairs = torch.eye(n_graphs, dtype=torch.bool, device=d2.device)
-            kernels.append((d2 * inv).exp().masked_fill(self_pairs, 0.0))
+            in_batch = (d2 * inv).exp().masked_fill(self_pairs, 0.0)
+            # Halve it: the double sum over the batch visits every pair twice,
+            # once from each end, whereas an archive pair is counted once.
+            # Without this an in-batch neighbour repels twice as hard as an
+            # archive entry at the same distance, and the two terms cannot be
+            # balanced against each other.
+            kernels.append(in_batch * (0.5 * config.batch_weight))
 
         if has_archive:
             reference = reference.to(features.device)
             kernels.append((_squared_distances(features, reference) * inv).exp())
 
-        potential = torch.cat(kernels, dim=1).sum()
+        per_structure = torch.cat(kernels, dim=1).sum(dim=1)  # (n_graphs,)
+
+        if config.normalize_density:
+            # Detached: this rescales each structure's contribution, it must
+            # not change the shape of the potential being differentiated.
+            per_structure = per_structure / per_structure.detach().clamp(min=1.0)
+
+        potential = per_structure.sum()
         (grad,) = torch.autograd.grad(potential, pos)
 
     with torch.no_grad():
-        # Descend the potential: away from the nearest reference structure.
-        time_factor = batch.time**config.zeta
-        step = -config.guidance * time_factor * grad
+        if not grad.isfinite().all():
+            raise RuntimeError(
+                "Non-finite gradient from the novelty guidance potential. "
+                "This means the score model backbone produced NaN or Inf for "
+                "the current positions — commonly because two atoms have been "
+                "driven onto each other, making the interatomic unit vectors "
+                "0/0.\n"
+                "Common causes:\n"
+                "  • novelty guidance / max_step_size is too large, and the\n"
+                "    repulsion collapsed a structure faster than the score\n"
+                "    model could heal it.\n"
+                "  • The trajectory had already diverged before this step\n"
+                "    (check corrector_step_size and ff_guidance)."
+            )
 
-        step_magnitude = step.norm(dim=1, keepdim=True)
-        too_large = step_magnitude > config.max_step_size
-        if torch.any(too_large):
-            scaling_factor = torch.ones_like(step_magnitude)
-            scaling_factor[too_large] = config.max_step_size / step_magnitude[too_large]
-            step = step * scaling_factor
+        # Descend the potential: away from the nearest reference structure.
+        time_factor = _time_factor(config, batch.time)
+        step = -config.guidance * dt * time_factor * grad
+
+        # Zero the step on fixed atoms before capping.  Assigning to batch.pos
+        # would discard it anyway, but a fixed atom still carries a gradient —
+        # it shapes its mobile neighbours' representations through message
+        # passing — and leaving it in would inflate the per-structure maximum
+        # and shrink the step of the atoms that actually move.
+        mobile = _mobile_node_weights(batch)
+        if mobile is not None:
+            step = step * mobile.unsqueeze(-1)
+
+        # Cap the step with one factor per structure, so the direction of the
+        # displacement field is preserved and only its magnitude is bounded.
+        idx = batch.batch
+        step_magnitude = step.norm(dim=1)
+        largest = torch.zeros(
+            n_graphs, dtype=step_magnitude.dtype, device=step_magnitude.device
+        ).index_reduce_(0, idx, step_magnitude, "amax", include_self=False)
+        scaling_factor = (
+            config.max_step_size / largest.clamp(min=1e-12)
+        ).clamp(max=1.0)
+        step = step * scaling_factor[idx].unsqueeze(-1)
 
         new_pos = batch.pos + step
 

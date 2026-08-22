@@ -5,6 +5,65 @@ All notable changes to AGeDi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Novelty guidance stability pass.**  Six changes to how the repulsion is
+  scaled and scheduled; all of them alter behaviour, so an existing
+  ``guidance`` value needs recalibrating (see the note below).
+  - The step is now scaled by ``dt``, so ``guidance`` is a property of the
+    trajectory rather than of its discretisation.  Previously the accumulated
+    bias grew linearly with ``steps``, and a value tuned at 200 steps was 2.5x
+    too strong at 500.
+  - ``schedule="gaussian"`` is the new default time weight,
+    ``exp(-(t - t_center)**2 / (2 * t_width**2))`` with ``t_center=0.5`` and
+    ``t_width=0.2``.  The old front-loaded ``t**zeta`` is still available as
+    ``schedule="power"``.  A bell is the right shape because the guidance is
+    only meaningful in a window: at ``t -> 1`` the samples are a noise gas
+    whose features sit far from every archive entry, so the kernel is dead and
+    the in-batch term merely amplifies noise, while at ``t -> 0`` the basin is
+    already committed and repulsion only distorts a finished geometry.
+  - ``sigma`` now defaults to ``None``, meaning *calibrate it against the
+    archive*: it is set to the ``sigma_quantile`` (default ``0.05``) quantile
+    of the archive's own pairwise feature distances.  A fixed bandwidth is a
+    guess in a feature space that is rebuilt on every retraining.  The resolved
+    value and the archive's 1/5/50% distance quantiles are printed in the
+    sampling-configuration panel.  New: ``FeatureArchive.distance_quantiles()``
+    and ``agedi.diffusion.resolve_novelty_config()``.
+  - ``max_step_size`` is applied as one rescaling per structure instead of a
+    per-atom clip.  The pooled-feature gradient is typically concentrated on a
+    handful of atoms, so per-atom clipping shortened only those and sheared the
+    structure; a single factor bounds the magnitude while keeping the step
+    parallel to the gradient.  Fixed template atoms are excluded from that
+    maximum — their displacement is discarded anyway, but they carry a
+    gradient and would otherwise shrink the step of the atoms that do move.
+  - ``normalize_density`` (new, on by default) divides each structure's
+    repulsion by its own kernel sum, clamped below at ``1.0``.  Without it the
+    gradient grows with the density of the archive, so the same ``guidance``
+    becomes steadily more aggressive as a global-optimisation campaign fills
+    the archive up.  The denominator is detached, and the clamp means a sample
+    far from everything is untouched.
+  - In-batch pairs are now counted once, like archive pairs.  The double sum
+    over the batch visits every pair twice, so ``include_batch=True`` silently
+    made in-batch repulsion twice as strong as the archive term and the two
+    could not be balanced.  New ``batch_weight`` sets their relative weight
+    explicitly.
+
+### Added
+- Novelty guidance aborts with a clear ``RuntimeError`` when the feature
+  gradient is non-finite (typically two atoms driven onto each other, making
+  the interatomic unit vectors 0/0), and the resulting positions are checked
+  with the samplers' ``_check_finite`` before the neighbour-list kernel sees
+  them.
+
+### Notes
+- Recalibrating ``guidance``: the ``dt`` factor alone means the old value must
+  be multiplied by roughly ``steps``; the density normalisation and the halved
+  in-batch term reduce it further for dense archives.  Start from the
+  displacement you want per unit diffusion time and check it against the
+  ``novelty_sigma`` and archive-distance quantiles now printed at the top of a
+  sampling run.
+
 ## [1.5.0] - 2026-08-13
 
 ### Added

@@ -28,7 +28,12 @@ from .guidance import (
     force_field_guidance_step,
     post_diffusion_relaxation_step,
 )
-from .novelty import FeatureArchive, NoveltyGuidanceConfig, novelty_guidance_step
+from .novelty import (
+    FeatureArchive,
+    NoveltyGuidanceConfig,
+    novelty_guidance_step,
+    resolve_novelty_config,
+)
 
 
 @dataclasses.dataclass
@@ -794,7 +799,9 @@ class Diffusion:
             *corrector_steps* / *corrector_step_size*.
         novelty_guidance : NoveltyGuidanceConfig, optional
             Feature-space novelty guidance configuration.  ``None`` (default)
-            disables it.  Not supported on the compiled path.
+            disables it.  Not supported on the compiled path.  A ``sigma`` of
+            ``None`` is resolved against *novelty_archive* once, before the
+            loop starts.
         novelty_archive : FeatureArchive, optional
             Features of already-found structures to repel from.  When ``None``,
             only the in-batch repulsion term contributes.
@@ -823,6 +830,13 @@ class Diffusion:
                 "positions, which the compiled reverse step does not expose. "
                 "Sample with compile=False to use novelty guidance."
             )
+        if novelty_enabled:
+            # Resolve sigma against the archive once, not on every step: the
+            # calibration is an O(n^2) reduction over the archive features.
+            novelty_guidance = resolve_novelty_config(
+                novelty_guidance, novelty_archive
+            )
+            from agedi.diffusion.samplers import Sampler as _SamplerCls
 
         if steps < 2:
             return batch.to_data_list()
@@ -982,6 +996,7 @@ class Diffusion:
                             self.score_model,
                             novelty_archive,
                             novelty_guidance,
+                            dt,
                         )
                         timings.novelty_guidance_calls += 1
                     else:
@@ -990,7 +1005,9 @@ class Diffusion:
                             self.score_model,
                             novelty_archive,
                             novelty_guidance,
+                            dt,
                         )
+                    _SamplerCls._check_finite(batch, "novelty guidance")
                     batch.wrap_positions()
                     batch.update_graph()
 
