@@ -116,6 +116,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ase.optimize.LBFGS` to within float32 precision.  Affects
   `sample(max_extra_steps=...)` and force-field guidance; non-periodic systems
   were never affected.
+- **`post_diffusion_relaxation_step` no longer perturbs converged structures.**
+  Wrapping positions into the cell round-trips through fractional coordinates,
+  which is not bit-exact even for a no-op wrap, so every already-converged
+  structure in a batch picked up ~1e-7 Å of numerical drift each relaxation
+  step it should have been skipping (`active=False`).  `AtomsGraph.wrap_positions()`
+  now takes an optional per-atom mask and leaves unmasked atoms' positions
+  untouched instead of round-tripping them; caught by
+  `TestPerStructureConvergence::test_inactive_structures_do_not_move`, which
+  was intermittently failing in CI.
 
 ### Changed
 - Post-diffusion relaxation now evaluates the force field **once** per step

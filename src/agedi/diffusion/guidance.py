@@ -567,7 +567,8 @@ def post_diffusion_relaxation_step(
 
     batch.pos = new_pos
 
-    batch.wrap_positions()
+    atom_mask = None if active is None else active[batch.batch]
+    batch.wrap_positions(atom_mask=atom_mask)
     batch.update_graph()
 
     return batch
