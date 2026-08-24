@@ -54,6 +54,7 @@ from .base import Sampler
 from .em import EulerMaruyamaSampler
 from .ffpc import ForcefieldCorrectorSampler
 from .heun import HeunSampler
+from .inpaint import InpaintingSampler
 from .ode import HeunODESampler, ProbabilityFlowODESampler
 from .pc import PredictorCorrectorSampler
 
@@ -123,4 +124,5 @@ __all__ = [
     "ProbabilityFlowODESampler",
     "HeunODESampler",
     "ForcefieldCorrectorSampler",
+    "InpaintingSampler",
 ]

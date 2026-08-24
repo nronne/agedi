@@ -156,6 +156,74 @@ Similar to the CLI, this samples using the ``last_model.ckpt`` checkpoint found 
 specify the exact path to it when calling :func:`~agedi.functional.load_diffusion`.
 
 
+Inpainting
+-----------
+
+:func:`~agedi.functional.inpaint` regenerates a chosen subset of atoms in an
+*existing* structure, rather than generating a new structure from scratch.
+Selected atoms are noised and regenerated like a from-scratch atom; every
+other atom is, at each reverse-diffusion step, replaced by a fresh sample of
+the forward process of the input structure, so the whole batch stays at a
+self-consistent noise level and those atoms converge back onto their input
+positions (and species, when a types noiser is active) exactly:
+
+.. code-block:: python
+
+   from ase.io import read, write
+   from agedi import load_diffusion, inpaint
+
+   diffusion = load_diffusion("logs/agedi/version_0")
+   atoms = read("structure.traj")
+
+   structures = inpaint(
+       diffusion,
+       atoms,
+       symbols=["O"],      # regenerate every oxygen atom
+       n_samples=4,
+       steps=500,
+   )
+
+   write("inpainted.traj", structures)
+
+Which atoms are regenerated is controlled by
+:func:`~agedi.functional.select_atoms` — ``indices``, ``symbols``,
+``z_range``, ``sphere``, or ``from_atoms`` combine by union; with none given,
+a random ``fraction`` (default ``0.25``) of the atoms not held by a
+``FixAtoms`` constraint is selected:
+
+.. code-block:: python
+
+   # A defect region around a specific site
+   structures = inpaint(
+       diffusion, atoms,
+       sphere=(atoms.positions[12], 3.0),
+       n_samples=4, steps=500,
+   )
+
+   # Default: random 25% of the non-fixed atoms, reproducible via seed
+   structures = inpaint(diffusion, atoms, n_samples=4, steps=500, seed=0)
+
+Other parameters worth knowing:
+
+- ``freeze``: atom indices (or a bool mask) to hard-freeze in addition to the
+  regenerated selection — these never move at all. Must not overlap the
+  selection.
+- ``t_start`` (default ``1.0``): starting diffusion time. Values below
+  ``1.0`` start from a partially-noised state for local rattle-and-relax
+  refinement instead of full regeneration of the selected region.
+- ``n_resample`` / ``jump_length`` (default ``1`` / ``1``): optional
+  RePaint-style resampling (`Lugmayr et al. 2022
+  <https://arxiv.org/abs/2201.09865>`_) that re-noises and re-denoises each
+  step several times, at the cost of extra score-model evaluations, to
+  better harmonize the regenerated region with its surroundings.
+- ``sampler`` / ``sampler_kwargs``: the *inner* reverse-diffusion algorithm
+  wrapped by the inpainting logic — the same choices as :func:`~agedi.functional.sample`
+  (see :ref:`Choosing a sampler <choosing-a-sampler>` below). ``compile=True``
+  is not supported, since the compiled path bypasses samplers entirely.
+
+
+.. _choosing-a-sampler:
+
 Choosing a sampler
 -------------------
 

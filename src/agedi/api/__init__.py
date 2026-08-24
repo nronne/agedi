@@ -5,9 +5,11 @@ Re-exports all public symbols from the api sub-modules so that
 """
 
 from ._registry import register_model as register_model
+from ._selection import select_atoms as select_atoms
 from .dataset import create_dataset as create_dataset
 from .diffusion import create_diffusion as create_diffusion
 from .diffusion import load_diffusion as load_diffusion
+from .inpainting import inpaint as inpaint
 from .prediction import predict as predict
 from .sampling import sample as sample
 from .training import create_trainer as create_trainer
@@ -20,9 +22,11 @@ __all__ = [
     "create_diffusion",
     "create_trainer",
     "load_diffusion",
+    "inpaint",
     "predict",
     "register_model",
     "sample",
+    "select_atoms",
     "train",
     "train_from_atoms",
     "train_from_config",

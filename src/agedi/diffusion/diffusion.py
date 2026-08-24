@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import time
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -548,6 +548,88 @@ class Diffusion:
 
         return new_graph
 
+    @staticmethod
+    def _expand_mask_like(mask: torch.Tensor, tensor: torch.Tensor) -> torch.Tensor:
+        """Broadcast a per-atom bool mask to the trailing shape of *tensor*."""
+        if tensor.dim() > mask.dim():
+            shape = [mask.shape[0]] + [1] * (tensor.dim() - 1)
+            return mask.view(*shape)
+        return mask
+
+    def _initialize_inpaint_graph(
+        self,
+        source: AtomsGraph,
+        inpaint_mask: torch.Tensor,
+        freeze_mask: Optional[torch.Tensor],
+        t_start: float,
+    ) -> AtomsGraph:
+        """Build one inpainting starting graph from an existing structure.
+
+        Clones *source*, records its clean state as the ``{key}0`` reference
+        for every noiser (used by :meth:`~agedi.diffusion.noisers.Noiser.forward_marginal`
+        throughout sampling), then draws the initial noised state:
+
+        * ``t_start == 1.0``: atoms selected by *inpaint_mask* are drawn from
+          each noiser's prior (matching ordinary from-scratch sampling);
+          atoms not selected are drawn from the forward marginal
+          ``q(z_1 | z_0)`` instead of the prior, since their identity is known.
+        * ``t_start < 1.0``: every atom (selected or not) is drawn from the
+          forward marginal ``q(z_{t_start} | z_0)``. The distinction between
+          selected and known atoms only takes effect once reverse diffusion
+          starts regenerating the selected ones.
+
+        Parameters
+        ----------
+        source : AtomsGraph
+            The input structure (unbatched), already carrying ``cutoff``.
+        inpaint_mask : torch.Tensor
+            Bool tensor, ``True`` for atoms to regenerate.
+        freeze_mask : torch.Tensor, optional
+            Bool tensor, ``True`` for atoms to hard-freeze (never move),
+            stored as ``mask``. Must be disjoint from *inpaint_mask*.
+        t_start : float
+            Starting diffusion time.
+
+        Returns
+        -------
+        AtomsGraph
+            The initialised graph, not yet batched or graph-built.
+
+        """
+        graph = source.clone()
+        device = graph.pos.device
+
+        inpaint_mask = inpaint_mask.to(device=device, dtype=torch.bool)
+        if freeze_mask is None:
+            freeze_mask = torch.zeros_like(inpaint_mask)
+        else:
+            freeze_mask = freeze_mask.to(device=device, dtype=torch.bool)
+
+        setattr(graph, "inpaint_mask", inpaint_mask)
+        setattr(graph, "mask", freeze_mask)
+
+        t = torch.full(
+            (graph.pos.shape[0], 1), float(t_start), device=device, dtype=graph.pos.dtype
+        )
+        graph.time = t
+
+        for noiser in self.noisers:
+            key = noiser.key
+            ref = graph[key].clone()
+            graph.add_batch_attr(key + "0", ref, type="node")
+
+            marginal = noiser.forward_marginal(graph, ref)
+            if t_start >= 1.0:
+                prior = noiser.prior.get_callable(graph)()
+                select = self._expand_mask_like(inpaint_mask, prior)
+                new_val = torch.where(select, prior, marginal)
+            else:
+                new_val = marginal
+
+            setattr(graph, key, new_val)
+
+        return graph
+
     # ------------------------------------------------------------------
     # Timing helpers
     # ------------------------------------------------------------------
@@ -732,6 +814,7 @@ class Diffusion:
         sampler=None,
         sampler_kwargs=None,
         save_corrector_frames: bool = False,
+        t_start: float = 1.0,
     ) -> List[AtomsGraph]:
         """Run the reverse-diffusion loop for a pre-built batch.
 
@@ -784,6 +867,11 @@ class Diffusion:
             trajectory.  Only meaningful together with *save_trajectory* and a
             sampler that runs correctors (``"pc"`` / ``"ffpc"``).  ``False``
             (default) records one frame per outer diffusion step.
+        t_start : float, optional
+            Starting diffusion time.  ``1.0`` (default) runs the full reverse
+            trajectory.  Values below ``1.0`` start from a partially-noised
+            state, e.g. for inpainting-style local refinement via
+            :meth:`inpaint`.
 
         Returns
         -------
@@ -826,7 +914,7 @@ class Diffusion:
                 batch_size=batch.batch_size
             )
 
-        ts = torch.linspace(1, eps, steps, device=self.device)
+        ts = torch.linspace(t_start, eps, steps, device=self.device)
         dt = ts[0] - ts[1]
 
         # Inject call-counting wrappers so timings tracks actual score/ff invocations.
@@ -1072,6 +1160,8 @@ class Diffusion:
         sampler=None,
         sampler_kwargs=None,
         save_corrector_frames: bool = False,
+        t_start: float = 1.0,
+        graph_factory: Optional[Callable[[], AtomsGraph]] = None,
         **kwargs,
     ) -> List[AtomsGraph]:
         """Build *N* graphs from priors and run the sampling loop.
@@ -1107,8 +1197,18 @@ class Diffusion:
         sampler_kwargs : dict, optional
             Extra keyword arguments forwarded to the sampler constructor when
             *sampler* is a string alias.
+        t_start : float, optional
+            Starting diffusion time, forwarded to :meth:`_sample_batch`.
+            Defaults to ``1.0`` (full reverse trajectory).
+        graph_factory : callable, optional
+            When given, called with no arguments once per structure instead
+            of ``self._initialize_graph(cutoff, **kwargs)`` to build the
+            initial (unbatched) graph.  Used by :meth:`inpaint` to build
+            graphs from an existing structure rather than from noiser priors;
+            *kwargs* is ignored when this is provided.
         **kwargs
-            Keyword arguments forwarded to :meth:`_initialize_graph`.
+            Keyword arguments forwarded to :meth:`_initialize_graph`.  Ignored
+            when *graph_factory* is given.
 
         Returns
         -------
@@ -1122,7 +1222,10 @@ class Diffusion:
         data = []
         init_start = time.perf_counter()
         for _ in range(N):
-            data.append(self._initialize_graph(cutoff, **kwargs))
+            if graph_factory is not None:
+                data.append(graph_factory())
+            else:
+                data.append(self._initialize_graph(cutoff, **kwargs))
         timings.initialization += time.perf_counter() - init_start
 
         batch_setup_start = time.perf_counter()
@@ -1165,6 +1268,7 @@ class Diffusion:
             sampler=sampler,
             sampler_kwargs=sampler_kwargs,
             save_corrector_frames=save_corrector_frames,
+            t_start=t_start,
         )
         self._sync_for_timing(batch.pos.device)
         timings.total_wall = time.perf_counter() - total_start
@@ -1434,4 +1538,207 @@ class Diffusion:
             return self._sample(
                 N, steps, cutoff, eps, ff_guidance.guidance,
                 **sample_kwargs, **kwargs,
+            )
+
+    # ------------------------------------------------------------------
+    # Public inpainting API
+    # ------------------------------------------------------------------
+
+    def inpaint(
+        self,
+        structure: AtomsGraph,
+        inpaint_mask,
+        N: int = 1,
+        batch_size: int = 64,
+        steps: int = 500,
+        eps: float = 1e-3,
+        t_start: float = 1.0,
+        freeze=None,
+        n_resample: int = 1,
+        jump_length: int = 1,
+        compile: bool = False,
+        ff_guidance: Optional[ForcefieldGuidanceConfig] = None,
+        property: Optional[Dict] = None,
+        progress_bar: bool = False,
+        save_trajectory: bool = False,
+        save_corrector_frames: bool = False,
+        print_timings: bool = False,
+        sampler=None,
+        sampler_kwargs=None,
+    ) -> List[AtomsGraph]:
+        """Regenerate a chosen subset of atoms in an existing structure.
+
+        Runs masked reverse diffusion ("inpainting"): atoms selected by
+        *inpaint_mask* are regenerated from noise (or from a partially-noised
+        state when *t_start* < 1), while every other atom is, at each reverse
+        step, replaced by a fresh sample of the forward process ``q(z_t |
+        z_0)`` of *structure* — so the whole batch always sits at a
+        self-consistent noise level for the score model, and the non-selected
+        atoms converge back onto their input positions (and, for the
+        atomic-type noiser, their input species) exactly.
+
+        Parameters
+        ----------
+        structure : AtomsGraph
+            The input structure (unbatched), e.g. from
+            :meth:`~agedi.data.AtomsGraph.from_atoms`.
+        inpaint_mask : array-like of bool, shape (n_atoms,)
+            ``True`` for atoms to regenerate.
+        N : int, optional
+            Number of independent inpainted structures to generate. Defaults
+            to ``1``.
+        batch_size : int, optional
+            Maximum number of structures sampled in one batch; larger *N* is
+            chunked. Defaults to ``64``.
+        steps : int, optional
+            Number of reverse-diffusion steps. Defaults to ``500``.
+        eps : float, optional
+            Minimum time value (end of trajectory). Defaults to ``1e-3``.
+        t_start : float, optional
+            Starting diffusion time. ``1.0`` (default) fully re-noises the
+            selected atoms (de-novo generation of that region). Values below
+            ``1.0`` start from a partially-noised state for a local
+            rattle-and-relax refinement instead.
+        freeze : array-like of bool, shape (n_atoms,), optional
+            ``True`` for atoms to hard-freeze: they never move and are
+            excluded from the forward-marginal replacement applied to the
+            other known atoms. Must be disjoint from *inpaint_mask*.
+        n_resample : int, optional
+            Number of RePaint-style resampling passes per reverse step.
+            ``1`` (default) disables resampling.
+        jump_length : int, optional
+            Sub-steps per resampling pass before jumping back; see
+            :class:`~agedi.diffusion.samplers.InpaintingSampler`. Only
+            meaningful when *n_resample* > 1. Defaults to ``1``.
+        compile : bool, optional
+            Not supported for inpainting (the compiled path bypasses
+            samplers). Must be ``False``.
+        ff_guidance : ForcefieldGuidanceConfig, optional
+            Force-field guidance configuration.
+        property : dict, optional
+            Conditioning property values, e.g. ``{"energy": -3.5}``.
+        progress_bar : bool, optional
+            Show a tqdm progress bar.
+        save_trajectory : bool, optional
+            Return one trajectory per structure instead of final structures.
+        save_corrector_frames : bool, optional
+            Also record every corrector/resampling sub-step.
+        print_timings : bool, optional
+            Print a timing breakdown after sampling.
+        sampler : str, Sampler, or None, optional
+            The *inner* reverse-diffusion algorithm wrapped by the inpainting
+            logic, e.g. ``"em"``, ``"pc"``, ``"heun"``. Defaults to Euler-Maruyama.
+        sampler_kwargs : dict, optional
+            Extra keyword arguments forwarded to the inner sampler.
+
+        Returns
+        -------
+        List[AtomsGraph]
+            Inpainted structures, or trajectories when *save_trajectory* is ``True``.
+
+        """
+        if compile:
+            raise ValueError(
+                "compile=True is not supported for inpaint(): the compiled "
+                "reverse step bypasses samplers entirely, and inpainting is "
+                "implemented as a sampler. Use compile=False."
+            )
+        if not (0.0 < t_start <= 1.0):
+            raise ValueError(f"t_start must be in (0, 1], got {t_start}")
+
+        if ff_guidance is None:
+            ff_guidance = ForcefieldGuidanceConfig()
+
+        self.score_model.sample_mode()
+
+        device = structure.pos.device
+        inpaint_mask_t = torch.as_tensor(
+            np.asarray(inpaint_mask), dtype=torch.bool, device=device
+        )
+        if inpaint_mask_t.shape[0] != structure.pos.shape[0]:
+            raise ValueError(
+                f"inpaint_mask has {inpaint_mask_t.shape[0]} entries but "
+                f"structure has {structure.pos.shape[0]} atoms."
+            )
+        if not inpaint_mask_t.any():
+            raise ValueError("inpaint_mask selects no atoms; nothing to inpaint.")
+
+        freeze_t = None
+        if freeze is not None:
+            freeze_t = torch.as_tensor(
+                np.asarray(freeze), dtype=torch.bool, device=device
+            )
+            if freeze_t.shape[0] != structure.pos.shape[0]:
+                raise ValueError(
+                    f"freeze has {freeze_t.shape[0]} entries but "
+                    f"structure has {structure.pos.shape[0]} atoms."
+                )
+            if (freeze_t & inpaint_mask_t).any():
+                raise ValueError(
+                    "freeze and inpaint_mask must be disjoint: an atom cannot "
+                    "be both frozen and selected for regeneration."
+                )
+
+        if property is not None:
+            for k, v in property.items():
+                setattr(structure, k, torch.tensor(v, dtype=torch.float))
+
+        # Only used by _sample() for torch.compile buffer sizing, which is
+        # disallowed above; extracted defensively either way.
+        _cutoff = getattr(structure, "cutoff", 6.0)
+        cutoff = float(_cutoff.reshape(-1)[0].item()) if torch.is_tensor(_cutoff) else float(_cutoff)
+
+        base_sampler = self._resolve_sampler(sampler, 0, 1e-3, sampler_kwargs)
+        from agedi.diffusion.samplers import InpaintingSampler
+
+        inpainting_sampler = InpaintingSampler(
+            base_sampler, self.noisers, n_resample=n_resample, jump_length=jump_length
+        )
+
+        def graph_factory() -> AtomsGraph:
+            return self._initialize_inpaint_graph(
+                structure, inpaint_mask_t, freeze_t, t_start
+            )
+
+        self.zeta = ff_guidance.zeta
+
+        sample_kwargs: Dict = {
+            "progress_bar": progress_bar,
+            "save_trajectory": save_trajectory,
+            "save_corrector_frames": save_corrector_frames,
+            "force_threshold": ff_guidance.force_threshold,
+            "max_extra_steps": ff_guidance.max_extra_steps,
+            "print_timings": print_timings,
+            "compile": False,
+            "sampler": inpainting_sampler,
+            "sampler_kwargs": None,
+            "t_start": t_start,
+            "graph_factory": graph_factory,
+        }
+
+        if N > batch_size:
+            from rich.console import Console as _Console
+
+            _console = _Console()
+            n_full = N // batch_size
+            n_remainder = N % batch_size
+            n_batches = n_full + (1 if n_remainder > 0 else 0)
+            out = []
+            for i in range(n_full):
+                _console.print(f"Inpainting batch {i + 1}/{n_batches}...")
+                out += self._sample(
+                    batch_size, steps, cutoff, eps, ff_guidance.guidance,
+                    **sample_kwargs,
+                )
+            if n_remainder > 0:
+                _console.print(f"Inpainting batch {n_batches}/{n_batches}...")
+                out += self._sample(
+                    n_remainder, steps, cutoff, eps, ff_guidance.guidance,
+                    **sample_kwargs,
+                )
+            return out
+        else:
+            return self._sample(
+                N, steps, cutoff, eps, ff_guidance.guidance,
+                **sample_kwargs,
             )

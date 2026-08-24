@@ -238,6 +238,51 @@ Key ``ffpc`` options:
 - ``--ffpc_terminal_friction``: friction coefficient γ for ``langevin_md``
   (units: 1/terminal_step_size).  Auto-selected when not specified (γ·dt = 0.1).
 
+Inpainting
+----------
+
+``agedi inpaint`` regenerates a chosen subset of atoms in an *existing*
+structure instead of generating a new one from scratch:
+
+.. code-block:: console
+
+   agedi inpaint logs/agedi/version_0 structure.traj --symbols O --n_samples 4 --steps 500
+
+This loads the structure from ``structure.traj``, regenerates every oxygen
+atom, and writes the result(s) to the output directory. Selecting atoms
+via any of ``--indices``, ``--symbols``, ``--z_range``, ``--sphere_center``
+/ ``--sphere_radius``, or ``--from_atoms`` combines by union; with none
+given, a random ``--fraction`` (default ``0.25``) of the non-fixed atoms is
+selected instead:
+
+.. code-block:: console
+
+   # Explicit atom indices
+   agedi inpaint logs/agedi/version_0 structure.traj --indices 12,13,14
+
+   # A spherical region around a defect site
+   agedi inpaint logs/agedi/version_0 structure.traj \
+       --sphere_center 5.0 5.0 8.0 --sphere_radius 3.0
+
+   # Default: random 25% of the non-fixed atoms, reproducible via --seed
+   agedi inpaint logs/agedi/version_0 structure.traj --seed 42
+
+Key options:
+
+- ``--freeze``: comma-separated atom indices to hard-freeze (never move),
+  in addition to the regenerated selection. Must not overlap it.
+- ``--t_start`` (default ``1.0``): starting diffusion time. ``1.0`` fully
+  re-noises the selection for de-novo regeneration of that region; lower
+  values give a local rattle-and-relax refinement instead.
+- ``--n_resample`` / ``--jump_length`` (default ``1`` / ``1``): RePaint-style
+  resampling passes to better harmonize the regenerated region with its
+  surroundings, at the cost of extra score-model evaluations.
+- ``--sampler``: same choices as ``agedi sample`` (``em``, ``pc``, ``heun``,
+  ``ddim``, ``heun_ode``, ``ffpc``); this is the *inner* reverse-diffusion
+  algorithm wrapped by the inpainting logic.
+- ``--compile`` is not available for ``inpaint`` — the compiled reverse step
+  bypasses samplers entirely, and inpainting is implemented as a sampler.
+
 Force-field guided training and sampling
 -----------------------------------------
 

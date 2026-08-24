@@ -173,3 +173,50 @@ class SDE(ABC):
 
         """
         return (xt - self.mean(t) * x0) / torch.sqrt(self.var(t))
+
+    def forward_transition(
+        self,
+        x: torch.Tensor,
+        t_from: torch.Tensor,
+        t_to: torch.Tensor,
+        w: Callable,
+    ) -> torch.Tensor:
+        """Forward transition kernel between two arbitrary times.
+
+        Calculates :math:`p(\mathbf{x}_{t_{to}} \mid \mathbf{x}_{t_{from}})` for
+        ``t_to >= t_from``, i.e. the Markov forward step of the SDE starting
+        from an already-noised state rather than from :math:`t=0`.  Used for
+        the RePaint-style "jump back" resampling step in inpainting, where a
+        partially denoised state at ``t_from`` is re-noised up to ``t_to``.
+
+        For any SDE of the affine form
+        :math:`\mathbf{x}_t = \mu(t)\mathbf{x}_0 + \sigma(t)\mathbf{z}`
+        (true of both :class:`~agedi.diffusion.sdes.VE` and
+        :class:`~agedi.diffusion.sdes.VP`), the transition between two times
+        is itself Gaussian with
+
+        .. math::
+            a = \mu(t_{to}) / \mu(t_{from}), \qquad
+            s^2 = \sigma^2(t_{to}) - a^2 \sigma^2(t_{from})
+
+        Parameters
+        ----------
+        x: torch.Tensor
+            The state at time ``t_from``.
+        t_from: torch.Tensor
+            The starting time.
+        t_to: torch.Tensor
+            The target time (``t_to >= t_from``).
+        w: Callable
+            Callable sampling from the noise distribution, taking ``(mean, std)``.
+
+        Returns
+        -------
+        torch.Tensor
+            A sample of the state at time ``t_to``.
+
+        """
+        a = self.mean(t_to) / self.mean(t_from)
+        var = self.var(t_to) - a**2 * self.var(t_from)
+        sigma = torch.sqrt(torch.clamp(var, min=0.0))
+        return w(a * x, sigma)

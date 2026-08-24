@@ -379,3 +379,48 @@ def _print_sampling_config(
     console.print(
         Panel(table, title="[bold]AGeDi Sampling Configuration[/bold]", border_style="blue")
     )
+
+
+def _print_inpainting_config(
+    n_samples: int,
+    n_selected: int,
+    n_atoms: int,
+    steps: int,
+    eps: float,
+    t_start: float,
+    batch_size: int,
+    n_resample: int = 1,
+    jump_length: int = 1,
+    n_frozen: int = 0,
+    property=None,
+    force_field_guidance: float = 0.0,
+    sampler: Optional[str] = None,
+) -> None:
+    """Print a Rich-formatted inpainting configuration panel."""
+    console = Console()
+    table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
+    table.add_column("Key", style="bold cyan", min_width=14, no_wrap=True)
+    table.add_column("Value", style="white")
+
+    table.add_row("  n_samples", str(n_samples))
+    table.add_row("  selected atoms", f"{n_selected} / {n_atoms}")
+    if n_frozen:
+        table.add_row("  frozen atoms", str(n_frozen))
+    table.add_row("  steps", str(steps))
+    table.add_row("  eps", str(eps))
+    table.add_row("  t_start", str(t_start))
+    table.add_row("  batch_size", str(batch_size))
+    if n_resample > 1:
+        table.add_row("  n_resample", str(n_resample))
+        table.add_row("  jump_length", str(jump_length))
+    if property is not None:
+        for k, v in property.items():
+            table.add_row(f"  {k}", str(v))
+    if force_field_guidance > 0.0:
+        table.add_row("  ff_guidance", str(force_field_guidance))
+    if sampler is not None:
+        table.add_row("  sampler", str(sampler))
+
+    console.print(
+        Panel(table, title="[bold]AGeDi Inpainting Configuration[/bold]", border_style="blue")
+    )
