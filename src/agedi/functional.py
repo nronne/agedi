@@ -15,6 +15,7 @@ from agedi.api import (  # noqa: F401
     load_diffusion,
     predict,
     register_model,
+    relax,
     sample,
     train,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "load_diffusion",
     "predict",
     "register_model",
+    "relax",
     "sample",
     "train",
     "train_from_atoms",

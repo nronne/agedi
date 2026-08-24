@@ -8,6 +8,8 @@ from rich.console import Console
 
 from agedi.data import AtomsGraph
 
+from ._common import resolve_cutoff
+
 
 def predict(
     diffusion: "Agedi",
@@ -56,15 +58,7 @@ def predict(
             "Re-train with force_field=True to enable predictions."
         )
 
-    if cutoff is None:
-        try:
-            cf = diffusion.score_model.representation.cutoff_fn
-            if hasattr(cf, "cutoff") and cf.cutoff.numel() > 0:
-                cutoff = float(cf.cutoff[0])
-            else:
-                cutoff = 6.0
-        except AttributeError:
-            cutoff = 6.0
+    cutoff = resolve_cutoff(diffusion, cutoff)
 
     device = next(diffusion.parameters()).device
 

@@ -69,6 +69,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     relative to an unbalanced run.
 - **`agedi.utils.loss_balance`** — `normalize_loss_balance()` accepting the
   string/number/pair/mapping forms above, plus `format_loss_balance()`.
+- **`relax()` API and `agedi relax` command** — run the batched L-BFGS
+  relaxation on structures you supply, independently of diffusion sampling.
+  Each structure in a batch is optimised by its own L-BFGS instance and drops
+  out as soon as its own maximum force falls below `fmax`, and ASE `FixAtoms`
+  constraints on the input are honoured.  `trajectory=True` /
+  `--save_trajectory` returns every optimiser step.
+
+### Fixed
+- **Post-diffusion relaxation no longer breaks on periodic structures.**
+  Positions are wrapped back into the cell after every step, so an atom
+  crossing a cell face reappeared a full lattice vector away; the L-BFGS step
+  sizer reconstructed its displacement by differencing stored positions and so
+  recorded that jump as a history pair.  A single such pair sent the search
+  direction somewhere unrelated to the forces, and because the history holds
+  100 pairs it corrupted the rest of the run — the energy rose instead of
+  falling.  Displacements are now taken in the minimum-image convention.
+  Relaxing an 8-atom periodic Cu cell against exact EMT forces went from
+  10.53 → 15.35 eV (diverging) to 10.53 → 7.60 eV, matching
+  `ase.optimize.LBFGS` to within float32 precision.  Affects
+  `sample(max_extra_steps=...)` and force-field guidance; non-periodic systems
+  were never affected.
+
+### Changed
+- Post-diffusion relaxation now evaluates the force field **once** per step
+  instead of twice — the convergence check's forces are reused by the next
+  step, halving the cost of relaxation.
+- Relaxation convergence is tracked **per structure** rather than across the
+  whole batch: a structure that reaches `force_threshold` stops being stepped
+  instead of continuing until the worst structure in the batch converges.
 
 ### Notes
 - Novelty guidance costs roughly one extra score-model forward *and* backward
