@@ -50,6 +50,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     explicitly.
 
 ### Added
+- **Automatic calibration of the novelty guidance scale.**  Set
+  ``guidance=None`` and give ``target_displacement`` instead (default
+  ``0.2`` Å): how far novelty guidance should move a structure at typical
+  repulsion over the whole trajectory.  New ``NoveltyCalibrator`` measures the
+  gradient magnitude once, at the peak of the time window, and solves for the
+  scale that spends exactly that budget over the remaining schedule.
+  - ``guidance`` multiplies a raw backbone gradient, so its useful magnitude is
+    a property of the model's activations and changes with every retraining —
+    which in a global-optimisation loop is every iteration.  A displacement in
+    Ångström is a question that transfers; a hand-tuned scale is not.
+  - Measured at the window peak rather than the first step: at ``t -> 1`` the
+    samples are a noise gas whose gradient is both tiny and uninformative, and
+    dividing by it would produce a scale that saturates ``max_step_size`` for
+    the rest of the run.  Guidance is therefore zero on the rising edge, which
+    is the region where the kernel is dead anyway.
+  - The scale is then held fixed, so the per-structure spread survives:
+    structures repelled harder than typical still move further, and ones that
+    are already novel still barely move.
+  - One calibrator is built per ``sample()`` call and shared across batches, so
+    every sample in a run is driven at the same strength.  The result is
+    printed after sampling and left on ``diffusion.novelty_calibrator``
+    (``.guidance``, ``.gradient_scale``, ``.calibrated_at``) so it can be
+    pinned explicitly for a reproducible rerun.
 - Novelty guidance aborts with a clear ``RuntimeError`` when the feature
   gradient is non-finite (typically two atoms driven onto each other, making
   the interatomic unit vectors 0/0), and the resulting positions are checked
@@ -57,12 +80,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them.
 
 ### Notes
-- Recalibrating ``guidance``: the ``dt`` factor alone means the old value must
-  be multiplied by roughly ``steps``; the density normalisation and the halved
-  in-batch term reduce it further for dense archives.  Start from the
-  displacement you want per unit diffusion time and check it against the
-  ``novelty_sigma`` and archive-distance quantiles now printed at the top of a
-  sampling run.
+- Recalibrating ``guidance``: prefer not to.  Set ``guidance=None`` and pick a
+  ``target_displacement``, and the scale is derived per run.  If you do keep an
+  explicit number, the ``dt`` factor alone means the old value must be
+  multiplied by roughly ``steps``, and the density normalisation and halved
+  in-batch term reduce it further for dense archives.
 
 ## [1.5.0] - 2026-08-13
 

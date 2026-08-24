@@ -346,7 +346,8 @@ def _print_sampling_config(
     confinement=None,
     property=None,
     force_field_guidance: float = 0.0,
-    novelty_guidance: float = 0.0,
+    novelty_guidance: Optional[float] = 0.0,
+    novelty_target_displacement: Optional[float] = None,
     novelty_references: int = 0,
     novelty_sigma: Optional[float] = None,
     novelty_distance_quantiles=None,
@@ -377,8 +378,14 @@ def _print_sampling_config(
             table.add_row(f"  {k}", str(v))
     if force_field_guidance > 0.0:
         table.add_row("  ff_guidance", str(force_field_guidance))
-    if novelty_guidance != 0.0:
-        table.add_row("  novelty_guidance", str(novelty_guidance))
+    if novelty_guidance is None or novelty_guidance != 0.0:
+        if novelty_guidance is None:
+            table.add_row(
+                "  novelty_guidance",
+                f"auto (target {novelty_target_displacement} Å)",
+            )
+        else:
+            table.add_row("  novelty_guidance", str(novelty_guidance))
         table.add_row("  novelty_refs", str(novelty_references))
         if novelty_sigma is not None:
             table.add_row("  novelty_sigma", f"{novelty_sigma:.4f}")

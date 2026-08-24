@@ -2,6 +2,7 @@ from .agedi import Agedi, ForcefieldGuidanceConfig
 from .diffusion import Diffusion
 from .novelty import (
     FeatureArchive,
+    NoveltyCalibrator,
     NoveltyGuidanceConfig,
     novelty_guidance_step,
     resolve_novelty_config,
@@ -22,6 +23,7 @@ __all__ = [
     "Diffusion",
     "ForcefieldGuidanceConfig",
     "NoveltyGuidanceConfig",
+    "NoveltyCalibrator",
     "FeatureArchive",
     "structure_features",
     "novelty_guidance_step",

@@ -79,14 +79,27 @@ class NoveltyGuidanceConfig:
 
     Parameters
     ----------
-    guidance : float
+    guidance : float or None
         Scale of the repulsion, expressed **per unit diffusion time**: the step
         applied at each reverse step is multiplied by ``dt``, so the total
         accumulated bias is independent of how many ``steps`` the trajectory
-        uses.  The raw gradient magnitude still depends on the backbone
-        activations, so this needs calibrating per model against
-        ``max_step_size``.  Set to ``0.0`` (the default) to disable novelty
-        guidance entirely.
+        uses.  ``0.0`` (the default) disables novelty guidance entirely.
+
+        ``None`` calibrates it automatically against ``target_displacement``
+        — see :class:`NoveltyCalibrator`.  This is usually what you want,
+        because the raw gradient magnitude is set by the backbone's
+        activations and therefore changes with every retraining, so a
+        hand-tuned number does not survive a global-optimisation campaign.
+    target_displacement : float
+        How far, in Ångström, novelty guidance should move a structure at
+        *typical* repulsion over the whole trajectory.  Only used when
+        ``guidance`` is ``None``.  Think of it as the budget the repulsion is
+        allowed to spend on nudging a sample out of a basin: a few tenths of an
+        Ångström changes which minimum it falls into, an Ångström or more
+        rewrites the geometry.  Structures repelled harder than typical move
+        further (up to ``max_step_size`` per step) and ones that are already
+        novel move less — the calibration fixes the scale, it does not flatten
+        the spread.
     sigma : float or None
         Bandwidth of the Gaussian kernel in unit-normalised feature space,
         where distances lie in ``[0, 2]``.
@@ -160,7 +173,8 @@ class NoveltyGuidanceConfig:
         (default, size-invariant) or ``"sum"``.
     """
 
-    guidance: float = 0.0
+    guidance: Optional[float] = 0.0
+    target_displacement: float = 0.2
     sigma: Optional[float] = None
     sigma_quantile: float = 0.05
     schedule: str = "gaussian"
@@ -186,6 +200,11 @@ class NoveltyGuidanceConfig:
         if not 0.0 < self.sigma_quantile < 1.0:
             raise ValueError(
                 f"sigma_quantile must lie in (0, 1), got {self.sigma_quantile}"
+            )
+        if self.guidance is None and self.target_displacement <= 0.0:
+            raise ValueError(
+                "target_displacement must be positive when guidance is None, "
+                f"got {self.target_displacement}"
             )
 
 
@@ -598,12 +617,188 @@ def _time_factor(
     )
 
 
+def _gradient_scale(
+    grad: torch.Tensor, batch: AtomsGraph, n_graphs: int
+) -> torch.Tensor:
+    """A robust magnitude for a batch of per-atom feature gradients.
+
+    Per structure, the largest per-atom gradient norm — the atom that sets the
+    step, since the cap is applied per structure — and then the median across
+    structures, so a single near-duplicate pinned against a reference cannot
+    drag the scale for the whole batch.
+
+    Fixed template atoms are excluded: their displacement is discarded, so a
+    large gradient there says nothing about how far the structure will move.
+
+    Parameters
+    ----------
+    grad : torch.Tensor
+        Per-atom gradient of the potential, shape ``(n_nodes, 3)``.
+    batch : AtomsGraph
+        The batch the gradient belongs to.
+    n_graphs : int
+        Number of structures in the batch.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar tensor: the median per-structure maximum gradient norm.
+    """
+    mobile = _mobile_node_weights(batch)
+    if mobile is not None:
+        grad = grad * mobile.unsqueeze(-1)
+
+    magnitude = grad.norm(dim=1)
+    largest = torch.zeros(
+        n_graphs, dtype=magnitude.dtype, device=magnitude.device
+    ).index_reduce_(0, batch.batch, magnitude, "amax", include_self=False)
+    return largest.median()
+
+
+class NoveltyCalibrator:
+    """Chooses ``guidance`` from a target displacement, once per run.
+
+    ``guidance`` multiplies a raw backbone gradient, so its useful magnitude is
+    a property of the model's activations rather than of the problem — and it
+    changes every time the score model is retrained, which in a global
+    optimisation loop is every iteration.  Hand-tuning it is therefore a task
+    that never stays done.  This calibrator replaces the number with a
+    question that *does* transfer: how far should novelty guidance move a
+    structure, in Ångström, over the whole trajectory?
+
+    The scale is measured once, at the peak of the time window, and then held
+    fixed for the rest of the run:
+
+    .. math::
+
+        \\eta = \\frac{\\Delta_\\mathrm{target}}
+                    {\\lVert \\nabla\\Phi \\rVert_\\mathrm{typ}
+                     \\; \\sum_{i \\ge i_\\mathrm{peak}} w(t_i)\\,\\mathrm{d}t}
+
+    Measuring at the peak rather than at the first step is deliberate: at
+    :math:`t \\to 1` the samples are a noise gas sitting far from every
+    reference, so the gradient there is both tiny and uninformative, and
+    dividing by it would produce an enormous ``guidance`` that saturates
+    ``max_step_size`` for the rest of the trajectory.  Guidance is therefore
+    zero on the rising edge of the window — which costs little, since that is
+    exactly the region where the kernel is dead.
+
+    Holding the scale fixed afterwards is what preserves the point of the
+    un-normalised gradient: structures repelled harder than typical still move
+    further, and ones that are already novel still barely move.  Only the
+    overall scale is pinned, never the per-structure spread.
+
+    One calibrator should be shared across every batch of a sampling run, so
+    that all samples are driven at the same strength.
+
+    Parameters
+    ----------
+    target_displacement : float
+        Total displacement budget in Ångström, for a structure at typical
+        repulsion.
+    step_weights : torch.Tensor
+        The schedule actually being run: ``dt * w(t_i)`` for every reverse
+        step, in trajectory order.  Supplied by the sampling loop, so that the
+        budget is spread over the discretisation in use rather than an
+        idealised one.
+
+    Attributes
+    ----------
+    guidance : float or None
+        The calibrated value, or ``None`` until calibration happens.
+    gradient_scale : float or None
+        The gradient magnitude it was measured against.
+    calibrated_at : int or None
+        Index of the reverse step calibration happened on.
+    """
+
+    def __init__(
+        self, target_displacement: float, step_weights: torch.Tensor
+    ) -> None:
+        """Initialise an uncalibrated calibrator for a given schedule."""
+        if target_displacement <= 0.0:
+            raise ValueError(
+                f"target_displacement must be positive, got {target_displacement}"
+            )
+
+        weights = step_weights.detach().flatten().to(torch.float64)
+        # Remaining schedule weight from each step to the end of the
+        # trajectory, so the budget can be spread over whatever is left when
+        # calibration actually fires.
+        self._remaining = weights.flip(0).cumsum(0).flip(0)
+        self._weights = weights
+        self._peak = int(torch.argmax(weights).item())
+
+        self.target_displacement = float(target_displacement)
+        self.guidance: Optional[float] = None
+        self.gradient_scale: Optional[float] = None
+        self.calibrated_at: Optional[int] = None
+        self._index = 0
+
+    def begin_step(self, index: int) -> None:
+        """Tell the calibrator which reverse step is about to run.
+
+        Called by the sampling loop before each guidance step, so that the
+        calibrator knows where it sits in the schedule without having to
+        assume it is consulted exactly once per step.
+
+        Parameters
+        ----------
+        index : int
+            Zero-based index of the reverse-diffusion step.
+        """
+        self._index = index
+
+    def guidance_for(
+        self, grad: torch.Tensor, batch: AtomsGraph, n_graphs: int
+    ) -> float:
+        """Return the guidance scale to use for the current step.
+
+        Returns ``0.0`` before the peak of the time window, calibrates on the
+        first step at or after it, and returns the stored value from then on.
+
+        Parameters
+        ----------
+        grad : torch.Tensor
+            Per-atom gradient of the novelty potential for this step.
+        batch : AtomsGraph
+            The batch the gradient belongs to.
+        n_graphs : int
+            Number of structures in the batch.
+
+        Returns
+        -------
+        float
+            The guidance scale, ``0.0`` meaning "do not step yet".
+        """
+        if self.guidance is not None:
+            return self.guidance
+
+        if self._index < self._peak:
+            return 0.0
+
+        scale = float(_gradient_scale(grad, batch, n_graphs))
+        remaining = float(
+            self._remaining[min(self._index, self._remaining.shape[0] - 1)]
+        )
+        if not (scale > 0.0 and remaining > 0.0):
+            # Nothing to measure yet — every sample is still far from every
+            # reference.  Try again on the next step.
+            return 0.0
+
+        self.guidance = self.target_displacement / (scale * remaining)
+        self.gradient_scale = scale
+        self.calibrated_at = self._index
+        return self.guidance
+
+
 def novelty_guidance_step(
     batch: AtomsGraph,
     score_model: "ScoreModel",
     archive: Optional[FeatureArchive],
     config: NoveltyGuidanceConfig,
     dt: float = 1.0,
+    calibrator: Optional[NoveltyCalibrator] = None,
 ) -> AtomsGraph:
     """Apply one feature-space repulsion step.
 
@@ -654,6 +849,10 @@ def novelty_guidance_step(
         Length of the current reverse-diffusion step in diffusion time.
         Defaults to ``1.0``, which reproduces the unscaled behaviour for
         callers driving the step by hand.
+    calibrator : NoveltyCalibrator, optional
+        Required when ``config.guidance`` is ``None``: supplies the scale,
+        measuring it once at the peak of the time window.  Ignored when
+        ``config.guidance`` is a number.
 
     Returns
     -------
@@ -664,13 +863,21 @@ def novelty_guidance_step(
     Raises
     ------
     ValueError
-        If ``config.sigma`` is still ``None``.
+        If ``config.sigma`` is still ``None``, or if ``config.guidance`` is
+        ``None`` and no *calibrator* was given.
     RuntimeError
         If the feature gradient is non-finite — which means the backbone has
         already diverged, and stepping on it would only hide where.
     """
-    if config.guidance == 0.0:
+    if config.guidance is not None and config.guidance == 0.0:
         return batch
+
+    if config.guidance is None and calibrator is None:
+        raise ValueError(
+            "config.guidance is None, which asks for automatic calibration, "
+            "but no NoveltyCalibrator was given. Pass one, or set an explicit "
+            "guidance scale."
+        )
 
     n_graphs = int(batch.batch_size)
     reference = archive.features if archive is not None else None
@@ -741,9 +948,17 @@ def novelty_guidance_step(
                 "    (check corrector_step_size and ff_guidance)."
             )
 
+        guidance = config.guidance
+        if guidance is None:
+            guidance = calibrator.guidance_for(grad, batch, n_graphs)
+            if guidance == 0.0:
+                # Still on the rising edge of the window, or nothing near
+                # enough to measure a scale against.
+                return batch
+
         # Descend the potential: away from the nearest reference structure.
         time_factor = _time_factor(config, batch.time)
-        step = -config.guidance * dt * time_factor * grad
+        step = -guidance * dt * time_factor * grad
 
         # Zero the step on fixed atoms before capping.  Assigning to batch.pos
         # would discard it anyway, but a fixed atom still carries a gradient —

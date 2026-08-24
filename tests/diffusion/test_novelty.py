@@ -10,6 +10,8 @@ from agedi import sample
 from agedi.data import AtomsGraph
 from agedi.diffusion.novelty import (
     FeatureArchive,
+    NoveltyCalibrator,
+    _time_factor,
     NoveltyGuidanceConfig,
     novelty_guidance_step,
     resolve_novelty_config,
@@ -674,6 +676,190 @@ def test_non_finite_gradient_is_reported(score_model, water, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# NoveltyCalibrator
+# ---------------------------------------------------------------------------
+
+
+def _schedule(config, steps=41, eps=1e-3):
+    """The per-step weights ``dt * w(t_i)`` for a given schedule."""
+    ts = torch.linspace(1.0, eps, steps)
+    return (ts[0] - ts[1]) * _time_factor(config, ts)
+
+
+def _grad_with_scale(batch, scale):
+    """A per-atom gradient whose per-structure maximum norm is *scale*."""
+    grad = torch.zeros_like(batch.pos)
+    grad[:, 0] = scale
+    return grad
+
+
+def test_calibrator_waits_for_the_window_peak(score_model, water, ammonia):
+    """No guidance on the rising edge, where the kernel is dead.
+
+    Calibrating there would divide by a near-zero gradient and produce a
+    guidance that saturates the cap for the rest of the trajectory.
+    """
+    config = NoveltyGuidanceConfig(guidance=None, target_displacement=0.3)
+    weights = _schedule(config)
+    peak = int(torch.argmax(weights))
+    assert 0 < peak < len(weights) - 1  # a genuine interior peak
+
+    batch = make_batch([water, ammonia])
+    cal = NoveltyCalibrator(0.3, weights)
+
+    for i in range(peak):
+        cal.begin_step(i)
+        assert cal.guidance_for(_grad_with_scale(batch, 0.5), batch, 2) == 0.0
+    assert cal.guidance is None
+
+    cal.begin_step(peak)
+    assert cal.guidance_for(_grad_with_scale(batch, 0.5), batch, 2) > 0.0
+    assert cal.calibrated_at == peak
+    assert cal.gradient_scale == pytest.approx(0.5, rel=1e-5)
+
+
+def test_calibrator_spends_the_target_budget(score_model, water, ammonia):
+    """The calibrated scale spends exactly the requested displacement.
+
+    Summing the per-step displacement a structure at the measured gradient
+    scale receives from calibration to the end of the trajectory must give
+    back ``target_displacement``.
+    """
+    config = NoveltyGuidanceConfig(guidance=None, target_displacement=0.3)
+    weights = _schedule(config)
+    peak = int(torch.argmax(weights))
+
+    batch = make_batch([water, ammonia])
+    cal = NoveltyCalibrator(0.3, weights)
+    scale = 0.25
+    for i in range(peak + 1):
+        cal.begin_step(i)
+        cal.guidance_for(_grad_with_scale(batch, scale), batch, 2)
+
+    spent = sum(cal.guidance * float(w) * scale for w in weights[peak:])
+    assert spent == pytest.approx(0.3, rel=1e-6)
+
+
+def test_calibrator_is_step_count_invariant(score_model, water, ammonia):
+    """The budget is spread over whatever discretisation is in use."""
+    config = NoveltyGuidanceConfig(guidance=None, target_displacement=0.3)
+    batch = make_batch([water, ammonia])
+    scale = 0.25
+
+    def spent(steps):
+        weights = _schedule(config, steps=steps)
+        peak = int(torch.argmax(weights))
+        cal = NoveltyCalibrator(0.3, weights)
+        for i in range(peak + 1):
+            cal.begin_step(i)
+            cal.guidance_for(_grad_with_scale(batch, scale), batch, 2)
+        return sum(cal.guidance * float(w) * scale for w in weights[peak:])
+
+    assert spent(41) == pytest.approx(spent(201), rel=1e-3)
+
+
+def test_calibrator_holds_the_scale(score_model, water, ammonia):
+    """Measured once, then fixed — the per-structure spread must survive.
+
+    Re-measuring every step would renormalise away the decay of the gradient
+    that says a sample is already novel.
+    """
+    config = NoveltyGuidanceConfig(guidance=None, target_displacement=0.3)
+    weights = _schedule(config)
+    peak = int(torch.argmax(weights))
+
+    batch = make_batch([water, ammonia])
+    cal = NoveltyCalibrator(0.3, weights)
+    cal.begin_step(peak)
+    first = cal.guidance_for(_grad_with_scale(batch, 0.5), batch, 2)
+
+    cal.begin_step(peak + 1)
+    # A gradient two orders of magnitude smaller must not move the scale.
+    assert cal.guidance_for(_grad_with_scale(batch, 0.005), batch, 2) == first
+
+
+def test_calibrator_skips_a_dead_gradient(score_model, water, ammonia):
+    """A zero gradient at the peak defers calibration rather than dividing by it."""
+    config = NoveltyGuidanceConfig(guidance=None, target_displacement=0.3)
+    weights = _schedule(config)
+    peak = int(torch.argmax(weights))
+
+    batch = make_batch([water, ammonia])
+    cal = NoveltyCalibrator(0.3, weights)
+    cal.begin_step(peak)
+    assert cal.guidance_for(torch.zeros_like(batch.pos), batch, 2) == 0.0
+    assert cal.guidance is None
+
+    cal.begin_step(peak + 1)
+    assert cal.guidance_for(_grad_with_scale(batch, 0.5), batch, 2) > 0.0
+
+
+def test_calibrator_gradient_scale_ignores_fixed_atoms(score_model):
+    """A template atom's gradient must not set the scale."""
+    surf = fcc111("Au", (2, 2, 3), vacuum=10.0)
+    surf.set_pbc(True)
+    batch = make_batch([surf, surf.copy()], mask_first=8)
+
+    grad = torch.zeros_like(batch.pos)
+    grad[batch.mask, 0] = 100.0     # huge, but discarded
+    grad[~batch.mask, 0] = 0.5
+
+    config = NoveltyGuidanceConfig(guidance=None, target_displacement=0.3)
+    weights = _schedule(config)
+    cal = NoveltyCalibrator(0.3, weights)
+    cal.begin_step(int(torch.argmax(weights)))
+    cal.guidance_for(grad, batch, 2)
+
+    assert cal.gradient_scale == pytest.approx(0.5, rel=1e-5)
+
+
+def test_calibrator_rejects_a_non_positive_target():
+    with pytest.raises(ValueError, match="target_displacement must be positive"):
+        NoveltyCalibrator(0.0, torch.ones(4))
+    with pytest.raises(ValueError, match="target_displacement must be positive"):
+        NoveltyGuidanceConfig(guidance=None, target_displacement=-1.0)
+
+
+def test_auto_guidance_needs_a_calibrator(score_model, water, ammonia):
+    with pytest.raises(ValueError, match="no NoveltyCalibrator was given"):
+        novelty_guidance_step(
+            make_batch([water, ammonia]),
+            score_model,
+            None,
+            NoveltyGuidanceConfig(guidance=None, sigma=0.5),
+        )
+
+
+def test_auto_guidance_moves_the_batch(score_model, water):
+    """End of the wiring: an auto-calibrated step actually displaces atoms."""
+    near = water.copy()
+    near.positions += np.random.default_rng(21).normal(scale=0.05, size=(len(water), 3))
+
+    config = NoveltyGuidanceConfig(
+        guidance=None, target_displacement=0.3, sigma=0.5
+    )
+    weights = _schedule(config)
+    peak = int(torch.argmax(weights))
+    cal = NoveltyCalibrator(0.3, weights)
+
+    # Before the peak: nothing moves.
+    before = make_batch([water, near])
+    cal.begin_step(0)
+    after = novelty_guidance_step(
+        make_batch([water, near]), score_model, None, config, 0.025, cal
+    )
+    assert torch.equal(after.pos, before.pos)
+
+    # At the peak: calibrated and applied.
+    cal.begin_step(peak)
+    after = novelty_guidance_step(
+        make_batch([water, near]), score_model, None, config, 0.025, cal
+    )
+    assert cal.guidance is not None
+    assert max_move(before, after) > 0.0
+
+
+# ---------------------------------------------------------------------------
 # FeatureArchive
 # ---------------------------------------------------------------------------
 
@@ -942,9 +1128,9 @@ def test_sample_calibrates_sigma_from_the_archive(score_model, monkeypatch):
     seen = []
     real_step = novelty.novelty_guidance_step
 
-    def spy(batch, score_model_, archive, config, dt=1.0):
+    def spy(batch, score_model_, archive, config, dt=1.0, calibrator=None):
         seen.append((config.sigma, float(dt)))
-        return real_step(batch, score_model_, archive, config, dt)
+        return real_step(batch, score_model_, archive, config, dt, calibrator)
 
     monkeypatch.setattr("agedi.diffusion.diffusion.novelty_guidance_step", spy)
 
@@ -973,3 +1159,37 @@ def test_sample_calibrates_sigma_from_the_archive(score_model, monkeypatch):
     # independent rather than proportional to `steps`.
     expected_dt = (1.0 - 1e-3) / (steps - 1)
     assert all(dt == pytest.approx(expected_dt, rel=1e-5) for _, dt in seen)
+
+
+def test_sample_calibrates_guidance_once_for_the_whole_run(score_model):
+    """``guidance=None`` is calibrated once and shared across every batch.
+
+    Calibrating per batch would drive different samples of the same run at
+    different strengths for no reason.
+    """
+    from agedi.diffusion import Agedi
+    from agedi.diffusion.noisers import CellPositions
+
+    surf, structures = _adsorbate_structures(4, seed=4)
+
+    diffusion = Agedi(score_model, [CellPositions()])
+    sample(
+        diffusion,
+        n_samples=4,
+        batch_size=2,          # forces two batches
+        formula="Pt2",
+        template=surf,
+        confinement=(surf.positions[:, 2].max(), surf.positions[:, 2].max() + 4.0),
+        steps=9,
+        cutoff=CUTOFF,
+        novelty_guidance=NoveltyGuidanceConfig(
+            guidance=None, target_displacement=0.3, sigma=0.1
+        ),
+        novelty_reference=structures,
+    )
+
+    calibrator = diffusion.novelty_calibrator
+    assert calibrator is not None
+    assert calibrator.guidance is not None and calibrator.guidance > 0.0
+    # Calibrated on the first batch, at the peak of the window, and not redone.
+    assert calibrator.calibrated_at == 4

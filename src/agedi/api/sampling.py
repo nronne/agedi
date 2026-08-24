@@ -160,7 +160,9 @@ def sample(
     # Resolve sigma against the archive here rather than inside the sampling
     # loop, so the value actually used is the one printed below.
     _novelty_quantiles = None
-    if novelty_guidance is not None and novelty_guidance.guidance != 0.0:
+    if novelty_guidance is not None and (
+        novelty_guidance.guidance is None or novelty_guidance.guidance != 0.0
+    ):
         from agedi.diffusion.novelty import resolve_novelty_config as _resolve_novelty
 
         novelty_guidance = _resolve_novelty(novelty_guidance, _archive)
@@ -187,6 +189,11 @@ def sample(
         force_field_guidance=_ff.guidance,
         novelty_guidance=(
             novelty_guidance.guidance if novelty_guidance is not None else 0.0
+        ),
+        novelty_target_displacement=(
+            novelty_guidance.target_displacement
+            if novelty_guidance is not None
+            else None
         ),
         novelty_references=len(_archive) if _archive is not None else 0,
         novelty_sigma=(
@@ -230,6 +237,16 @@ def sample(
     elapsed = time.monotonic() - _start
     n_generated = len(sampled)
     Console().print(f"[green]✓[/green] Generated {n_generated} structure(s) in {elapsed:.1f}s")
+
+    # Report what auto-calibration settled on: the number is worth seeing, both
+    # to sanity-check it and to pin it explicitly for a reproducible rerun.
+    _calibrator = getattr(diffusion, "novelty_calibrator", None)
+    if _calibrator is not None and _calibrator.guidance is not None:
+        Console().print(
+            f"  novelty guidance calibrated to {_calibrator.guidance:.4g} "
+            f"at step {_calibrator.calibrated_at} "
+            f"(|grad| = {_calibrator.gradient_scale:.4g})"
+        )
 
     if not as_atoms:
         return sampled
