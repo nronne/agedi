@@ -711,6 +711,47 @@ class AtomsGraph(Data):
         return True
 
     @staticmethod
+    def _make_graph_no_pbc(
+        positions: torch.Tensor,
+        cutoff: float,
+        dtype: Optional[torch.dtype] = None,
+        batch_idx: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Non-periodic neighbor list via direct pairwise distances (no cell needed)."""
+        output_dtype = dtype or positions.dtype
+        device = positions.device
+
+        if batch_idx is None:
+            diff = positions.unsqueeze(0) - positions.unsqueeze(1)
+            dist_sq = (diff ** 2).sum(-1)
+            mask = (dist_sq < cutoff ** 2) & (dist_sq > 0)
+            src, dst = torch.where(mask)
+            edge_index = torch.stack([src, dst], dim=0)
+            shift_vectors = torch.zeros(edge_index.shape[1], 3, dtype=output_dtype, device=device)
+            return edge_index, shift_vectors
+
+        num_graphs = int(batch_idx.max().item()) + 1 if positions.shape[0] > 0 else 0
+        edge_index_parts = []
+        total_edges = 0
+        for g in range(num_graphs):
+            atom_idx = torch.where(batch_idx == g)[0]
+            if atom_idx.numel() <= 1:
+                continue
+            local_ei, _ = AtomsGraph._make_graph_no_pbc(positions[atom_idx], cutoff, dtype=output_dtype)
+            edge_index_parts.append(atom_idx[local_ei])
+            total_edges += local_ei.shape[1]
+
+        if not edge_index_parts:
+            return (
+                torch.empty((2, 0), dtype=torch.long, device=device),
+                torch.zeros((0, 3), dtype=output_dtype, device=device),
+            )
+        return (
+            torch.cat(edge_index_parts, dim=1),
+            torch.zeros(total_edges, 3, dtype=output_dtype, device=device),
+        )
+
+    @staticmethod
     def _make_graph_matscipy(
         positions: torch.Tensor,
         cell: torch.Tensor,
@@ -723,18 +764,6 @@ class AtomsGraph(Data):
         if batch_idx is None:
             cell_np = cell.detach().cpu().numpy()
             pbc_np = pbc.detach().cpu().numpy()
-            # matscipy inverts the cell internally even when pbc=False; for
-            # non-periodic systems with no cell, build a tight bounding box so
-            # the cell-list grid stays small (a fixed 1000 Å dummy would create
-            # ~4 M empty grid cells and make the neighbour search very slow).
-            if not pbc_np.any() and not cell_np.any():
-                pos_np = positions.detach().cpu().numpy()
-                if len(pos_np) > 0:
-                    extent = pos_np.max(axis=0) - pos_np.min(axis=0) + 2 * cutoff
-                    extent = np.maximum(extent, cutoff)  # at least one cell wide
-                else:
-                    extent = np.full(3, cutoff, dtype=cell_np.dtype)
-                cell_np = np.diag(extent.astype(cell_np.dtype))
             i, j, shifts = matscipy_neighbour_list(
                 "ijS",
                 positions=positions.detach().cpu().numpy(),
@@ -874,7 +903,14 @@ class AtomsGraph(Data):
         with torch.no_grad():
             _pbc = pbc.view(-1, 3) if batch_idx is not None else pbc.view(3)
             _any_pbc = bool(_pbc.any())
-            if nvidia_neighbor_list is None or not _any_pbc:
+            if not _any_pbc:
+                return AtomsGraph._make_graph_no_pbc(
+                    positions,
+                    cutoff,
+                    dtype=dtype,
+                    batch_idx=batch_idx,
+                )
+            if nvidia_neighbor_list is None:
                 return AtomsGraph._make_graph_matscipy(
                     positions,
                     cell,

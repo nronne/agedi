@@ -275,4 +275,102 @@ def test_get_representation(graph: AtomsGraph) -> None:
     assert torch.allclose(scalar, rep2.scalar)
     assert torch.allclose(vector, rep2.vector)
 
-    
+
+# ---------------------------------------------------------------------------
+# Non-periodic neighbor list (_make_graph_no_pbc)
+# ---------------------------------------------------------------------------
+
+def test_make_graph_no_pbc_returns_correct_edges() -> None:
+    """_make_graph_no_pbc must find all pairs within cutoff, no self-loops."""
+    cutoff = 3.0
+    pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [5.0, 0.0, 0.0]], dtype=torch.float32)
+    ei, sv = AtomsGraph._make_graph_no_pbc(pos, cutoff)
+
+    assert ei.shape[0] == 2
+    assert sv.shape == (ei.shape[1], 3)
+    assert (sv == 0).all(), "Shift vectors must be zero for non-periodic graphs"
+
+    # Atoms 0 and 1 are within cutoff; atom 2 is not.
+    pairs = set(map(tuple, ei.T.tolist()))
+    assert (0, 1) in pairs
+    assert (1, 0) in pairs
+    assert (0, 2) not in pairs
+    assert (2, 0) not in pairs
+    # No self-loops
+    assert all(s != d for s, d in pairs)
+
+
+def test_make_graph_no_pbc_all_pairs_within_cutoff() -> None:
+    """Edge distances must never exceed the cutoff."""
+    cutoff = 4.0
+    pos = torch.randn(10, 3, dtype=torch.float32) * 2
+    ei, _ = AtomsGraph._make_graph_no_pbc(pos, cutoff)
+    src, dst = ei
+    dists = (pos[dst] - pos[src]).norm(dim=-1)
+    assert (dists <= cutoff + 1e-5).all()
+
+
+def test_make_graph_no_pbc_matches_matscipy() -> None:
+    """_make_graph_no_pbc and _make_graph_matscipy must agree on a small molecule."""
+    from ase.build import molecule
+    cutoff = 5.0
+    atoms = molecule("H2O")
+    pos = torch.tensor(atoms.positions, dtype=torch.float32)
+    # Provide a cell large enough that pbc=False matscipy gives the same result.
+    cell = torch.eye(3) * 50.0
+    pbc = torch.tensor([False, False, False])
+
+    ei_nopbc, _ = AtomsGraph._make_graph_no_pbc(pos, cutoff)
+    ei_matscipy, _ = AtomsGraph._make_graph_matscipy(pos, cell, cutoff, pbc)
+
+    pairs_nopbc = set(map(tuple, ei_nopbc.T.tolist()))
+    pairs_matscipy = set(map(tuple, ei_matscipy.T.tolist()))
+    assert pairs_nopbc == pairs_matscipy
+
+
+def test_make_graph_no_pbc_batched() -> None:
+    """Batched _make_graph_no_pbc must not create cross-graph edges."""
+    cutoff = 3.0
+    pos = torch.tensor([
+        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0],  # graph 0 — close pair
+        [0.0, 0.0, 0.0], [1.0, 0.0, 0.0],  # graph 1 — same positions, different graph
+    ], dtype=torch.float32)
+    batch_idx = torch.tensor([0, 0, 1, 1], dtype=torch.int32)
+
+    ei, sv = AtomsGraph._make_graph_no_pbc(pos, cutoff, batch_idx=batch_idx)
+
+    assert (sv == 0).all()
+    pairs = set(map(tuple, ei.T.tolist()))
+    # Intra-graph edges only
+    assert (0, 1) in pairs
+    assert (1, 0) in pairs
+    assert (2, 3) in pairs
+    assert (3, 2) in pairs
+    # No cross-graph edges
+    assert (0, 2) not in pairs
+    assert (1, 3) not in pairs
+
+
+def test_make_graph_no_pbc_via_make_graph() -> None:
+    """make_graph must route to _make_graph_no_pbc when pbc is all False."""
+    cutoff = 5.0
+    pos = torch.randn(8, 3, dtype=torch.float32)
+    cell = torch.zeros(3, 3)
+    pbc = torch.tensor([False, False, False])
+
+    ei_route, sv_route = AtomsGraph.make_graph(pos, cell, cutoff, pbc)
+    ei_direct, sv_direct = AtomsGraph._make_graph_no_pbc(pos, cutoff)
+
+    assert ei_route.shape == ei_direct.shape
+    assert (sv_route == 0).all()
+
+
+def test_from_atoms_no_pbc_no_cell() -> None:
+    """from_atoms must work for a gas-phase molecule with pbc=False and no cell."""
+    from ase.build import molecule
+    atoms = molecule("H2O")  # pbc=False, cell=zeros by default
+    graph = AtomsGraph.from_atoms(atoms, cutoff=5.0)
+    assert graph.edge_index.shape[0] == 2
+    assert graph.shift_vectors.shape[1] == 3
+    assert (graph.shift_vectors == 0).all()
+
