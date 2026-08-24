@@ -11,6 +11,7 @@ from .samplers import (
     ForcefieldCorrectorSampler,
     HeunODESampler,
     HeunSampler,
+    InpaintingSampler,
     PredictorCorrectorSampler,
     ProbabilityFlowODESampler,
     Sampler,
@@ -31,4 +32,5 @@ __all__ = [
     "ProbabilityFlowODESampler",
     "HeunODESampler",
     "ForcefieldCorrectorSampler",
+    "InpaintingSampler",
 ]

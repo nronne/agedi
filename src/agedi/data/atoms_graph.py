@@ -434,6 +434,11 @@ class AtomsGraph(Data):
             pbc=self.pbc.detach().cpu().numpy(),
         )
 
+        if "inpaint_mask" in self._store:
+            atoms.arrays["inpaint_mask"] = (
+                self.inpaint_mask.detach().cpu().numpy()
+            )
+
         if "energy_prediction" in self._store:
             energy = self.energy_prediction.item()
             atoms.calc = SinglePointCalculator(atoms, energy=energy)

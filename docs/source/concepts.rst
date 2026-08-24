@@ -70,6 +70,62 @@ During sampling, required defaults depend on enabled noisers:
 If a template is provided, generated atoms are appended to template atoms and
 template atoms are masked as fixed.
 
+Inpainting
+----------
+
+:func:`~agedi.api.inpaint` regenerates a chosen subset of atoms in an
+*existing* structure, rather than generating a new structure from scratch.
+It uses a second, distinct notion of "which atoms move" from the ``mask``
+used for templates and ``FixAtoms`` handling above:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 40 40
+
+   * - Field
+     - Meaning
+     - Behaviour
+   * - ``mask`` (``freeze=``)
+     - Hard-frozen
+     - Never moves, at any point in the trajectory. Same mechanism as
+       template / ``MaskFixed`` handling.
+   * - ``inpaint_mask`` (the selection)
+     - Regenerate
+     - Fully re-noised (at ``t_start=1.0``) and denoised by the model like a
+       from-scratch atom.
+
+Every other atom — selected by neither — is a **known** atom: at each
+reverse-diffusion step it is replaced by a fresh sample of the forward
+process :math:`q(z_t \mid z_0)` of the input structure, so the whole
+structure always sits at a self-consistent noise level for the score model.
+Known atoms therefore visibly move over the course of the trajectory and
+converge back onto their input positions (and, when a types noiser is
+active, their input species) exactly as :math:`t \to \varepsilon`.
+``freeze=`` atoms are a stricter subset that skip this replacement entirely
+and stay bit-exact throughout.
+
+Which atoms are selected for regeneration is controlled by
+:func:`~agedi.api.select_atoms`: explicit ``indices``, ``symbols``,
+``z_range``, ``sphere``, or ``from_atoms`` (reading
+``atoms.arrays["inpaint_mask"]`` or the complement of any ``FixAtoms``
+constraint). With none given, a random ``fraction`` of the non-fixed atoms
+is selected. ``t_start`` below ``1.0`` starts from a partially-noised state
+for a local rattle-and-relax refinement instead of full regeneration; the
+optional ``n_resample`` / ``jump_length`` parameters enable RePaint-style
+resampling (`Lugmayr et al. 2022 <https://arxiv.org/abs/2201.09865>`_) to
+better harmonize the regenerated region with its surroundings, at the cost
+of extra score-model evaluations.
+
+.. code-block:: python
+
+   from agedi import inpaint, load_diffusion
+   from ase.io import read
+
+   diffusion = load_diffusion("logs/agedi/version_0")
+   atoms = read("structure.traj")
+
+   structures = inpaint(diffusion, atoms, symbols=["O"], n_samples=4, steps=500)
+
 Training outputs
 ----------------
 
