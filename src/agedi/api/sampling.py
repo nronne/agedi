@@ -1,7 +1,7 @@
 """Sampling from a trained diffusion model."""
 
 import time
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -28,8 +28,11 @@ def sample(
     compile: bool = False,
     steps: int = 500,
     eps: float = 1e-3,
+    cutoff: float = 6.0,
     batch_size: int = 64,
     ff_guidance: Optional["ForcefieldGuidanceConfig"] = None,
+    novelty_guidance: Optional["NoveltyGuidanceConfig"] = None,
+    novelty_reference: Optional[Sequence[Atoms]] = None,
     property: Optional[Dict[str, float]] = None,
     progress_bar: bool = False,
     save_trajectory: bool = False,
@@ -76,10 +79,27 @@ def sample(
         to an :class:`~agedi.AtomsGraph` (with ``confinement`` applied when
         provided).  When given, ``cell`` and ``pbc`` are taken from the
         template unless explicitly provided.
+    cutoff:
+        Neighbour-list cutoff radius in Ångström, used both for the sampled
+        graphs and for featurising *novelty_reference*.  Should match the
+        cutoff the model was trained with.  Defaults to ``6.0``.
     ff_guidance:
         Force-field guidance configuration.  When ``None`` (default) a
         :class:`~agedi.diffusion.ForcefieldGuidanceConfig` with default
         values is used (i.e. guidance is disabled).
+    novelty_guidance:
+        Feature-space novelty guidance configuration, which repels samples
+        away from structures that have already been found.  ``None`` (default)
+        disables it.  Incompatible with ``compile=True``.
+    novelty_reference:
+        Already-found structures to repel from.  Featurised here with the
+        *current* score model — features are only comparable within one model
+        generation, so pass the reference set afresh after every retraining.
+        When *template* is given, each reference structure must start with the
+        same template atoms (as the sampled structures do); they are excluded
+        from the pooling on both sides so the features stay comparable.
+        When ``None`` (and *novelty_guidance* is enabled), samples are only
+        repelled from each other within the batch.
     compile:
         When ``True``, use ``torch.compile`` on the reverse diffusion step
         for faster sampling.  Before the sampling loop starts, the maximum
@@ -108,9 +128,30 @@ def sample(
 
     # Convert an ASE Atoms template to AtomsGraph if needed.
     if template is not None and isinstance(template, Atoms):
-        template = AtomsGraph.from_atoms(template, confinement=confinement)
+        template = AtomsGraph.from_atoms(
+            template, cutoff=cutoff, confinement=confinement
+        )
 
     _ff = ff_guidance if ff_guidance is not None else ForcefieldGuidanceConfig()
+
+    # Featurise the reference structures with the current score model.  The
+    # archive is deliberately rebuilt on every call: features live in the
+    # backbone's activation space and are meaningless across retrainings.
+    #
+    # n_template matters: sampled structures put the template first and mask it
+    # out of the pooling, so the references must exclude the same leading atoms
+    # or the two sides of the comparison are not the same quantity.
+    _archive = None
+    if novelty_reference is not None and len(novelty_reference) > 0:
+        from agedi.diffusion.novelty import FeatureArchive
+
+        _archive = FeatureArchive.from_structures(
+            diffusion.score_model,
+            novelty_reference,
+            cutoff=cutoff,
+            pool=novelty_guidance.pool if novelty_guidance is not None else "mean",
+            n_template=0 if template is None else int(template.x.shape[0]),
+        )
 
     # Determine display name for the top-level sampler algorithm.
     if sampler is not None:
@@ -130,6 +171,10 @@ def sample(
         confinement=confinement,
         property=property,
         force_field_guidance=_ff.guidance,
+        novelty_guidance=(
+            novelty_guidance.guidance if novelty_guidance is not None else 0.0
+        ),
+        novelty_references=len(_archive) if _archive is not None else 0,
         sampler=_sampler,
     )
 
@@ -143,6 +188,7 @@ def sample(
             batch_size=batch_size,
             steps=steps,
             eps=eps,
+            cutoff=cutoff,
             n_atoms=n_atoms,
             atomic_numbers=atomic_numbers,
             formula=formula,
@@ -152,6 +198,8 @@ def sample(
             confinement=confinement,
             compile=compile,
             ff_guidance=_ff,
+            novelty_guidance=novelty_guidance,
+            novelty_archive=_archive,
             property=property,
             progress_bar=progress_bar,
             save_trajectory=save_trajectory,

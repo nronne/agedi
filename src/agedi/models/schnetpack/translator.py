@@ -123,6 +123,27 @@ class SchNetPackTranslator(Translator):
 
         return out
 
+    def _set_positions(
+        self, translated: Dict[str, torch.Tensor], pos: torch.Tensor
+    ) -> Dict[str, torch.Tensor]:
+        """Replace the positions in a translated schnetpack batch.
+
+        Parameters
+        ----------
+        translated: Dict
+            The translated batch, before input modules are applied.
+        pos: torch.Tensor
+            The positions to substitute, of shape ``(n_nodes, 3)``.
+
+        Returns
+        -------
+        Dict
+            The translated batch with ``R`` replaced by *pos*.
+
+        """
+        translated[R] = pos
+        return translated
+
     def _translate_representation(
         self, representation: Representation, translated_batch: Dict[str, torch.Tensor]
     ) -> Dict[str, torch.Tensor]:
