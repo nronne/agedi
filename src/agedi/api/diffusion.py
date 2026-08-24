@@ -7,6 +7,7 @@ import torch
 import yaml
 
 from agedi.models import ScoreModel
+from agedi.utils.loss_balance import LossBalanceSpec
 
 from ._display import _print_loaded_model_info
 from ._registry import _build_conditioning, _build_noisers, _build_regressor, _build_score_components
@@ -30,6 +31,9 @@ def create_diffusion(
     reference_energies: Optional[Mapping[Union[int, str], float]] = None,
     force_loss: str = "huber",
     huber_delta: float = 0.01,
+    regressor_loss_weight: float = 1.0,
+    loss_balance: "LossBalanceSpec" = None,
+    loss_balance_momentum: float = 0.99,
     lr: float = 1e-4,
     lr_factor: float = 0.95,
     lr_patience: int = 100,
@@ -108,6 +112,24 @@ def create_diffusion(
     huber_delta : float, optional
         Transition point of the Huber force loss in eV/Å — below it the loss is
         quadratic, above it linear.  Defaults to ``0.01``.
+    regressor_loss_weight : float, optional
+        Absolute weight of the force-field (regressor) loss in the total
+        training objective:
+        ``loss = diffusion_loss + regressor_loss_weight * regressor_loss``.
+        Raise it to prioritise energy/force accuracy, lower it to keep the
+        force field from dominating the score model.  Defaults to ``1.0``.
+        Ignored when ``loss_balance`` is given.  Only used when
+        ``force_field=True``.
+    loss_balance : float, str, sequence, or None, optional
+        Relative split between the two losses — ``"50:50"``, ``"80:20"``,
+        ``(0.8, 0.2)``, or a single number giving the regressor fraction.
+        Unlike ``regressor_loss_weight``, each term is normalised by a running
+        estimate of its own magnitude first, so the split means the same thing
+        across systems with different loss scales.  ``None`` (default) keeps
+        the absolute weighting.
+    loss_balance_momentum : float, optional
+        Momentum of the running loss-magnitude averages used by
+        ``loss_balance``.  Defaults to ``0.99``.
     lr : float, optional
         Learning rate.  Defaults to ``1e-4``.
     lr_factor : float, optional
@@ -194,6 +216,9 @@ def create_diffusion(
         score_model=score_model,
         noisers=noiser_modules,
         regressor_model=regressor_model,
+        regressor_loss_weight=regressor_loss_weight,
+        loss_balance=loss_balance,
+        loss_balance_momentum=loss_balance_momentum,
         optim_config={"lr": lr, "weight_decay": weight_decay},
         scheduler_config={"factor": lr_factor, "patience": lr_patience},
         eps=eps,

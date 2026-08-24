@@ -399,6 +399,67 @@ labels cannot dominate the gradient.  Both settings are configurable:
        huber_delta=0.01,     # eV/Å
    )
 
+**Balancing the force field against the diffusion loss**
+
+There are two ways to trade the objectives off against each other.
+
+*Absolute weight.*  ``regressor_loss_weight`` (:math:`w`, default ``1.0``)
+scales the force-field term directly:
+
+.. math::
+
+   \mathcal{L} = \mathcal{L}_\text{diffusion}
+                 + w \, \mathcal{L}_\text{regressor}
+
+.. code-block:: python
+
+   diffusion, dataset, trainer = train_from_atoms(
+       data, force_field=True, regressor_loss_weight=10.0,
+   )
+
+The catch is that a good value depends on how large the two losses happen to
+be, which varies with the system, the units of the labels, and the noise
+schedule — so a weight tuned on one dataset rarely transfers to another.
+
+*Relative split.*  ``loss_balance`` states the split you want — 50/50, 80/20 —
+and divides each term by a running estimate of its own magnitude before
+applying the fractions:
+
+.. math::
+
+   \mathcal{L} = w_d \frac{\mathcal{L}_\text{diffusion}}{s_d}
+               + w_r \frac{\mathcal{L}_\text{regressor}}{s_r},
+   \qquad w_d + w_r = 1
+
+Since both normalised terms sit near one, each contributes its requested share
+of the total whatever the raw scales are, and the same setting carries over to
+a different system:
+
+.. code-block:: python
+
+   diffusion, dataset, trainer = train_from_atoms(
+       data,
+       force_field=True,
+       loss_balance="80:20",   # or "50:50", (0.8, 0.2), or 0.2
+   )
+
+:math:`s_d` and :math:`s_r` are detached exponential moving averages
+(``loss_balance_momentum``, default ``0.99``) updated only on training batches,
+so validation loss stays comparable across epochs.  The achieved split is
+logged each step as ``train/diffusion_fraction`` and
+``train/regressor_fraction``; individual step values fluctuate because the
+diffusion loss varies strongly with the sampled diffusion time, but they
+average to the requested fractions.
+
+Two consequences worth knowing:
+
+* Balancing normalises the *magnitude* of each loss, not its gradient norm.
+  The two coincide only when the terms have comparable curvature.
+* The total loss becomes O(1) regardless of the raw scales, which changes the
+  effective learning rate and how ``gradient_clip_val`` bites compared with an
+  unbalanced run.  Treat the learning rate as needing a fresh look when
+  switching a run over to ``loss_balance``.
+
 Once trained, use :func:`~agedi.functional.predict` to run energy and force
 predictions on existing structures.  The results are returned as ASE
 :class:`~ase.Atoms` objects with a

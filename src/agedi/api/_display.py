@@ -265,6 +265,14 @@ def _print_training_config(hparams: dict) -> None:
                 else str(force_loss)
             )
             meta.add_row("  force_loss", detail)
+        balance = hparams.get("loss_balance")
+        if balance is not None:
+            from agedi.utils.loss_balance import format_loss_balance
+
+            meta.add_row("  loss_balance", format_loss_balance(tuple(balance)))
+        loss_weight = hparams.get("regressor_loss_weight")
+        if loss_weight is not None:
+            meta.add_row("  regressor_loss_weight", str(loss_weight))
 
     meta.add_row("", "")
     meta.add_row("[bold]Trainer[/bold]", "")

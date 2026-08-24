@@ -5,7 +5,7 @@ All notable changes to AGeDi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.5.0] - 2026-08-13
+## [1.5.0] - 2026-08-24
 
 ### Added
 - **Feature-space novelty guidance** — repels samples away from structures that
@@ -47,6 +47,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``add_representation()``).
 - ``sample()`` gained a ``cutoff`` parameter (default ``6.0``), now forwarded to
   the sampling call and used when featurising ``novelty_reference``.
+- **`loss_balance` — relative weighting of the diffusion and force-field
+  losses.**  `regressor_loss_weight` is an absolute multiplier whose useful
+  value depends on the raw magnitude of the two losses, so it has to be
+  re-tuned per system.  `loss_balance` instead takes the split you want
+  (`"50:50"`, `"80:20"`, `(0.8, 0.2)`, or a bare number giving the regressor
+  fraction) and divides each term by a running estimate of its own magnitude
+  before applying the fractions:
+  `loss = w_d · L_diffusion/s_d + w_r · L_regressor/s_r`.  Each term then
+  contributes its requested share of the total regardless of scale, so the same
+  setting transfers between systems.  Available on `create_diffusion()`,
+  `train_from_atoms()`, the config, and `agedi train --loss_balance 80:20`.
+  Unset by default, which keeps the existing absolute weighting exactly.
+  - `s_d` / `s_r` are detached EMAs (`loss_balance_momentum`, default `0.99`)
+    updated only on training batches, so validation loss stays comparable
+    across epochs.
+  - The achieved split is logged as `train/diffusion_fraction` and
+    `train/regressor_fraction`.
+  - Note that balancing makes the total loss O(1) regardless of the raw scales,
+    which changes the effective learning rate and how `gradient_clip_val` bites
+    relative to an unbalanced run.
+- **`agedi.utils.loss_balance`** — `normalize_loss_balance()` accepting the
+  string/number/pair/mapping forms above, plus `format_loss_balance()`.
 
 ### Notes
 - Novelty guidance costs roughly one extra score-model forward *and* backward
@@ -74,8 +96,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agedi train --reference_energies` (`auto` | `none` | `Cu:-3.72,O:-4.95`).
 - **`agedi.utils.reference_energies`** — `fit_reference_energies()`,
   `normalize_reference_energies()`, and helpers for the reference-energy table.
-- Force-field settings (reference energies, force loss) are shown in the
-  training run-configuration panel and stored in `hparams.yaml`.
+- **`regressor_loss_weight` is now reachable from the public API** — the weight
+  balancing the force-field loss against the diffusion loss
+  (`loss = diffusion_loss + regressor_loss_weight · regressor_loss`) existed on
+  `Agedi` but could only be set by constructing the model by hand.  It is now a
+  parameter of `create_diffusion()` and `train_from_atoms()`, a
+  `regressor_loss_weight` config key, and `agedi train --regressor_loss_weight`.
+  Default `1.0` (unchanged behaviour).
+- Force-field settings (reference energies, force loss, regressor loss weight)
+  are shown in the training run-configuration panel and stored in
+  `hparams.yaml`.
 
 ### Changed
 - **The force-field forces head is now trained with a Huber loss by default**
