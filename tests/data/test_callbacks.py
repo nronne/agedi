@@ -1,6 +1,10 @@
 import types
 
-from agedi.data.callbacks import TrainingPhase
+import pytest
+import torch
+from torch import nn
+
+from agedi.data.callbacks import EMACallback, TrainingPhase
 
 
 def test_prepare_epoch_increments_counter_without_phase_change():
@@ -65,12 +69,6 @@ def test_on_validation_end_delegates_to_prepare_epoch():
 # ---------------------------------------------------------------------------
 # EMACallback
 # ---------------------------------------------------------------------------
-
-import pytest
-import torch
-from torch import nn
-
-from agedi.data.callbacks import EMACallback
 
 
 class _TinyModel(nn.Module):
