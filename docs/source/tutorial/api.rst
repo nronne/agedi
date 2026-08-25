@@ -218,8 +218,14 @@ Other parameters worth knowing:
   better harmonize the regenerated region with its surroundings.
 - ``sampler`` / ``sampler_kwargs``: the *inner* reverse-diffusion algorithm
   wrapped by the inpainting logic — the same choices as :func:`~agedi.functional.sample`
-  (see :ref:`Choosing a sampler <choosing-a-sampler>` below). ``compile=True``
+  (see :ref:`Choosing a sampler <choosing-a-sampler>` below), including the
+  force-field augmented ``"ffpc"`` sampler. ``compile=True``
   is not supported, since the compiled path bypasses samplers entirely.
+- ``ff_guidance``: a :class:`~agedi.diffusion.ForcefieldGuidanceConfig`
+  (requires a model trained with ``force_field=True``; see :doc:`cli` for the
+  ``--ff_guidance`` CLI option and field reference) works during inpainting
+  too — it only ever nudges the selected/regenerated atoms; known atoms stay
+  on their reference trajectory regardless of guidance strength.
 
 
 .. _choosing-a-sampler:

@@ -137,7 +137,12 @@ def inpaint(
     sampler_kwargs:
         Extra keyword arguments forwarded to the inner sampler.
     ff_guidance:
-        Force-field guidance configuration.
+        Force-field guidance configuration (requires a model trained with
+        ``force_field=True``). Applies only to the selected/regenerated
+        atoms — known atoms are left exactly on the forward-marginal /
+        reference trajectory the rest of inpainting relies on, regardless of
+        guidance strength. Also works with ``sampler="ffpc"``, which blends
+        force-field guidance into its own corrector phase.
     property:
         Conditioning property values, e.g. ``{"energy": -3.5}``.
     progress_bar:
