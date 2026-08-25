@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Atom selection via `agedi.api.select_atoms()`: `indices`, `symbols`,
     `z_range`, `sphere`, or `from_atoms`, combined by union; with none given, a
     random `fraction` (default 0.25) of the non-fixed atoms is selected.
+    `contiguous=True` changes the `fraction` fallback to grow a single
+    spatially-connected cluster (a random seed atom, then repeatedly the
+    closest remaining candidate) instead of a scattered random subset.
   - `t_start` below `1.0` starts from a partially-noised state for local
     rattle-and-relax refinement instead of full regeneration.
   - Optional RePaint-style resampling (`n_resample`, `jump_length`, off by

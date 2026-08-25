@@ -21,6 +21,7 @@ click.rich_click.OPTION_GROUPS.update(
                     "--sphere_radius",
                     "--from_atoms",
                     "--fraction",
+                    "--contiguous",
                     "--freeze",
                 ],
             },
@@ -111,6 +112,12 @@ def _parse_str_list(value):
     "--fraction", type=float, default=0.25, show_default=True,
     help="Fraction of non-fixed atoms selected at random when no other "
          "selection option is given.",
+)
+@click.option(
+    "--contiguous", is_flag=True,
+    help="With --fraction, select a spatially-connected cluster of "
+         "neighboring atoms (grown from a random seed atom) instead of a "
+         "scattered random subset.",
 )
 @click.option(
     "--freeze", type=str, default=None,
@@ -229,6 +236,7 @@ def inpaint(path: str, structure_path: str, **kwargs) -> None:
         sphere=sphere,
         from_atoms=kwargs["from_atoms"],
         fraction=kwargs["fraction"],
+        contiguous=kwargs["contiguous"],
         seed=kwargs["seed"],
         freeze=_parse_int_list(kwargs["freeze"]),
         n_samples=kwargs["n_samples"],

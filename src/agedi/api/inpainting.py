@@ -38,6 +38,7 @@ def inpaint(
     sphere: Optional[Tuple[Sequence[float], float]] = None,
     from_atoms: bool = False,
     fraction: float = 0.25,
+    contiguous: bool = False,
     seed: Optional[int] = None,
     freeze: Optional[Sequence[int]] = None,
     n_samples: int = 1,
@@ -110,6 +111,12 @@ def inpaint(
     fraction:
         Fraction of the non-fixed atoms selected at random when no other
         selection criterion is given. Defaults to ``0.25``.
+    contiguous:
+        When ``True``, the ``fraction`` fallback selects a spatially-connected
+        cluster of neighboring atoms (one random seed atom, then repeatedly
+        the closest remaining candidate to the growing cluster) instead of a
+        scattered random subset. Has no effect when any other selection
+        criterion is given. Defaults to ``False``.
     seed:
         Seed for the random-fraction fallback selection.
     freeze:
@@ -197,6 +204,7 @@ def inpaint(
             sphere=sphere,
             from_atoms=from_atoms,
             fraction=fraction,
+            contiguous=contiguous,
             seed=seed,
         )
         for a in atoms_list

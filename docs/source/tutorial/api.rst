@@ -203,6 +203,19 @@ a random ``fraction`` (default ``0.25``) of the atoms not held by a
    # Default: random 25% of the non-fixed atoms, reproducible via seed
    structures = inpaint(diffusion, atoms, n_samples=4, steps=500, seed=0)
 
+   # Same 25%, but as one spatially-connected cluster instead of scattered atoms
+   structures = inpaint(
+       diffusion, atoms, fraction=0.25, contiguous=True, seed=0,
+       n_samples=4, steps=500,
+   )
+
+``contiguous=True`` only changes the ``fraction`` fallback (it has no effect
+when another selection criterion is given): instead of a scattered random
+subset, it grows a single connected blob — one random seed atom, then
+repeatedly whichever remaining candidate is closest to the growing cluster
+— useful for a localized defect region without having to know its center
+and radius up front the way ``sphere`` requires.
+
 Other parameters worth knowing:
 
 - ``freeze``: atom indices (or a bool mask) to hard-freeze in addition to the

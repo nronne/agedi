@@ -269,6 +269,15 @@ selected instead:
    # Default: random 25% of the non-fixed atoms, reproducible via --seed
    agedi inpaint logs/agedi/version_0 structure.traj --seed 42
 
+   # Same 25%, but as one spatially-connected cluster instead of scattered atoms
+   agedi inpaint logs/agedi/version_0 structure.traj --seed 42 --contiguous
+
+``--contiguous`` only changes the ``--fraction`` fallback: instead of a
+scattered random subset, it grows a single connected blob from a random
+seed atom outward — useful for a localized defect region without knowing
+its center and radius up front the way ``--sphere_center``/``--sphere_radius``
+require.
+
 Key options:
 
 - ``--freeze``: comma-separated atom indices to hard-freeze (never move),
