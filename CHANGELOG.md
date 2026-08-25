@@ -123,6 +123,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Implemented as `InpaintingSampler`, a wrapper around any existing sampler
     (`em`, `pc`, `heun`, `ddim`, `heun_ode`, `ffpc`), so it composes with all
     of them; not compatible with `compile=True`.
+  - `atoms` accepts a list of structures (need not share atom count,
+    composition, or cell) to batch several inpainting runs together for GPU
+    throughput; every selection argument stays a single spec, re-resolved
+    independently per structure, and `n_samples` becomes samples per
+    structure. Results are grouped one list per input structure. The CLI
+    picks this up automatically when the input file has more than one frame.
 - `Noiser.forward_marginal()` / `Noiser.renoise()` hooks (implemented for the
   SDE-based position noisers and the discrete `Types` noiser) powering
   inpainting.

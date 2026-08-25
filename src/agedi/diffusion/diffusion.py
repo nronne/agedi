@@ -1724,7 +1724,7 @@ class Diffusion:
 
     def inpaint(
         self,
-        structure: AtomsGraph,
+        structure: Union[AtomsGraph, List[AtomsGraph]],
         inpaint_mask,
         N: int = 1,
         batch_size: int = 64,
@@ -1744,7 +1744,7 @@ class Diffusion:
         sampler=None,
         sampler_kwargs=None,
     ) -> List[AtomsGraph]:
-        """Regenerate a chosen subset of atoms in an existing structure.
+        """Regenerate a chosen subset of atoms in one or more structures.
 
         Runs masked reverse diffusion ("inpainting"): atoms selected by
         *inpaint_mask* are regenerated from noise (or from a partially-noised
@@ -1757,17 +1757,28 @@ class Diffusion:
 
         Parameters
         ----------
-        structure : AtomsGraph
+        structure : AtomsGraph or list of AtomsGraph
             The input structure (unbatched), e.g. from
-            :meth:`~agedi.data.AtomsGraph.from_atoms`.
-        inpaint_mask : array-like of bool, shape (n_atoms,)
-            ``True`` for atoms to regenerate.
+            :meth:`~agedi.data.AtomsGraph.from_atoms`. Passing a list batches
+            multiple, independent structures together — they need not share
+            atom count, composition, or cell — for GPU throughput; *N*
+            samples are then generated per structure (not in total), and the
+            result is a flat list of length ``len(structure) * N`` in
+            structure-major order (all *N* samples of ``structure[0]``, then
+            all *N* of ``structure[1]``, ...). *inpaint_mask* (and *freeze*,
+            if given) must then also be a list of the same length, one entry
+            already resolved against the matching structure — this method
+            does no per-structure re-resolution of selection criteria itself.
+        inpaint_mask : array-like of bool, shape (n_atoms,), or list thereof
+            ``True`` for atoms to regenerate. A list when *structure* is a
+            list (see above).
         N : int, optional
-            Number of independent inpainted structures to generate. Defaults
-            to ``1``.
+            Number of independent inpainted samples to generate *per input
+            structure*. Defaults to ``1``.
         batch_size : int, optional
-            Maximum number of structures sampled in one batch; larger *N* is
-            chunked. Defaults to ``64``.
+            Maximum number of structures sampled in one batch; the total
+            ``len(structure) * N`` (or just ``N`` for a single structure) is
+            chunked when larger. Defaults to ``64``.
         steps : int, optional
             Number of reverse-diffusion steps. Defaults to ``500``.
         eps : float, optional
@@ -1777,10 +1788,13 @@ class Diffusion:
             selected atoms (de-novo generation of that region). Values below
             ``1.0`` start from a partially-noised state for a local
             rattle-and-relax refinement instead.
-        freeze : array-like of bool, shape (n_atoms,), optional
+        freeze : array-like of bool, shape (n_atoms,), or list thereof, optional
             ``True`` for atoms to hard-freeze: they never move and are
             excluded from the forward-marginal replacement applied to the
-            other known atoms. Must be disjoint from *inpaint_mask*.
+            other known atoms. Must be disjoint from *inpaint_mask*. A list
+            (or a list containing ``None`` entries) when *structure* is a
+            list; ``None`` overall or per-entry means "freeze nothing" for
+            that structure.
         n_resample : int, optional
             Number of RePaint-style resampling passes per reverse step.
             ``1`` (default) disables resampling.
@@ -1812,7 +1826,10 @@ class Diffusion:
         Returns
         -------
         List[AtomsGraph]
-            Inpainted structures, or trajectories when *save_trajectory* is ``True``.
+            Inpainted structures (or trajectories when *save_trajectory* is
+            ``True``), as a flat list of length ``N`` for a single input
+            structure, or ``len(structure) * N`` in structure-major order
+            when *structure* is a list.
 
         """
         if compile:
@@ -1829,41 +1846,72 @@ class Diffusion:
 
         self.score_model.sample_mode()
 
-        device = structure.pos.device
-        inpaint_mask_t = torch.as_tensor(
-            np.asarray(inpaint_mask), dtype=torch.bool, device=device
-        )
-        if inpaint_mask_t.shape[0] != structure.pos.shape[0]:
-            raise ValueError(
-                f"inpaint_mask has {inpaint_mask_t.shape[0]} entries but "
-                f"structure has {structure.pos.shape[0]} atoms."
-            )
-        if not inpaint_mask_t.any():
-            raise ValueError("inpaint_mask selects no atoms; nothing to inpaint.")
+        is_multi = isinstance(structure, (list, tuple))
+        structures = list(structure) if is_multi else [structure]
 
-        freeze_t = None
-        if freeze is not None:
-            freeze_t = torch.as_tensor(
-                np.asarray(freeze), dtype=torch.bool, device=device
-            )
-            if freeze_t.shape[0] != structure.pos.shape[0]:
+        if is_multi:
+            if not isinstance(inpaint_mask, (list, tuple)) or len(inpaint_mask) != len(structures):
                 raise ValueError(
-                    f"freeze has {freeze_t.shape[0]} entries but "
-                    f"structure has {structure.pos.shape[0]} atoms."
+                    "structure is a list, so inpaint_mask must also be a list "
+                    f"of the same length ({len(structures)}); got "
+                    f"{inpaint_mask if isinstance(inpaint_mask, (list, tuple)) else type(inpaint_mask).__name__}."
                 )
-            if (freeze_t & inpaint_mask_t).any():
+            masks_raw = list(inpaint_mask)
+            if freeze is not None:
+                if not isinstance(freeze, (list, tuple)) or len(freeze) != len(structures):
+                    raise ValueError(
+                        "structure is a list, so freeze must also be a list of "
+                        f"the same length ({len(structures)}) (entries may be "
+                        "None), or None overall."
+                    )
+                freezes_raw = list(freeze)
+            else:
+                freezes_raw = [None] * len(structures)
+        else:
+            masks_raw = [inpaint_mask]
+            freezes_raw = [freeze]
+
+        inpaint_masks: List[torch.Tensor] = []
+        freeze_masks: List[Optional[torch.Tensor]] = []
+        for i, (struct_i, mask_i, freeze_i) in enumerate(zip(structures, masks_raw, freezes_raw)):
+            device = struct_i.pos.device
+            n_atoms_i = struct_i.pos.shape[0]
+            prefix = f"structure[{i}]: " if is_multi else ""
+
+            mask_t = torch.as_tensor(np.asarray(mask_i), dtype=torch.bool, device=device)
+            if mask_t.shape[0] != n_atoms_i:
                 raise ValueError(
-                    "freeze and inpaint_mask must be disjoint: an atom cannot "
-                    "be both frozen and selected for regeneration."
+                    f"{prefix}inpaint_mask has {mask_t.shape[0]} entries but "
+                    f"the structure has {n_atoms_i} atoms."
                 )
+            if not mask_t.any():
+                raise ValueError(f"{prefix}inpaint_mask selects no atoms; nothing to inpaint.")
+
+            freeze_t = None
+            if freeze_i is not None:
+                freeze_t = torch.as_tensor(np.asarray(freeze_i), dtype=torch.bool, device=device)
+                if freeze_t.shape[0] != n_atoms_i:
+                    raise ValueError(
+                        f"{prefix}freeze has {freeze_t.shape[0]} entries but "
+                        f"the structure has {n_atoms_i} atoms."
+                    )
+                if (freeze_t & mask_t).any():
+                    raise ValueError(
+                        f"{prefix}freeze and inpaint_mask must be disjoint: an "
+                        "atom cannot be both frozen and selected for regeneration."
+                    )
+
+            inpaint_masks.append(mask_t)
+            freeze_masks.append(freeze_t)
 
         if property is not None:
-            for k, v in property.items():
-                setattr(structure, k, torch.tensor(v, dtype=torch.float))
+            for struct_i in structures:
+                for k, v in property.items():
+                    setattr(struct_i, k, torch.tensor(v, dtype=torch.float))
 
         # Only used by _sample() for torch.compile buffer sizing, which is
         # disallowed above; extracted defensively either way.
-        _cutoff = getattr(structure, "cutoff", 6.0)
+        _cutoff = getattr(structures[0], "cutoff", 6.0)
         cutoff = float(_cutoff.reshape(-1)[0].item()) if torch.is_tensor(_cutoff) else float(_cutoff)
 
         base_sampler = self._resolve_sampler(sampler, 0, 1e-3, sampler_kwargs)
@@ -1873,11 +1921,24 @@ class Diffusion:
             base_sampler, self.noisers, n_resample=n_resample, jump_length=jump_length
         )
 
-        def graph_factory() -> AtomsGraph:
-            return self._initialize_inpaint_graph(
-                structure, inpaint_mask_t, freeze_t, t_start
-            )
+        # Structure-major order: N samples of structures[0], then N of
+        # structures[1], etc. A stateful iterator-backed closure lets this
+        # reuse _sample()'s existing "for _ in range(total): graph_factory()"
+        # loop, and the existing N > batch_size chunking below, unchanged --
+        # each chunk's call to _sample() just keeps consuming from the same
+        # shared iterator where the previous chunk left off.
+        _init = self._initialize_inpaint_graph
+        _calls = iter(
+            (s, m, f)
+            for s, m, f in zip(structures, inpaint_masks, freeze_masks)
+            for _ in range(N)
+        )
 
+        def graph_factory() -> AtomsGraph:
+            s, m, f = next(_calls)
+            return _init(s, m, f, t_start)
+
+        total = len(structures) * N
         self.zeta = ff_guidance.zeta
 
         sample_kwargs: Dict = {
@@ -1894,12 +1955,12 @@ class Diffusion:
             "graph_factory": graph_factory,
         }
 
-        if N > batch_size:
+        if total > batch_size:
             from rich.console import Console as _Console
 
             _console = _Console()
-            n_full = N // batch_size
-            n_remainder = N % batch_size
+            n_full = total // batch_size
+            n_remainder = total % batch_size
             n_batches = n_full + (1 if n_remainder > 0 else 0)
             out = []
             for i in range(n_full):
@@ -1917,6 +1978,6 @@ class Diffusion:
             return out
         else:
             return self._sample(
-                N, steps, cutoff, eps, ff_guidance.guidance,
+                total, steps, cutoff, eps, ff_guidance.guidance,
                 **sample_kwargs,
             )

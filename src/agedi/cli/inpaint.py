@@ -172,11 +172,15 @@ def _parse_str_list(value):
 def inpaint(path: str, structure_path: str, **kwargs) -> None:
     """Inpaint a structure: regenerate a chosen subset of its atoms.
 
-    Loads the model from PATH and the input structure from STRUCTURE_PATH,
+    Loads the model from PATH and the input structure(s) from STRUCTURE_PATH,
     regenerates the selected atoms with masked reverse diffusion, and writes
     the result(s) to the output directory. See the Selection Options for how
     to choose which atoms are regenerated; with none given, a random fraction
-    of the non-fixed atoms is selected.
+    of the non-fixed atoms is selected. When STRUCTURE_PATH contains more
+    than one frame, every frame is batched together and inpainted with the
+    same selection spec, re-resolved independently per structure -- one
+    output file per input structure (per input structure and sample when
+    --save_trajectory is also given).
     """
     from agedi.diffusion import ForcefieldGuidanceConfig
     import torch
@@ -187,7 +191,9 @@ def inpaint(path: str, structure_path: str, **kwargs) -> None:
 
     torch.manual_seed(kwargs["seed"])
 
-    atoms = read(structure_path)
+    frames = read(structure_path, index=":")
+    atoms = frames[0] if len(frames) == 1 else frames
+    is_multi = isinstance(atoms, list)
 
     ff_guidance = None
     if kwargs["ff_guidance"] > 0.0:
@@ -246,7 +252,19 @@ def inpaint(path: str, structure_path: str, **kwargs) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     name = kwargs["name"]
 
-    if kwargs["save_trajectory"]:
+    if is_multi:
+        n_files = 0
+        if kwargs["save_trajectory"]:
+            for j, per_structure in enumerate(structures):
+                for i, trajectory in enumerate(per_structure):
+                    write(output_dir / f"{name}_struct{j}_sample{i}.traj", trajectory)
+                    n_files += 1
+        else:
+            for j, per_structure in enumerate(structures):
+                write(output_dir / f"{name}_struct{j}.traj", per_structure)
+                n_files += 1
+        out_desc = f"{n_files} file(s) in {output_dir}/"
+    elif kwargs["save_trajectory"]:
         for i, trajectory in enumerate(structures):
             write(output_dir / f"{name}_{i}.traj", trajectory)
         out_desc = f"{len(structures)} trajectory file(s) in {output_dir}/"
