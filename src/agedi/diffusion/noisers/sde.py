@@ -220,3 +220,26 @@ class SDENoiser(Noiser, ABC):
         )
         return loss
 
+
+    def forward_marginal(self, batch: AtomsGraph, ref: torch.Tensor) -> torch.Tensor:
+        """Sample ``q(z_t | z_0=ref)`` using the noiser's SDE transition kernel.
+
+        See :meth:`~agedi.diffusion.noisers.Noiser.forward_marginal`.
+        """
+        t = batch.time
+        w = self.distribution.get_callable(batch)
+        return self.sde.transition_kernel(ref, t, w)
+
+    def renoise(
+        self,
+        batch: AtomsGraph,
+        current: torch.Tensor,
+        t_from: torch.Tensor,
+        t_to: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward step of the SDE from ``t_from`` to ``t_to``.
+
+        See :meth:`~agedi.diffusion.noisers.Noiser.renoise`.
+        """
+        w = self.distribution.get_callable(batch)
+        return self.sde.forward_transition(current, t_from, t_to, w)

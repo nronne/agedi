@@ -156,6 +156,118 @@ Similar to the CLI, this samples using the ``last_model.ckpt`` checkpoint found 
 specify the exact path to it when calling :func:`~agedi.functional.load_diffusion`.
 
 
+Inpainting
+-----------
+
+:func:`~agedi.functional.inpaint` regenerates a chosen subset of atoms in an
+*existing* structure, rather than generating a new structure from scratch.
+Selected atoms are noised and regenerated like a from-scratch atom; every
+other atom is, at each reverse-diffusion step, replaced by a fresh sample of
+the forward process of the input structure, so the whole batch stays at a
+self-consistent noise level and those atoms converge back onto their input
+positions (and species, when a types noiser is active) exactly:
+
+.. code-block:: python
+
+   from ase.io import read, write
+   from agedi import load_diffusion, inpaint
+
+   diffusion = load_diffusion("logs/agedi/version_0")
+   atoms = read("structure.traj")
+
+   structures = inpaint(
+       diffusion,
+       atoms,
+       symbols=["O"],      # regenerate every oxygen atom
+       n_samples=4,
+       steps=500,
+   )
+
+   write("inpainted.traj", structures)
+
+Which atoms are regenerated is controlled by
+:func:`~agedi.functional.select_atoms` — ``indices``, ``symbols``,
+``z_range``, ``sphere``, or ``from_atoms`` combine by union; with none given,
+a random ``fraction`` (default ``0.25``) of the atoms not held by a
+``FixAtoms`` constraint is selected:
+
+.. code-block:: python
+
+   # A defect region around a specific site
+   structures = inpaint(
+       diffusion, atoms,
+       sphere=(atoms.positions[12], 3.0),
+       n_samples=4, steps=500,
+   )
+
+   # Default: random 25% of the non-fixed atoms, reproducible via seed
+   structures = inpaint(diffusion, atoms, n_samples=4, steps=500, seed=0)
+
+   # Same 25%, but as one spatially-connected cluster instead of scattered atoms
+   structures = inpaint(
+       diffusion, atoms, fraction=0.25, contiguous=True, seed=0,
+       n_samples=4, steps=500,
+   )
+
+``contiguous=True`` only changes the ``fraction`` fallback (it has no effect
+when another selection criterion is given): instead of a scattered random
+subset, it grows a single connected blob — one random seed atom, then
+repeatedly whichever remaining candidate is closest to the growing cluster
+— useful for a localized defect region without having to know its center
+and radius up front the way ``sphere`` requires.
+
+Other parameters worth knowing:
+
+- ``freeze``: atom indices (or a bool mask) to hard-freeze in addition to the
+  regenerated selection — these never move at all. Must not overlap the
+  selection.
+- ``t_start`` (default ``1.0``): starting diffusion time. Values below
+  ``1.0`` start from a partially-noised state for local rattle-and-relax
+  refinement instead of full regeneration of the selected region.
+- ``n_resample`` / ``jump_length`` (default ``1`` / ``1``): optional
+  RePaint-style resampling (`Lugmayr et al. 2022
+  <https://arxiv.org/abs/2201.09865>`_) that re-noises and re-denoises each
+  step several times, at the cost of extra score-model evaluations, to
+  better harmonize the regenerated region with its surroundings.
+- ``sampler`` / ``sampler_kwargs``: the *inner* reverse-diffusion algorithm
+  wrapped by the inpainting logic — the same choices as :func:`~agedi.functional.sample`
+  (see :ref:`Choosing a sampler <choosing-a-sampler>` below), including the
+  force-field augmented ``"ffpc"`` sampler. ``compile=True``
+  is not supported, since the compiled path bypasses samplers entirely.
+- ``ff_guidance``: a :class:`~agedi.diffusion.ForcefieldGuidanceConfig`
+  (requires a model trained with ``force_field=True``; see :doc:`cli` for the
+  ``--ff_guidance`` CLI option and field reference) works during inpainting
+  too — it only ever nudges the selected/regenerated atoms; known atoms stay
+  on their reference trajectory regardless of guidance strength.
+
+Batching multiple structures
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pass a **list** of :class:`~ase.Atoms` as ``atoms`` to inpaint several
+different structures together in one batch — for GPU throughput, not for
+per-structure customization. They need not share atom count, composition, or
+cell. Every selection argument (``indices``, ``symbols``, ``z_range``,
+``sphere``, ``from_atoms``, ``fraction``, ``freeze``) is a single spec,
+re-resolved independently against each structure — ``symbols=["O"]``
+regenerates every oxygen in every structure, ``indices=[0]`` selects atom 0
+in each, and so on. ``n_samples`` becomes *samples per structure*, and the
+result is grouped one sub-list per input structure, in input order:
+
+.. code-block:: python
+
+   structures = [read("a.traj"), read("b.traj"), read("c.traj")]
+
+   results = inpaint(diffusion, structures, symbols=["O"], n_samples=4, steps=500)
+
+   # results[i] is the list of 4 samples for structures[i]
+   write("inpainted_a.traj", results[0])
+
+A single (non-list) ``atoms`` argument keeps the flat-list return shape shown
+above — the grouped-list shape only applies when ``atoms`` is a list.
+
+
+.. _choosing-a-sampler:
+
 Choosing a sampler
 -------------------
 
@@ -420,6 +532,48 @@ predictions on existing structures.  The results are returned as ASE
 
    write("predicted.traj", predicted)
 
+:func:`~agedi.functional.predict` also accepts the grouped ``List[List[Atoms]]``
+shape that :func:`~agedi.functional.inpaint` returns for a list of input
+structures, and returns predictions grouped the same way — so the output of a
+multi-structure ``inpaint(...)`` call can be passed straight into ``predict(...)``
+without flattening it first.
+
+Relaxation
+~~~~~~~~~~~
+
+:func:`~agedi.functional.relax` mirrors :func:`~agedi.functional.predict` --
+same model requirement, same batching, same cutoff resolution, same flat or
+grouped input/output shapes -- but instead of only evaluating energy and
+forces, it moves the atoms: batched L-BFGS steps (as ``ase.optimize.LBFGS``
+would take) using forces from the regressor, until the maximum per-atom force
+drops below ``force_threshold`` or ``max_steps`` is reached. Atoms held by an
+ASE ``FixAtoms`` constraint on the input structure stay frozen — the one
+behavioural difference from ``predict``, since freezing is meaningless when
+nothing moves:
+
+.. code-block:: python
+
+   from ase.io import read, write
+   from agedi import load_diffusion, relax
+
+   diffusion = load_diffusion("logs/agedi/version_0")
+
+   structures = read("structures.traj", index=":")
+   relaxed = relax(diffusion, structures, max_steps=200, force_threshold=0.05)
+
+   print(relaxed[0].get_potential_energy())  # eV, at the relaxed geometry
+   write("relaxed.traj", relaxed)
+
+Like ``predict``, ``relax`` accepts the grouped shape ``inpaint`` returns for
+a list of input structures, so a multi-structure inpainting result can be
+relaxed (and then predicted on) without flattening:
+
+.. code-block:: python
+
+   samples = inpaint(diffusion, structures, symbols=["O"], n_samples=4)
+   relaxed = relax(diffusion, samples)      # same grouping as samples
+   predicted = predict(diffusion, relaxed)  # same grouping again
+
 
 Core public functions
 ----------------------
@@ -432,6 +586,7 @@ Core public functions
 - :func:`~agedi.functional.train_from_config`
 - :func:`~agedi.functional.load_diffusion`
 - :func:`~agedi.functional.predict`
+- :func:`~agedi.functional.relax`
 - :func:`~agedi.functional.sample`
 - :func:`~agedi.functional.register_model`
 

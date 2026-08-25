@@ -487,5 +487,46 @@ class Types(Noiser):
         return edge
 
 
+    def forward_marginal(self, batch: AtomsGraph, ref: torch.Tensor) -> torch.Tensor:
+        """Sample ``q(x_t | x_0=ref)`` for the absorbing-state discrete diffusion.
+
+        ``ref`` is expected in atomic-number space (matching ``batch.x0`` as
+        stored by inpainting graph initialisation).  When a ``type_map`` is
+        configured, it is converted to compact-index space first — mirroring
+        the conversion :meth:`_noise` performs on its input — so that the
+        returned sample lives in the same space as ``batch.x`` during
+        intermediate (non-final) reverse-diffusion steps.
+
+        See :meth:`~agedi.diffusion.noisers.Noiser.forward_marginal`.
+        """
+        if self._type_map is not None:
+            ref = self._atomic_to_compact[ref]
+        sigma = self.noise_schedule.total_noise(batch.time).reshape(-1)
+        return self.sample_transition(ref, sigma)
+
+    def renoise(
+        self,
+        batch: AtomsGraph,
+        current: torch.Tensor,
+        t_from: torch.Tensor,
+        t_to: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward step of the absorbing-state chain from ``t_from`` to ``t_to``.
+
+        The absorbing-state process is memoryless once an atom has *not* yet
+        been absorbed: the probability of transitioning to the absorbing
+        state (index ``0``) between ``t_from`` and ``t_to`` depends only on
+        the noise accumulated in that interval, independent of history. Atoms
+        already at the absorbing state remain there.
+
+        See :meth:`~agedi.diffusion.noisers.Noiser.renoise`.
+        """
+        sigma_from = self.noise_schedule.total_noise(t_from).reshape(-1)
+        sigma_to = self.noise_schedule.total_noise(t_to).reshape(-1)
+        move_chance = 1 - torch.exp(-(sigma_to - sigma_from))
+        move = torch.rand_like(move_chance) < move_chance
+        return torch.where(move, torch.zeros_like(current), current)
+
+
 #: Backward-compatible alias for :class:`Types`.
 TypesNoiser = Types

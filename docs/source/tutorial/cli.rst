@@ -15,7 +15,9 @@ Main commands
 
 - ``agedi train``: train a diffusion model from a trajectory file or YAML config
 - ``agedi sample``: sample structures from a saved training run
+- ``agedi inpaint``: regenerate a chosen subset of atoms in an existing structure
 - ``agedi predict``: predict energies and forces for input structures (requires ``--force_field`` training)
+- ``agedi relax``: relax input structures with batched L-BFGS (requires ``--force_field`` training)
 - ``agedi inspect``: print ``hparams.yaml`` from a run directory
 
 To get information about options for each use
@@ -24,7 +26,7 @@ To get information about options for each use
 
    agedi train --help
 
-for ``train`` and likewise for ``sample``, ``predict``, and ``inspect``.
+for ``train`` and likewise for ``sample``, ``inpaint``, ``predict``, ``relax``, and ``inspect``.
 
 Training
 --------
@@ -238,6 +240,78 @@ Key ``ffpc`` options:
 - ``--ffpc_terminal_friction``: friction coefficient γ for ``langevin_md``
   (units: 1/terminal_step_size).  Auto-selected when not specified (γ·dt = 0.1).
 
+Inpainting
+----------
+
+``agedi inpaint`` regenerates a chosen subset of atoms in an *existing*
+structure instead of generating a new one from scratch:
+
+.. code-block:: console
+
+   agedi inpaint logs/agedi/version_0 structure.traj --symbols O --n_samples 4 --steps 500
+
+This loads the structure from ``structure.traj``, regenerates every oxygen
+atom, and writes the result(s) to the output directory. Selecting atoms
+via any of ``--indices``, ``--symbols``, ``--z_range``, ``--sphere_center``
+/ ``--sphere_radius``, or ``--from_atoms`` combines by union; with none
+given, a random ``--fraction`` (default ``0.25``) of the non-fixed atoms is
+selected instead:
+
+.. code-block:: console
+
+   # Explicit atom indices
+   agedi inpaint logs/agedi/version_0 structure.traj --indices 12,13,14
+
+   # A spherical region around a defect site
+   agedi inpaint logs/agedi/version_0 structure.traj \
+       --sphere_center 5.0 5.0 8.0 --sphere_radius 3.0
+
+   # Default: random 25% of the non-fixed atoms, reproducible via --seed
+   agedi inpaint logs/agedi/version_0 structure.traj --seed 42
+
+   # Same 25%, but as one spatially-connected cluster instead of scattered atoms
+   agedi inpaint logs/agedi/version_0 structure.traj --seed 42 --contiguous
+
+``--contiguous`` only changes the ``--fraction`` fallback: instead of a
+scattered random subset, it grows a single connected blob from a random
+seed atom outward — useful for a localized defect region without knowing
+its center and radius up front the way ``--sphere_center``/``--sphere_radius``
+require.
+
+Key options:
+
+- ``--freeze``: comma-separated atom indices to hard-freeze (never move),
+  in addition to the regenerated selection. Must not overlap it.
+- ``--t_start`` (default ``1.0``): starting diffusion time. ``1.0`` fully
+  re-noises the selection for de-novo regeneration of that region; lower
+  values give a local rattle-and-relax refinement instead.
+- ``--n_resample`` / ``--jump_length`` (default ``1`` / ``1``): RePaint-style
+  resampling passes to better harmonize the regenerated region with its
+  surroundings, at the cost of extra score-model evaluations.
+- ``--sampler``: same choices as ``agedi sample`` (``em``, ``pc``, ``heun``,
+  ``ddim``, ``heun_ode``, ``ffpc``); this is the *inner* reverse-diffusion
+  algorithm wrapped by the inpainting logic.
+- ``--compile`` is not available for ``inpaint`` — the compiled reverse step
+  bypasses samplers entirely, and inpainting is implemented as a sampler.
+
+Batching multiple structures
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When ``structure.traj`` (or any ASE-readable file) contains more than one
+frame, every frame is batched together and inpainted with the same
+selection options, re-resolved independently per structure — for GPU
+throughput, not per-structure customization. Structures need not share
+atom count, composition, or cell:
+
+.. code-block:: console
+
+   agedi inpaint logs/agedi/version_0 many_structures.traj --symbols O --n_samples 4
+
+``--n_samples`` becomes samples *per structure*. Output is one file per
+input structure, ``{name}_struct{j}.traj`` (or
+``{name}_struct{j}_sample{i}.traj`` with ``--save_trajectory``), instead of
+the single-structure ``{name}.traj`` / ``{name}_{i}.traj`` naming.
+
 Force-field guided training and sampling
 -----------------------------------------
 
@@ -359,6 +433,8 @@ In Python this is equivalent to:
 - ``max_extra_steps`` (int): maximum L-BFGS relaxation steps performed after the main
   diffusion trajectory; default ``0`` (disabled).
 
+.. _relaxing-without-guidance:
+
 Relaxing without guidance
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -435,6 +511,52 @@ In Python this is equivalent to:
    structures = read("structures.traj", index=":")
    predicted = predict(diffusion, structures)
    write("predicted.traj", predicted)
+
+Relaxing structures
+--------------------
+
+``agedi relax`` mirrors ``agedi predict`` -- same model requirement, same
+input/output conventions -- but moves the atoms with batched L-BFGS instead
+of only evaluating energy and forces once. It uses the same L-BFGS mechanism
+as ``max_extra_steps`` (see :ref:`Relaxing without guidance
+<relaxing-without-guidance>` above), but standalone: on *existing* structures
+from a file, independent of any diffusion sampling run.
+
+.. code-block:: console
+
+   agedi relax logs/agedi/version_0 structures.traj --max_steps 200 --force_threshold 0.05
+
+Takes one L-BFGS step per iteration (as ``ase.optimize.LBFGS`` would) using
+forces from the regressor, re-evaluating after each step, until the maximum
+per-atom force across the whole batch drops to or below ``--force_threshold``
+or ``--max_steps`` is reached. Atoms held by a ``FixAtoms`` constraint on the
+input structure stay frozen. Writes the relaxed structures, with final
+energies and forces attached, to ``relaxed.traj``.
+
+Key options:
+
+- ``--max_steps`` (default ``200``): maximum number of L-BFGS steps.
+- ``--force_threshold`` (default ``0.05`` eV/Å): convergence threshold on the
+  maximum per-atom force, checked across the whole batch.
+- ``--scale`` (default ``1.0``): multiplier on the computed step (ASE's
+  ``damping``).
+- ``--max_step_size`` (default ``0.2`` Å): maximum single-atom displacement
+  per step.
+- ``--progress_bar``: show a progress bar and print convergence status per
+  batch.
+- ``-o/--output``, ``--name``, ``-b/--batch_size``: same as ``agedi predict``.
+
+In Python this is equivalent to:
+
+.. code-block:: python
+
+   from ase.io import read, write
+   from agedi import load_diffusion, relax
+
+   diffusion = load_diffusion("logs/agedi/version_0")
+   structures = read("structures.traj", index=":")
+   relaxed = relax(diffusion, structures, max_steps=200, force_threshold=0.05)
+   write("relaxed.traj", relaxed)
 
 Inspect run metadata
 --------------------

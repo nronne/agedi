@@ -275,3 +275,77 @@ class Noiser(ABC, torch.nn.Module):
             self.key,
             self.prior.get_callable(batch)(),
         )
+
+    def forward_marginal(self, batch: AtomsGraph, ref: torch.Tensor) -> torch.Tensor:
+        """Sample the forward marginal ``q(z_t | z_0=ref)`` at ``batch.time``.
+
+        Used by inpainting to re-noise the *known* (context) atoms to the
+        current diffusion time, so that a partially denoised structure with a
+        mix of generated and known atoms is always self-consistent: every
+        atom sits at the noise level the score model expects for ``t``.
+
+        Must be implemented by subclasses that support inpainting.  The base
+        implementation raises :class:`NotImplementedError` so that using an
+        unsupported noiser with :meth:`~agedi.diffusion.Diffusion.inpaint`
+        fails loudly rather than silently leaving an attribute un-noised.
+
+        Parameters
+        ----------
+        batch: AtomsGraph
+            The atomistic structure (or batch hereof); ``batch.time`` gives
+            the target time ``t``.
+        ref: torch.Tensor
+            The clean reference value (``z_0``) to condition on, e.g. the
+            input structure's positions or atomic numbers.
+
+        Returns
+        -------
+        torch.Tensor
+            A sample of ``z_t`` for every atom (not masked by ``inpaint_mask``
+            here; the caller selects which atoms to keep).
+
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement forward_marginal(), "
+            "required for inpainting."
+        )
+
+    def renoise(
+        self,
+        batch: AtomsGraph,
+        current: torch.Tensor,
+        t_from: torch.Tensor,
+        t_to: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward step from an already-noised state, for RePaint resampling.
+
+        Advances ``current`` (the state at time ``t_from``) forward to
+        ``t_to`` (``t_to >= t_from``) by sampling the SDE's forward
+        transition kernel. Used for the RePaint-style "jump back" step that
+        re-noises a partially denoised structure before repeating a reverse
+        step, letting the known and generated atoms harmonize.
+
+        Must be implemented by subclasses that support inpainting resampling.
+        The base implementation raises :class:`NotImplementedError`.
+
+        Parameters
+        ----------
+        batch: AtomsGraph
+            The atomistic structure (or batch hereof).
+        current: torch.Tensor
+            The current (partially denoised) value at time ``t_from``.
+        t_from: torch.Tensor
+            The current time.
+        t_to: torch.Tensor
+            The target time to re-noise to (``t_to >= t_from``).
+
+        Returns
+        -------
+        torch.Tensor
+            A sample of the state at time ``t_to``.
+
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement renoise(), "
+            "required for inpainting resampling (n_resample > 1)."
+        )

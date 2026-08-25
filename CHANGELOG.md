@@ -5,6 +5,60 @@ All notable changes to AGeDi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Inpainting-style diffusion** — `agedi.inpaint()` / `agedi inpaint` regenerate
+  a chosen subset of atoms in an existing structure instead of generating a new
+  one from scratch. Selected atoms are noised and denoised like a from-scratch
+  atom; every other ("known") atom is, at each reverse-diffusion step, replaced
+  by a fresh sample of the forward process `q(z_t | z_0)` of the input
+  structure, so the whole batch stays at a self-consistent noise level and
+  known atoms converge back onto their input positions (and species, for the
+  types noiser) exactly as `t -> eps`.
+  - Atom selection via `agedi.api.select_atoms()`: `indices`, `symbols`,
+    `z_range`, `sphere`, or `from_atoms`, combined by union; with none given, a
+    random `fraction` (default 0.25) of the non-fixed atoms is selected.
+    `contiguous=True` changes the `fraction` fallback to grow a single
+    spatially-connected cluster (a random seed atom, then repeatedly the
+    closest remaining candidate) instead of a scattered random subset.
+  - `t_start` below `1.0` starts from a partially-noised state for local
+    rattle-and-relax refinement instead of full regeneration.
+  - Optional RePaint-style resampling (`n_resample`, `jump_length`, off by
+    default) to better harmonize the regenerated region with its surroundings.
+  - `freeze` hard-freezes a subset of atoms in addition to the regenerated
+    selection.
+  - Implemented as `InpaintingSampler`, a wrapper around any existing sampler
+    (`em`, `pc`, `heun`, `ddim`, `heun_ode`, `ffpc`), so it composes with all
+    of them; not compatible with `compile=True`.
+  - `atoms` accepts a list of structures (need not share atom count,
+    composition, or cell) to batch several inpainting runs together for GPU
+    throughput; every selection argument stays a single spec, re-resolved
+    independently per structure, and `n_samples` becomes samples per
+    structure. Results are grouped one list per input structure. The CLI
+    picks this up automatically when the input file has more than one frame.
+- `agedi.predict()` accepts the grouped `List[List[Atoms]]` shape
+  `inpaint()` returns for a list of input structures (in addition to a flat
+  list, unchanged), and returns predictions grouped the same way — so a
+  multi-structure `inpaint(...)` result can be passed straight into
+  `predict(...)` without flattening it first.
+- **`agedi.relax()` / `agedi relax`** — batched L-BFGS relaxation of existing
+  structures using a trained force-field regressor, mirroring
+  `agedi.predict()` exactly (same model requirement, batching, cutoff
+  resolution, and flat/grouped input-output shapes — including the
+  `inpaint()`-compatible grouping). Takes one L-BFGS step per iteration until
+  the maximum per-atom force across the batch drops to or below
+  `force_threshold` or `max_steps` is reached; atoms held by an ASE
+  `FixAtoms` constraint on the input stay frozen. Reuses the same
+  `post_diffusion_relaxation_step()` machinery already used for
+  `max_extra_steps` during sampling, applied standalone.
+- `Noiser.forward_marginal()` / `Noiser.renoise()` hooks (implemented for the
+  SDE-based position noisers and the discrete `Types` noiser) powering the
+  above.
+- `AtomsGraph.to_atoms()` writes the inpainting selection back as
+  `atoms.arrays["inpaint_mask"]` when present, so a result can be re-fed as
+  `from_atoms=True` input.
+
 ## [1.4.0] - 2026-08-11
 
 ### Added
