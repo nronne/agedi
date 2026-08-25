@@ -973,6 +973,50 @@ def test_inpaint_returns_atoms():
     assert structures[0].positions.shape == atoms.positions.shape
 
 
+def test_inpaint_gas_phase_positions_noiser():
+    """Regression test: forward_marginal() on the un-batched per-structure
+    graph built inside _initialize_inpaint_graph must work for the gas-phase
+    Positions noiser too, whose noise distribution is ZeroComNormal.
+
+    ZeroComNormal._setup() used to assume batch.batch was always set (true
+    for every other caller, which only ever runs on a real multi-graph
+    Batch), and crashed with AttributeError: 'NoneType' object has no
+    attribute 'max' once forward_marginal() started calling it on a lone,
+    not-yet-batched AtomsGraph.
+    """
+    from agedi import inpaint
+
+    diffusion = create_diffusion(noisers=("positions",))
+    atoms = _test_atoms()
+
+    structures = inpaint(
+        diffusion, atoms, indices=[0], n_samples=1, steps=3, eps=1e-2,
+    )
+    assert len(structures) == 1
+    assert structures[0].positions.shape == atoms.positions.shape
+
+
+def test_inpaint_confined_cell_positions_noiser():
+    """Regression test: forward_marginal() must also work for
+    ConfinedCellPositions, whose noise distribution is TruncatedNormal --
+    same un-batched-graph gap as ZeroComNormal, in TruncatedNormal._setup()'s
+    ``batch.confinement[batch.batch]`` indexing.
+    """
+    from agedi import inpaint
+
+    diffusion = create_diffusion(
+        noisers=("confined_cell_positions",), confinement=(2.0, 8.0)
+    )
+    atoms = _test_atoms()
+
+    structures = inpaint(
+        diffusion, atoms, indices=[0], n_samples=1, steps=3, eps=1e-2,
+        confinement=(2.0, 8.0),
+    )
+    assert len(structures) == 1
+    assert structures[0].positions.shape == atoms.positions.shape
+
+
 def test_inpaint_reconstructs_known_atoms():
     """Non-selected atoms must match the input structure to within tolerance."""
     from agedi import inpaint
