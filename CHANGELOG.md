@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     independently per structure, and `n_samples` becomes samples per
     structure. Results are grouped one list per input structure. The CLI
     picks this up automatically when the input file has more than one frame.
+- `agedi.predict()` accepts the grouped `List[List[Atoms]]` shape
+  `inpaint()` returns for a list of input structures (in addition to a flat
+  list, unchanged), and returns predictions grouped the same way — so a
+  multi-structure `inpaint(...)` result can be passed straight into
+  `predict(...)` without flattening it first.
 - `Noiser.forward_marginal()` / `Noiser.renoise()` hooks (implemented for the
   SDE-based position noisers and the discrete `Types` noiser) powering the
   above.

@@ -639,6 +639,45 @@ def test_predict_returns_atoms_with_predictions():
         assert calc.results["forces"].shape == (len(atoms), 3)
 
 
+def test_predict_accepts_grouped_structures_from_multi_structure_inpaint():
+    """predict() must accept the grouped List[List[Atoms]] shape that
+    inpaint() returns for a list of input structures, and return results
+    grouped the same way -- this is exactly the failure mode from chaining
+    inpaint([a, b]) straight into predict() without flattening first."""
+    from agedi import inpaint
+
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+    atoms = _test_atoms()
+
+    grouped_input = inpaint(
+        diffusion, [atoms, atoms], indices=[0], n_samples=2, steps=3, eps=1e-2,
+    )
+    assert isinstance(grouped_input, list) and isinstance(grouped_input[0], list)
+
+    results = predict(diffusion, grouped_input)
+
+    assert len(results) == len(grouped_input)
+    for group, src_group in zip(results, grouped_input):
+        assert len(group) == len(src_group)
+        for result_atoms in group:
+            calc = result_atoms.calc
+            assert calc is not None
+            assert "energy" in calc.results
+            assert "forces" in calc.results
+
+
+def test_predict_flat_input_still_returns_flat_output():
+    """A flat list of Atoms in must still give a flat list out (unchanged)."""
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+    atoms = _test_atoms()
+
+    results = predict(diffusion, [atoms, atoms, atoms])
+
+    assert isinstance(results, list)
+    assert len(results) == 3
+    assert all(hasattr(a, "calc") and a.calc is not None for a in results)
+
+
 # ---------------------------------------------------------------------------
 # type_map / n_classes tests
 # ---------------------------------------------------------------------------

@@ -519,6 +519,12 @@ predictions on existing structures.  The results are returned as ASE
 
    write("predicted.traj", predicted)
 
+:func:`~agedi.functional.predict` also accepts the grouped ``List[List[Atoms]]``
+shape that :func:`~agedi.functional.inpaint` returns for a list of input
+structures, and returns predictions grouped the same way — so the output of a
+multi-structure ``inpaint(...)`` call can be passed straight into ``predict(...)``
+without flattening it first.
+
 
 Core public functions
 ----------------------
