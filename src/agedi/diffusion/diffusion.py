@@ -27,6 +27,7 @@ from .guidance import (
     ForcefieldGuidanceConfig,
     force_field_guidance_step,
     post_diffusion_relaxation_step,
+    reassert_known_positions,
 )
 
 
@@ -1005,12 +1006,18 @@ class Diffusion:
                             force_field_guidance * dt,
                         )
                         timings.force_field_calls += 1
+                        pre_wrap_pos = batch.pos.clone()
                         self._time_sampling_call(
                             batch.pos.device,
                             timings,
                             "guidance_wrap_positions",
                             batch.wrap_positions,
                         )
+                        # wrap_positions() can flip a known (non-inpainted)
+                        # atom sitting near a periodic-cell boundary to the
+                        # adjacent image; restore it before rebuilding the
+                        # neighbor list. No-op outside inpainting.
+                        reassert_known_positions(batch, pre_wrap_pos)
                         guidance_rebuilt = self._time_sampling_call(
                             batch.pos.device,
                             timings,
@@ -1024,7 +1031,9 @@ class Diffusion:
                         batch = self.force_field_guidance_step(
                             batch, force_field_guidance * dt
                         )
+                        pre_wrap_pos = batch.pos.clone()
                         batch.wrap_positions()
+                        reassert_known_positions(batch, pre_wrap_pos)
                         batch.update_graph()
 
                 # Append sub-step frames produced inside sampler.step() —

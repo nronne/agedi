@@ -227,3 +227,74 @@ class TestInpaintingSamplerTrajectory:
         # PC captures one frame after the predictor plus corrector_steps-1
         # sub-steps; those should have been drained into the wrapper.
         assert len(sampler._pending_frames) > 0
+
+
+def _constant_force_regressor(batch):
+    """Stub regressor: constant, nonzero forces on every atom.
+
+    Mirrors test_samplers.py's TestPostDiffusionRelaxation._unconverged_regressor
+    -- large enough that any un-restricted guidance step would visibly move
+    an atom well past float tolerance.
+    """
+    batch["forces_prediction"] = torch.ones_like(batch.pos)
+    return batch
+
+
+class TestForceFieldGuidanceRespectsInpaintMask:
+    """force_field_guidance_step / post_diffusion_relaxation_step must not
+    move known (non-inpainted) atoms, even though they operate outside the
+    InpaintingSampler wrapper (called directly by Diffusion._sample_batch,
+    after sampler.step() returns) and have no built-in notion of
+    inpaint_mask -- only of the unrelated hard-frozen batch.mask.
+    """
+
+    def test_force_field_guidance_step_only_moves_selected_atoms(self, diffusion, batch):
+        from agedi.diffusion.guidance import BatchedLBFGSStepSizer, force_field_guidance_step
+
+        batch = _attach_inpaint_state(diffusion, batch, frac_selected=0.5, seed=3)
+        batch.add_batch_attr("time", torch.full((batch.x.shape[0], 1), 0.5), type="node")
+        pos_before = batch.pos.clone()
+
+        sizer = BatchedLBFGSStepSizer(batch_size=batch.batch_size)
+        out = force_field_guidance_step(
+            batch, _constant_force_regressor, sizer, scale=1.0, zeta=0.0,
+        )
+
+        known = ~out.inpaint_mask
+        assert torch.equal(out.pos[known], pos_before[known])
+        assert not torch.allclose(out.pos[out.inpaint_mask], pos_before[out.inpaint_mask])
+
+    def test_post_diffusion_relaxation_step_only_moves_selected_atoms(self, diffusion, batch):
+        from agedi.diffusion.guidance import (
+            BatchedLBFGSStepSizer,
+            post_diffusion_relaxation_step,
+        )
+
+        batch = _attach_inpaint_state(diffusion, batch, frac_selected=0.5, seed=3)
+        batch.add_batch_attr("time", torch.full((batch.x.shape[0], 1), 0.1), type="node")
+        pos_before = batch.pos.clone()
+
+        sizer = BatchedLBFGSStepSizer(batch_size=batch.batch_size)
+        out = post_diffusion_relaxation_step(
+            batch, _constant_force_regressor, sizer, scale=1.0,
+        )
+
+        known = ~out.inpaint_mask
+        assert torch.equal(out.pos[known], pos_before[known])
+        assert not torch.allclose(out.pos[out.inpaint_mask], pos_before[out.inpaint_mask])
+
+    def test_guidance_functions_are_no_ops_without_inpaint_mask(self, diffusion, batch):
+        """Ordinary (non-inpainting) sampling never sets inpaint_mask, so the
+        restriction must not change behaviour there."""
+        from agedi.diffusion.guidance import BatchedLBFGSStepSizer, force_field_guidance_step
+
+        assert "inpaint_mask" not in batch
+        batch.add_batch_attr("time", torch.full((batch.x.shape[0], 1), 0.5), type="node")
+        pos_before = batch.pos.clone()
+
+        sizer = BatchedLBFGSStepSizer(batch_size=batch.batch_size)
+        out = force_field_guidance_step(
+            batch, _constant_force_regressor, sizer, scale=1.0, zeta=0.0,
+        )
+
+        assert not torch.allclose(out.pos, pos_before)

@@ -280,6 +280,55 @@ class BatchedLBFGSStepSizer:
             step_sizer.reset()
 
 
+def _restrict_to_inpainted(batch: AtomsGraph, new_pos: torch.Tensor) -> torch.Tensor:
+    """Undo a guidance step's displacement of known (non-inpainted) atoms.
+
+    Force-field guidance and post-diffusion relaxation move every atom that
+    isn't hard-frozen via ``batch.mask`` -- they have no notion of the
+    "known vs. regenerated" split used by inpainting (``batch.inpaint_mask``),
+    so left alone they nudge known/context atoms off their reference
+    trajectory using predicted forces, up to and including the final step
+    where inpainting otherwise guarantees an exact reconstruction. When
+    ``batch.inpaint_mask`` is present, only the atoms it marks for
+    regeneration keep the guidance step; every other atom keeps its
+    pre-guidance position. A no-op for ordinary (non-inpainting) sampling,
+    where the attribute is absent.
+    """
+    if "inpaint_mask" not in batch:
+        return new_pos
+    select = batch.inpaint_mask.view(-1, *([1] * (new_pos.dim() - 1)))
+    return torch.where(select, new_pos, batch.pos)
+
+
+def reassert_known_positions(batch: AtomsGraph, pre_wrap_pos: torch.Tensor) -> None:
+    """Undo a periodic-image flip ``wrap_positions()`` may cause for known atoms.
+
+    ``AtomsGraph.wrap_positions()`` can flip an atom sitting near a
+    periodic-cell boundary to the adjacent image -- a jump by a full lattice
+    vector, not the small guidance/relaxation displacement it was meant to
+    represent. Callers that write ``batch.pos`` via :func:`_restrict_to_inpainted`
+    and then call ``wrap_positions()`` must call this immediately afterwards
+    (and before ``update_graph()``, so the returned neighbor list is built
+    from the final, exact positions) to restore known atoms to *pre_wrap_pos*
+    -- their value right after the restricted guidance write, before
+    wrapping. A no-op for ordinary (non-inpainting) sampling, where
+    ``inpaint_mask`` is absent.
+
+    Parameters
+    ----------
+    batch : AtomsGraph
+        The batch, already guidance-updated and wrapped.
+    pre_wrap_pos : torch.Tensor
+        ``batch.pos`` as returned by the guidance step, captured before
+        ``wrap_positions()`` was called.
+    """
+    if "inpaint_mask" not in batch:
+        return
+    known = ~batch.inpaint_mask
+    select = known.view(-1, *([1] * (batch.pos.dim() - 1)))
+    batch.pos = torch.where(select, pre_wrap_pos, batch.pos)
+
+
 def force_field_guidance_step(
     batch: AtomsGraph,
     regressor_model: "torch.nn.Module",
@@ -358,7 +407,7 @@ def force_field_guidance_step(
             new_pos[:, 2], min=z_min_per_atom, max=z_max_per_atom
         )
 
-    batch.pos = new_pos
+    batch.pos = _restrict_to_inpainted(batch, new_pos)
     return batch
 
 
@@ -432,9 +481,11 @@ def post_diffusion_relaxation_step(
             new_pos[:, 2], min=z_min_per_atom, max=z_max_per_atom
         )
 
-    batch.pos = new_pos
+    restricted_pos = _restrict_to_inpainted(batch, new_pos)
+    batch.pos = restricted_pos
 
     batch.wrap_positions()
+    reassert_known_positions(batch, restricted_pos)
     batch.update_graph()
 
     return batch
