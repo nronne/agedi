@@ -395,15 +395,26 @@ def _print_inpainting_config(
     property=None,
     force_field_guidance: float = 0.0,
     sampler: Optional[str] = None,
+    n_structures: int = 1,
 ) -> None:
-    """Print a Rich-formatted inpainting configuration panel."""
+    """Print a Rich-formatted inpainting configuration panel.
+
+    *n_selected*, *n_atoms*, and *n_frozen* are totals summed across all
+    input structures when *n_structures* > 1.
+    """
     console = Console()
     table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
     table.add_column("Key", style="bold cyan", min_width=14, no_wrap=True)
     table.add_column("Value", style="white")
 
-    table.add_row("  n_samples", str(n_samples))
-    table.add_row("  selected atoms", f"{n_selected} / {n_atoms}")
+    if n_structures > 1:
+        table.add_row("  structures", str(n_structures))
+        table.add_row("  samples/structure", str(n_samples))
+        table.add_row("  total samples", str(n_structures * n_samples))
+        table.add_row("  selected atoms", f"{n_selected} / {n_atoms} (total)")
+    else:
+        table.add_row("  n_samples", str(n_samples))
+        table.add_row("  selected atoms", f"{n_selected} / {n_atoms}")
     if n_frozen:
         table.add_row("  frozen atoms", str(n_frozen))
     table.add_row("  steps", str(steps))

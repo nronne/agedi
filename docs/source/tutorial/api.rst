@@ -227,6 +227,31 @@ Other parameters worth knowing:
   too — it only ever nudges the selected/regenerated atoms; known atoms stay
   on their reference trajectory regardless of guidance strength.
 
+Batching multiple structures
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pass a **list** of :class:`~ase.Atoms` as ``atoms`` to inpaint several
+different structures together in one batch — for GPU throughput, not for
+per-structure customization. They need not share atom count, composition, or
+cell. Every selection argument (``indices``, ``symbols``, ``z_range``,
+``sphere``, ``from_atoms``, ``fraction``, ``freeze``) is a single spec,
+re-resolved independently against each structure — ``symbols=["O"]``
+regenerates every oxygen in every structure, ``indices=[0]`` selects atom 0
+in each, and so on. ``n_samples`` becomes *samples per structure*, and the
+result is grouped one sub-list per input structure, in input order:
+
+.. code-block:: python
+
+   structures = [read("a.traj"), read("b.traj"), read("c.traj")]
+
+   results = inpaint(diffusion, structures, symbols=["O"], n_samples=4, steps=500)
+
+   # results[i] is the list of 4 samples for structures[i]
+   write("inpainted_a.traj", results[0])
+
+A single (non-list) ``atoms`` argument keeps the flat-list return shape shown
+above — the grouped-list shape only applies when ``atoms`` is a list.
+
 
 .. _choosing-a-sampler:
 

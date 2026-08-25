@@ -1133,6 +1133,118 @@ def test_inpaint_save_trajectory():
     assert all(hasattr(frame, "positions") for frame in out[0])
 
 
+def _test_atoms_variants():
+    """Structures with different atom counts/cells, for multi-structure inpainting."""
+    from ase.build import molecule
+
+    h2o = molecule("H2O")
+    h2o.set_cell([10.0, 10.0, 10.0])
+    h2o.set_pbc(True)
+    h2o.center()
+
+    nh3 = molecule("NH3")
+    nh3.set_cell([9.0, 9.0, 9.0])
+    nh3.set_pbc(True)
+    nh3.center()
+
+    return [h2o, nh3]
+
+
+def test_inpaint_multi_structure_groups_results_per_structure():
+    """A list of structures produces one sub-list of n_samples results each,
+    in input order, without requiring equal atom counts."""
+    from agedi import inpaint
+
+    diffusion = create_diffusion(noisers=("cell_positions",))
+    structures = _test_atoms_variants()
+
+    out = inpaint(
+        diffusion, structures, indices=[0], n_samples=2, steps=3, eps=1e-2,
+    )
+    assert len(out) == len(structures)
+    for group, src in zip(out, structures):
+        assert len(group) == 2
+        for result in group:
+            assert len(result) == len(src)
+
+
+def test_inpaint_multi_structure_reconstructs_known_atoms():
+    """Known atoms must reconstruct exactly for every structure in the batch,
+    not just the first -- exercises the same selection spec resolved
+    independently per structure."""
+    from agedi import inpaint
+
+    diffusion = create_diffusion(noisers=("cell_positions",))
+    structures = _test_atoms_variants()
+
+    out = inpaint(
+        diffusion, structures, indices=[0], n_samples=1, steps=4, eps=1e-2,
+    )
+    for group, src in zip(out, structures):
+        result = group[0]
+        np.testing.assert_allclose(
+            result.positions[1:], src.positions[1:], atol=1e-3
+        )
+
+
+def test_inpaint_multi_structure_freeze_applies_per_structure():
+    from agedi import inpaint
+
+    diffusion = create_diffusion(noisers=("cell_positions",))
+    structures = _test_atoms_variants()
+
+    out = inpaint(
+        diffusion, structures, indices=[0], freeze=[1], n_samples=1,
+        steps=3, eps=1e-2,
+    )
+    for group, src in zip(out, structures):
+        result = group[0]
+        np.testing.assert_allclose(result.positions[1], src.positions[1], atol=1e-6)
+
+
+def test_inpaint_multi_structure_save_trajectory_nesting():
+    from agedi import inpaint
+
+    diffusion = create_diffusion(noisers=("cell_positions",))
+    structures = _test_atoms_variants()
+    steps = 3
+
+    out = inpaint(
+        diffusion, structures, indices=[0], n_samples=1, steps=steps, eps=1e-2,
+        save_trajectory=True,
+    )
+    assert len(out) == len(structures)
+    for group in out:
+        assert len(group) == 1  # n_samples
+        assert len(group[0]) == steps + 1  # trajectory frames
+
+
+def test_inpaint_multi_structure_mask_length_mismatch_raises():
+    """Diffusion.inpaint() itself validates structure/inpaint_mask list lengths match."""
+    diffusion = create_diffusion(noisers=("cell_positions",))
+    atoms1, atoms2 = _test_atoms_variants()
+    g1 = AtomsGraph.from_atoms(atoms1, initialize_mask=False)
+    g2 = AtomsGraph.from_atoms(atoms2, initialize_mask=False)
+
+    with pytest.raises(ValueError, match="inpaint_mask must also be a list"):
+        diffusion.inpaint([g1, g2], [np.array([True] + [False] * (len(atoms1) - 1))])
+
+
+def test_inpaint_multi_structure_freeze_length_mismatch_raises():
+    diffusion = create_diffusion(noisers=("cell_positions",))
+    atoms1, atoms2 = _test_atoms_variants()
+    g1 = AtomsGraph.from_atoms(atoms1, initialize_mask=False)
+    g2 = AtomsGraph.from_atoms(atoms2, initialize_mask=False)
+    mask1 = np.array([True] + [False] * (len(atoms1) - 1))
+    mask2 = np.array([True] + [False] * (len(atoms2) - 1))
+
+    with pytest.raises(ValueError, match="freeze must also be a list"):
+        diffusion.inpaint(
+            [g1, g2], [mask1, mask2],
+            freeze=[np.array([False] * len(atoms1))],
+        )
+
+
 # ---------------------------------------------------------------------------
 # select_atoms
 # ---------------------------------------------------------------------------

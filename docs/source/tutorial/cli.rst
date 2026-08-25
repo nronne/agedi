@@ -283,6 +283,24 @@ Key options:
 - ``--compile`` is not available for ``inpaint`` — the compiled reverse step
   bypasses samplers entirely, and inpainting is implemented as a sampler.
 
+Batching multiple structures
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When ``structure.traj`` (or any ASE-readable file) contains more than one
+frame, every frame is batched together and inpainted with the same
+selection options, re-resolved independently per structure — for GPU
+throughput, not per-structure customization. Structures need not share
+atom count, composition, or cell:
+
+.. code-block:: console
+
+   agedi inpaint logs/agedi/version_0 many_structures.traj --symbols O --n_samples 4
+
+``--n_samples`` becomes samples *per structure*. Output is one file per
+input structure, ``{name}_struct{j}.traj`` (or
+``{name}_struct{j}_sample{i}.traj`` with ``--save_trajectory``), instead of
+the single-structure ``{name}.traj`` / ``{name}_{i}.traj`` naming.
+
 Force-field guided training and sampling
 -----------------------------------------
 
