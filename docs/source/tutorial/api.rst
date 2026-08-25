@@ -525,6 +525,42 @@ structures, and returns predictions grouped the same way — so the output of a
 multi-structure ``inpaint(...)`` call can be passed straight into ``predict(...)``
 without flattening it first.
 
+Relaxation
+~~~~~~~~~~~
+
+:func:`~agedi.functional.relax` mirrors :func:`~agedi.functional.predict` --
+same model requirement, same batching, same cutoff resolution, same flat or
+grouped input/output shapes -- but instead of only evaluating energy and
+forces, it moves the atoms: batched L-BFGS steps (as ``ase.optimize.LBFGS``
+would take) using forces from the regressor, until the maximum per-atom force
+drops below ``force_threshold`` or ``max_steps`` is reached. Atoms held by an
+ASE ``FixAtoms`` constraint on the input structure stay frozen — the one
+behavioural difference from ``predict``, since freezing is meaningless when
+nothing moves:
+
+.. code-block:: python
+
+   from ase.io import read, write
+   from agedi import load_diffusion, relax
+
+   diffusion = load_diffusion("logs/agedi/version_0")
+
+   structures = read("structures.traj", index=":")
+   relaxed = relax(diffusion, structures, max_steps=200, force_threshold=0.05)
+
+   print(relaxed[0].get_potential_energy())  # eV, at the relaxed geometry
+   write("relaxed.traj", relaxed)
+
+Like ``predict``, ``relax`` accepts the grouped shape ``inpaint`` returns for
+a list of input structures, so a multi-structure inpainting result can be
+relaxed (and then predicted on) without flattening:
+
+.. code-block:: python
+
+   samples = inpaint(diffusion, structures, symbols=["O"], n_samples=4)
+   relaxed = relax(diffusion, samples)      # same grouping as samples
+   predicted = predict(diffusion, relaxed)  # same grouping again
+
 
 Core public functions
 ----------------------
@@ -537,6 +573,7 @@ Core public functions
 - :func:`~agedi.functional.train_from_config`
 - :func:`~agedi.functional.load_diffusion`
 - :func:`~agedi.functional.predict`
+- :func:`~agedi.functional.relax`
 - :func:`~agedi.functional.sample`
 - :func:`~agedi.functional.register_model`
 

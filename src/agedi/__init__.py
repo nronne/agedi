@@ -20,6 +20,7 @@ from .functional import (
     inpaint as inpaint,
     predict as predict,
     register_model as register_model,
+    relax as relax,
     sample as sample,
     select_atoms as select_atoms,
     train as train,
@@ -47,6 +48,9 @@ __all__ = [
     "train_from_atoms",
     "train_from_config",
     "load_diffusion",
+    "inpaint",
     "predict",
+    "relax",
     "sample",
+    "select_atoms",
 ]

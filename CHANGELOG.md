@@ -39,6 +39,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list, unchanged), and returns predictions grouped the same way — so a
   multi-structure `inpaint(...)` result can be passed straight into
   `predict(...)` without flattening it first.
+- **`agedi.relax()` / `agedi relax`** — batched L-BFGS relaxation of existing
+  structures using a trained force-field regressor, mirroring
+  `agedi.predict()` exactly (same model requirement, batching, cutoff
+  resolution, and flat/grouped input-output shapes — including the
+  `inpaint()`-compatible grouping). Takes one L-BFGS step per iteration until
+  the maximum per-atom force across the batch drops to or below
+  `force_threshold` or `max_steps` is reached; atoms held by an ASE
+  `FixAtoms` constraint on the input stay frozen. Reuses the same
+  `post_diffusion_relaxation_step()` machinery already used for
+  `max_extra_steps` during sampling, applied standalone.
 - `Noiser.forward_marginal()` / `Noiser.renoise()` hooks (implemented for the
   SDE-based position noisers and the discrete `Types` noiser) powering the
   above.

@@ -9,6 +9,7 @@ from agedi import (
     create_diffusion,
     load_diffusion,
     predict,
+    relax,
     sample,
     train,
     train_from_atoms,
@@ -676,6 +677,87 @@ def test_predict_flat_input_still_returns_flat_output():
     assert isinstance(results, list)
     assert len(results) == 3
     assert all(hasattr(a, "calc") and a.calc is not None for a in results)
+
+
+def test_relax_raises_without_regressor():
+    diffusion = create_diffusion(noisers=("cell_positions",))
+    assert diffusion.regressor_model is None
+
+    with pytest.raises(ValueError, match="force_field"):
+        relax(diffusion, [_test_atoms()])
+
+
+def test_relax_returns_atoms_with_predictions():
+    """relax should move atoms and return Atoms with energy/forces attached,
+    mirroring predict()'s calculator-attachment convention."""
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+    atoms = _test_atoms()
+
+    results = relax(diffusion, [atoms, atoms], max_steps=3, force_threshold=1e-6)
+
+    assert len(results) == 2
+    for result_atoms in results:
+        assert result_atoms.positions.shape == atoms.positions.shape
+        calc = result_atoms.calc
+        assert calc is not None
+        assert "energy" in calc.results
+        assert "forces" in calc.results
+        assert calc.results["forces"].shape == (len(atoms), 3)
+
+
+def test_relax_flat_input_still_returns_flat_output():
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+    atoms = _test_atoms()
+
+    results = relax(diffusion, [atoms, atoms, atoms], max_steps=2)
+
+    assert isinstance(results, list)
+    assert len(results) == 3
+
+
+def test_relax_accepts_grouped_structures_from_multi_structure_inpaint():
+    """relax() must accept the same grouped List[List[Atoms]] shape as
+    predict(), so inpaint() -> relax() chains without flattening."""
+    from agedi import inpaint
+
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+    atoms = _test_atoms()
+
+    grouped_input = inpaint(
+        diffusion, [atoms, atoms], indices=[0], n_samples=2, steps=3, eps=1e-2,
+    )
+
+    results = relax(diffusion, grouped_input, max_steps=2)
+
+    assert len(results) == len(grouped_input)
+    for group, src_group in zip(results, grouped_input):
+        assert len(group) == len(src_group)
+
+
+def test_relax_respects_fix_atoms_constraint():
+    """An atom held by ase.constraints.FixAtoms on the input structure must
+    not move during relaxation."""
+    from ase.constraints import FixAtoms
+
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+    atoms = _test_atoms()
+    atoms.set_constraint(FixAtoms(indices=[0]))
+    pos_before = atoms.positions.copy()
+
+    results = relax(diffusion, [atoms], max_steps=20, force_threshold=1e-8)
+
+    np.testing.assert_allclose(results[0].positions[0], pos_before[0], atol=1e-6)
+
+
+def test_relax_converges_and_stops_early():
+    """max_forces <= force_threshold on the initial evaluation should skip
+    the L-BFGS loop entirely (an impossibly high threshold always 'converges')."""
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+    atoms = _test_atoms()
+
+    results = relax(diffusion, [atoms], max_steps=1000, force_threshold=1e9)
+
+    np.testing.assert_allclose(results[0].positions, atoms.positions, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,9 @@ Main commands
 
 - ``agedi train``: train a diffusion model from a trajectory file or YAML config
 - ``agedi sample``: sample structures from a saved training run
+- ``agedi inpaint``: regenerate a chosen subset of atoms in an existing structure
 - ``agedi predict``: predict energies and forces for input structures (requires ``--force_field`` training)
+- ``agedi relax``: relax input structures with batched L-BFGS (requires ``--force_field`` training)
 - ``agedi inspect``: print ``hparams.yaml`` from a run directory
 
 To get information about options for each use
@@ -24,7 +26,7 @@ To get information about options for each use
 
    agedi train --help
 
-for ``train`` and likewise for ``sample``, ``predict``, and ``inspect``.
+for ``train`` and likewise for ``sample``, ``inpaint``, ``predict``, ``relax``, and ``inspect``.
 
 Training
 --------
@@ -422,6 +424,8 @@ In Python this is equivalent to:
 - ``max_extra_steps`` (int): maximum L-BFGS relaxation steps performed after the main
   diffusion trajectory; default ``0`` (disabled).
 
+.. _relaxing-without-guidance:
+
 Relaxing without guidance
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -498,6 +502,52 @@ In Python this is equivalent to:
    structures = read("structures.traj", index=":")
    predicted = predict(diffusion, structures)
    write("predicted.traj", predicted)
+
+Relaxing structures
+--------------------
+
+``agedi relax`` mirrors ``agedi predict`` -- same model requirement, same
+input/output conventions -- but moves the atoms with batched L-BFGS instead
+of only evaluating energy and forces once. It uses the same L-BFGS mechanism
+as ``max_extra_steps`` (see :ref:`Relaxing without guidance
+<relaxing-without-guidance>` above), but standalone: on *existing* structures
+from a file, independent of any diffusion sampling run.
+
+.. code-block:: console
+
+   agedi relax logs/agedi/version_0 structures.traj --max_steps 200 --force_threshold 0.05
+
+Takes one L-BFGS step per iteration (as ``ase.optimize.LBFGS`` would) using
+forces from the regressor, re-evaluating after each step, until the maximum
+per-atom force across the whole batch drops to or below ``--force_threshold``
+or ``--max_steps`` is reached. Atoms held by a ``FixAtoms`` constraint on the
+input structure stay frozen. Writes the relaxed structures, with final
+energies and forces attached, to ``relaxed.traj``.
+
+Key options:
+
+- ``--max_steps`` (default ``200``): maximum number of L-BFGS steps.
+- ``--force_threshold`` (default ``0.05`` eV/Å): convergence threshold on the
+  maximum per-atom force, checked across the whole batch.
+- ``--scale`` (default ``1.0``): multiplier on the computed step (ASE's
+  ``damping``).
+- ``--max_step_size`` (default ``0.2`` Å): maximum single-atom displacement
+  per step.
+- ``--progress_bar``: show a progress bar and print convergence status per
+  batch.
+- ``-o/--output``, ``--name``, ``-b/--batch_size``: same as ``agedi predict``.
+
+In Python this is equivalent to:
+
+.. code-block:: python
+
+   from ase.io import read, write
+   from agedi import load_diffusion, relax
+
+   diffusion = load_diffusion("logs/agedi/version_0")
+   structures = read("structures.traj", index=":")
+   relaxed = relax(diffusion, structures, max_steps=200, force_threshold=0.05)
+   write("relaxed.traj", relaxed)
 
 Inspect run metadata
 --------------------
