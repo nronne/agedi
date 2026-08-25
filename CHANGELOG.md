@@ -114,6 +114,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Atom selection via `agedi.api.select_atoms()`: `indices`, `symbols`,
     `z_range`, `sphere`, or `from_atoms`, combined by union; with none given, a
     random `fraction` (default 0.25) of the non-fixed atoms is selected.
+    `contiguous=True` changes the `fraction` fallback to grow a single
+    spatially-connected cluster (a random seed atom, then repeatedly the
+    closest remaining candidate) instead of a scattered random subset.
   - `t_start` below `1.0` starts from a partially-noised state for local
     rattle-and-relax refinement instead of full regeneration.
   - Optional RePaint-style resampling (`n_resample`, `jump_length`, off by
@@ -129,6 +132,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     independently per structure, and `n_samples` becomes samples per
     structure. Results are grouped one list per input structure. The CLI
     picks this up automatically when the input file has more than one frame.
+- `agedi.predict()` accepts the grouped `List[List[Atoms]]` shape
+  `inpaint()` returns for a list of input structures (in addition to a flat
+  list, unchanged), and returns predictions grouped the same way — so a
+  multi-structure `inpaint(...)` result can be passed straight into
+  `predict(...)` without flattening it first.
+- `agedi.relax()` accepts the same grouped `List[List[Atoms]]` shape as
+  `predict()` — nesting is auto-detected and the result is grouped the same
+  way — so `inpaint() -> relax() -> predict()` chains without flattening at
+  any step.
 - `Noiser.forward_marginal()` / `Noiser.renoise()` hooks (implemented for the
   SDE-based position noisers and the discrete `Types` noiser) powering
   inpainting.

@@ -1,6 +1,6 @@
 """Force-field prediction using a trained regressor."""
 
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Union
 
 import torch
 from ase import Atoms
@@ -13,11 +13,11 @@ from ._common import resolve_cutoff
 
 def predict(
     diffusion: "Agedi",
-    structures: Sequence[Atoms],
+    structures: Union[Sequence[Atoms], Sequence[Sequence[Atoms]]],
     *,
     batch_size: int = 64,
     cutoff: Optional[float] = None,
-) -> List[Atoms]:
+) -> Union[List[Atoms], List[List[Atoms]]]:
     """Predict energies and forces for input structures using a trained force-field.
 
     The model must have been trained with ``force_field=True`` (i.e. it must
@@ -31,7 +31,11 @@ def predict(
         A trained :class:`~agedi.Agedi` model with a force-field
         regressor (trained with ``--force_field``).
     structures:
-        Input ASE :class:`~ase.Atoms` objects to run predictions on.
+        Input ASE :class:`~ase.Atoms` objects to run predictions on, as a
+        flat list, or a list of lists -- the grouped shape
+        :func:`~agedi.api.inpainting.inpaint` returns for a list of input
+        structures. Nesting is auto-detected from the first element; the
+        return value is grouped the same way as the input.
     batch_size:
         Number of structures per inference batch.  Defaults to ``64``.
     cutoff:
@@ -40,10 +44,11 @@ def predict(
 
     Returns
     -------
-    List[Atoms]
+    List[Atoms] or List[List[Atoms]]
         The input structures with a
         :class:`~ase.calculators.singlepoint.SinglePointCalculator` attached
-        containing the predicted energy and/or forces.
+        containing the predicted energy and/or forces. Flat for a flat input,
+        or grouped the same way as a nested input.
 
     Raises
     ------
@@ -58,11 +63,18 @@ def predict(
             "Re-train with force_field=True to enable predictions."
         )
 
+    is_nested = len(structures) > 0 and isinstance(structures[0], (list, tuple))
+    if is_nested:
+        group_sizes = [len(g) for g in structures]
+        flat_structures = [a for g in structures for a in g]
+    else:
+        flat_structures = list(structures)
+
     cutoff = resolve_cutoff(diffusion, cutoff)
 
     device = next(diffusion.parameters()).device
 
-    graphs = [AtomsGraph.from_atoms(atoms, cutoff=cutoff) for atoms in structures]
+    graphs = [AtomsGraph.from_atoms(atoms, cutoff=cutoff) for atoms in flat_structures]
 
     n_structures = len(graphs)
     console = Console()
@@ -79,4 +91,13 @@ def predict(
                 results.append(graph.to_atoms())
 
     console.print(f"[green]✓[/green] Predictions complete for {len(results)} structure(s)")
-    return results
+
+    if not is_nested:
+        return results
+
+    grouped: List[List[Atoms]] = []
+    idx = 0
+    for size in group_sizes:
+        grouped.append(results[idx : idx + size])
+        idx += size
+    return grouped

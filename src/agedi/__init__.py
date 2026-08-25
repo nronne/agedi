@@ -48,7 +48,9 @@ __all__ = [
     "train_from_atoms",
     "train_from_config",
     "load_diffusion",
+    "inpaint",
     "predict",
     "relax",
     "sample",
+    "select_atoms",
 ]

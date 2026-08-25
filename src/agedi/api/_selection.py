@@ -16,6 +16,37 @@ def _fixed_mask(atoms: Atoms) -> np.ndarray:
     return fixed
 
 
+def _grow_contiguous_selection(
+    atoms: Atoms, candidates: np.ndarray, n_select: int, rng: np.random.Generator
+) -> np.ndarray:
+    """Greedily grow a spatially-connected cluster of *n_select* candidates.
+
+    Starts from one random candidate, then repeatedly attaches whichever
+    remaining candidate is geometrically closest to *any* atom already in the
+    growing cluster (nearest-neighbor agglomeration) -- the same idea as
+    building a minimum spanning tree one edge at a time. This keeps the
+    selection a single contiguous blob around the seed atom rather than
+    scattered points, without requiring a bonding cutoff. Distances use the
+    minimum-image convention when *atoms* has any periodic direction, so a
+    cluster can wrap across a periodic boundary correctly.
+    """
+    dist_matrix = atoms.get_all_distances(mic=bool(atoms.pbc.any()))
+
+    start = int(rng.choice(candidates))
+    selected = [start]
+    remaining = set(candidates.tolist())
+    remaining.discard(start)
+
+    while len(selected) < n_select and remaining:
+        remaining_arr = np.fromiter(remaining, dtype=int)
+        min_dists = dist_matrix[np.ix_(remaining_arr, selected)].min(axis=1)
+        nearest = int(remaining_arr[np.argmin(min_dists)])
+        selected.append(nearest)
+        remaining.discard(nearest)
+
+    return np.asarray(selected, dtype=int)
+
+
 def select_atoms(
     atoms: Atoms,
     *,
@@ -25,6 +56,7 @@ def select_atoms(
     sphere: Optional[Tuple[Sequence[float], float]] = None,
     from_atoms: bool = False,
     fraction: float = 0.25,
+    contiguous: bool = False,
     seed: Optional[int] = None,
 ) -> np.ndarray:
     """Resolve which atoms to inpaint from a combination of selection criteria.
@@ -57,6 +89,15 @@ def select_atoms(
     fraction : float, optional
         Fraction of the non-fixed atoms to select at random when no other
         criterion is given. Defaults to ``0.25``.
+    contiguous : bool, optional
+        When ``True``, the *fraction* fallback selects a spatially-connected
+        cluster of neighboring atoms instead of a scattered random subset:
+        one random seed atom, then repeatedly the geometrically closest
+        remaining candidate to the growing cluster, until *fraction* is
+        reached. Uses the minimum-image convention when *atoms* has any
+        periodic direction. Has no effect when any other selection criterion
+        is given (``fraction`` itself only applies as a fallback). Defaults
+        to ``False``.
     seed : int, optional
         Seed for the random fraction fallback, for reproducible selections.
 
@@ -115,7 +156,10 @@ def select_atoms(
             )
         rng = np.random.default_rng(seed)
         n_select = max(1, int(round(fraction * candidates.size)))
-        chosen = rng.choice(candidates, size=n_select, replace=False)
+        if contiguous:
+            chosen = _grow_contiguous_selection(atoms, candidates, n_select, rng)
+        else:
+            chosen = rng.choice(candidates, size=n_select, replace=False)
         mask[chosen] = True
 
     if not mask.any():

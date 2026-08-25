@@ -33,7 +33,7 @@ def _graph_from_atoms(atoms: Atoms, cutoff: float) -> AtomsGraph:
 
 def relax(
     diffusion: "Agedi",
-    structures: Sequence[Atoms],
+    structures: Union[Sequence[Atoms], Sequence[Sequence[Atoms]]],
     *,
     fmax: float = 0.05,
     steps: int = 200,
@@ -65,7 +65,10 @@ def relax(
         A trained :class:`~agedi.Agedi` model with a force-field regressor
         (trained with ``force_field=True``).
     structures:
-        Input ASE :class:`~ase.Atoms` objects to relax.
+        Input ASE :class:`~ase.Atoms` objects to relax, as a flat list, or a
+        list of lists — the grouped shape :func:`~agedi.api.inpainting.inpaint`
+        returns for a list of input structures.  Nesting is auto-detected
+        from the first element; the return value is grouped the same way.
     fmax:
         Convergence criterion: the maximum per-atom force magnitude in eV/Å.
         Defaults to ``0.05``, matching ASE's usual choice.
@@ -92,7 +95,10 @@ def relax(
         :class:`~ase.calculators.singlepoint.SinglePointCalculator` holding the
         predicted energy and forces.  When *trajectory* is ``True``, a list of
         trajectories (one list of :class:`~ase.Atoms` per input structure),
-        each starting at the input geometry.
+        each starting at the input geometry.  Flat for a flat input, or
+        grouped the same way as a nested input — so
+        ``inpaint() -> relax() -> predict()`` chains without flattening at
+        any step.
 
     Raises
     ------
@@ -114,10 +120,17 @@ def relax(
             "Re-train with force_field=True to enable relaxation."
         )
 
+    is_nested = len(structures) > 0 and isinstance(structures[0], (list, tuple))
+    if is_nested:
+        group_sizes = [len(g) for g in structures]
+        flat_structures = [a for g in structures for a in g]
+    else:
+        flat_structures = list(structures)
+
     cutoff = resolve_cutoff(diffusion, cutoff)
     device = next(diffusion.parameters()).device
 
-    graphs = [_graph_from_atoms(atoms, cutoff) for atoms in structures]
+    graphs = [_graph_from_atoms(atoms, cutoff) for atoms in flat_structures]
     n_structures = len(graphs)
 
     console = Console()
@@ -172,7 +185,7 @@ def relax(
 
             n_converged += int((per_graph_forces <= fmax).sum())
 
-            originals = structures[start : start + batch_size]
+            originals = flat_structures[start : start + batch_size]
             if trajectory:
                 # frames is [step][structure]; transpose to [structure][step].
                 for i, per_structure in enumerate(zip(*frames)):
@@ -190,7 +203,16 @@ def relax(
         f"[green]✓[/green] Relaxed {n_structures} structure(s); "
         f"{n_converged}/{n_structures} reached fmax <= {fmax}"
     )
-    return results
+
+    if not is_nested:
+        return results
+
+    grouped: List[List] = []
+    idx = 0
+    for size in group_sizes:
+        grouped.append(results[idx : idx + size])
+        idx += size
+    return grouped
 
 
 def _finalise(atoms: Atoms, original: Atoms) -> Atoms:

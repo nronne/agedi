@@ -9,6 +9,7 @@ from agedi import (
     create_diffusion,
     load_diffusion,
     predict,
+    relax,
     sample,
     train,
     train_from_atoms,
@@ -637,6 +638,126 @@ def test_predict_returns_atoms_with_predictions():
         assert "energy" in calc.results
         assert "forces" in calc.results
         assert calc.results["forces"].shape == (len(atoms), 3)
+
+
+def test_predict_accepts_grouped_structures_from_multi_structure_inpaint():
+    """predict() must accept the grouped List[List[Atoms]] shape that
+    inpaint() returns for a list of input structures, and return results
+    grouped the same way -- this is exactly the failure mode from chaining
+    inpaint([a, b]) straight into predict() without flattening first."""
+    from agedi import inpaint
+
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+    atoms = _test_atoms()
+
+    grouped_input = inpaint(
+        diffusion, [atoms, atoms], indices=[0], n_samples=2, steps=3, eps=1e-2,
+    )
+    assert isinstance(grouped_input, list) and isinstance(grouped_input[0], list)
+
+    results = predict(diffusion, grouped_input)
+
+    assert len(results) == len(grouped_input)
+    for group, src_group in zip(results, grouped_input):
+        assert len(group) == len(src_group)
+        for result_atoms in group:
+            calc = result_atoms.calc
+            assert calc is not None
+            assert "energy" in calc.results
+            assert "forces" in calc.results
+
+
+def test_predict_flat_input_still_returns_flat_output():
+    """A flat list of Atoms in must still give a flat list out (unchanged)."""
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+    atoms = _test_atoms()
+
+    results = predict(diffusion, [atoms, atoms, atoms])
+
+    assert isinstance(results, list)
+    assert len(results) == 3
+    assert all(hasattr(a, "calc") and a.calc is not None for a in results)
+
+
+def test_relax_raises_without_regressor():
+    diffusion = create_diffusion(noisers=("cell_positions",))
+    assert diffusion.regressor_model is None
+
+    with pytest.raises(ValueError, match="force_field"):
+        relax(diffusion, [_test_atoms()])
+
+
+def test_relax_returns_atoms_with_predictions():
+    """relax should move atoms and return Atoms with energy/forces attached,
+    mirroring predict()'s calculator-attachment convention."""
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+    atoms = _test_atoms()
+
+    results = relax(diffusion, [atoms, atoms], steps=3, fmax=1e-6)
+
+    assert len(results) == 2
+    for result_atoms in results:
+        assert result_atoms.positions.shape == atoms.positions.shape
+        calc = result_atoms.calc
+        assert calc is not None
+        assert "energy" in calc.results
+        assert "forces" in calc.results
+        assert calc.results["forces"].shape == (len(atoms), 3)
+
+
+def test_relax_flat_input_still_returns_flat_output():
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+    atoms = _test_atoms()
+
+    results = relax(diffusion, [atoms, atoms, atoms], steps=2)
+
+    assert isinstance(results, list)
+    assert len(results) == 3
+
+
+def test_relax_accepts_grouped_structures_from_multi_structure_inpaint():
+    """relax() must accept the same grouped List[List[Atoms]] shape as
+    predict(), so inpaint() -> relax() chains without flattening."""
+    from agedi import inpaint
+
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+    atoms = _test_atoms()
+
+    grouped_input = inpaint(
+        diffusion, [atoms, atoms], indices=[0], n_samples=2, steps=3, eps=1e-2,
+    )
+
+    results = relax(diffusion, grouped_input, steps=2)
+
+    assert len(results) == len(grouped_input)
+    for group, src_group in zip(results, grouped_input):
+        assert len(group) == len(src_group)
+
+
+def test_relax_respects_fix_atoms_constraint():
+    """An atom held by ase.constraints.FixAtoms on the input structure must
+    not move during relaxation."""
+    from ase.constraints import FixAtoms
+
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+    atoms = _test_atoms()
+    atoms.set_constraint(FixAtoms(indices=[0]))
+    pos_before = atoms.positions.copy()
+
+    results = relax(diffusion, [atoms], steps=20, fmax=1e-8)
+
+    np.testing.assert_allclose(results[0].positions[0], pos_before[0], atol=1e-6)
+
+
+def test_relax_converges_and_stops_early():
+    """max_forces <= fmax on the initial evaluation should skip the L-BFGS
+    loop entirely (an impossibly high threshold always 'converges')."""
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+    atoms = _test_atoms()
+
+    results = relax(diffusion, [atoms], steps=1000, fmax=1e9)
+
+    np.testing.assert_allclose(results[0].positions, atoms.positions, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -1325,6 +1446,36 @@ def test_inpaint_default_selection_is_random_fraction():
     assert (displacement > 1e-3).any()
 
 
+def test_inpaint_contiguous_forwarded_to_select_atoms():
+    """contiguous must reach select_atoms() through inpaint(), producing a
+    spatially-connected selection rather than a scattered one."""
+    from ase.build import bulk
+    from agedi import inpaint
+    from agedi.api import select_atoms
+
+    a = 3.6
+    atoms = bulk("Cu", "fcc", a=a, cubic=True) * (4, 4, 4)
+    lattice_nn_distance = a / np.sqrt(2)
+
+    diffusion = create_diffusion(noisers=("cell_positions",))
+
+    # inpaint() doesn't expose the resolved mask directly, so cross-check
+    # against select_atoms() called the same way -- both must agree that
+    # the selection is a tight cluster.
+    mask = select_atoms(atoms, fraction=0.1, seed=7, contiguous=True)
+    idx = np.flatnonzero(mask)
+    dist_matrix = atoms.get_all_distances(mic=True)[np.ix_(idx, idx)]
+    np.fill_diagonal(dist_matrix, np.inf)
+    mean_nn_dist = dist_matrix.min(axis=1).mean()
+    assert abs(mean_nn_dist - lattice_nn_distance) < 0.05
+
+    out = inpaint(
+        diffusion, atoms, n_samples=1, steps=3, eps=1e-2,
+        fraction=0.1, seed=7, contiguous=True,
+    )[0]
+    assert len(out) == len(atoms)
+
+
 def test_inpaint_symbols_selection():
     from agedi import inpaint
 
@@ -1556,6 +1707,70 @@ def test_select_atoms_default_fraction_is_deterministic_with_seed():
     mask_a = select_atoms(atoms, fraction=0.5, seed=42)
     mask_b = select_atoms(atoms, fraction=0.5, seed=42)
     assert mask_a.tolist() == mask_b.tolist()
+
+
+def test_select_atoms_contiguous_selects_same_count_as_random():
+    """contiguous=True must not change how many atoms fraction resolves to,
+    only their spatial arrangement."""
+    from ase.build import bulk
+    from agedi.api import select_atoms
+
+    atoms = bulk("Cu", "fcc", a=3.6, cubic=True) * (3, 3, 3)
+
+    mask_random = select_atoms(atoms, fraction=0.2, seed=1, contiguous=False)
+    mask_contig = select_atoms(atoms, fraction=0.2, seed=1, contiguous=True)
+
+    assert mask_contig.sum() == mask_random.sum()
+
+
+def test_select_atoms_contiguous_forms_a_tight_cluster():
+    """The contiguous selection's mean nearest-neighbor distance (among
+    selected atoms) should sit right at the lattice spacing -- a genuinely
+    connected blob, not scattered atoms that happen to be somewhat close."""
+    from ase.build import bulk
+    from agedi.api import select_atoms
+
+    a = 3.6
+    atoms = bulk("Cu", "fcc", a=a, cubic=True) * (4, 4, 4)
+    lattice_nn_distance = a / np.sqrt(2)
+
+    mask = select_atoms(atoms, fraction=0.15, seed=1, contiguous=True)
+    idx = np.flatnonzero(mask)
+    dist_matrix = atoms.get_all_distances(mic=True)[np.ix_(idx, idx)]
+    np.fill_diagonal(dist_matrix, np.inf)
+    mean_nn_dist = dist_matrix.min(axis=1).mean()
+
+    assert abs(mean_nn_dist - lattice_nn_distance) < 0.05
+
+
+def test_select_atoms_contiguous_reproducible_with_seed():
+    from ase.build import bulk
+    from agedi.api import select_atoms
+
+    atoms = bulk("Cu", "fcc", a=3.6, cubic=True) * (3, 3, 3)
+
+    mask_a = select_atoms(atoms, fraction=0.2, seed=42, contiguous=True)
+    mask_b = select_atoms(atoms, fraction=0.2, seed=42, contiguous=True)
+    assert mask_a.tolist() == mask_b.tolist()
+
+
+def test_select_atoms_contiguous_works_for_non_periodic_molecule():
+    from agedi.api import select_atoms
+
+    atoms = molecule("C6H6")
+    mask = select_atoms(atoms, fraction=0.5, seed=3, contiguous=True)
+    assert 0 < mask.sum() < len(atoms)
+
+
+def test_select_atoms_contiguous_ignored_when_other_criterion_given():
+    """contiguous only affects the fraction fallback; it must not change
+    behaviour when an explicit criterion is given."""
+    from agedi.api import select_atoms
+
+    atoms = _test_atoms()
+    mask_a = select_atoms(atoms, indices=[0], contiguous=True)
+    mask_b = select_atoms(atoms, indices=[0], contiguous=False)
+    assert mask_a.tolist() == mask_b.tolist() == [True, False, False]
 
 
 def test_select_atoms_default_respects_fix_atoms():

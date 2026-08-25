@@ -15,6 +15,7 @@ Main commands
 
 - ``agedi train``: train a diffusion model from a trajectory file or YAML config
 - ``agedi sample``: sample structures from a saved training run
+- ``agedi inpaint``: regenerate a chosen subset of atoms in an existing structure
 - ``agedi predict``: predict energies and forces for input structures (requires ``--force_field`` training)
 - ``agedi relax``: relax structures with the trained force field (requires ``--force_field`` training)
 - ``agedi inspect``: print ``hparams.yaml`` from a run directory
@@ -25,7 +26,7 @@ To get information about options for each use
 
    agedi train --help
 
-for ``train`` and likewise for ``sample``, ``predict``, and ``inspect``.
+for ``train`` and likewise for ``sample``, ``inpaint``, ``predict``, ``relax``, and ``inspect``.
 
 Training
 --------
@@ -268,6 +269,15 @@ selected instead:
    # Default: random 25% of the non-fixed atoms, reproducible via --seed
    agedi inpaint logs/agedi/version_0 structure.traj --seed 42
 
+   # Same 25%, but as one spatially-connected cluster instead of scattered atoms
+   agedi inpaint logs/agedi/version_0 structure.traj --seed 42 --contiguous
+
+``--contiguous`` only changes the ``--fraction`` fallback: instead of a
+scattered random subset, it grows a single connected blob from a random
+seed atom outward — useful for a localized defect region without knowing
+its center and radius up front the way ``--sphere_center``/``--sphere_radius``
+require.
+
 Key options:
 
 - ``--freeze``: comma-separated atom indices to hard-freeze (never move),
@@ -447,6 +457,8 @@ In Python this is equivalent to:
 - ``max_extra_steps`` (int): maximum L-BFGS relaxation steps performed after the main
   diffusion trajectory; default ``0`` (disabled).
 
+.. _relaxing-without-guidance:
+
 Relaxing without guidance
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -528,7 +540,10 @@ Relaxing structures
 -------------------
 
 The same L-BFGS optimiser that drives the post-diffusion relaxation is also
-available on its own, with no diffusion sampling involved:
+available on its own, with no diffusion sampling involved. ``agedi relax``
+mirrors ``agedi predict`` — same model requirement, same input/output
+conventions — but moves the atoms with batched L-BFGS instead of only
+evaluating energy and forces once:
 
 .. code-block:: console
 
@@ -564,6 +579,12 @@ The same caveats as for post-diffusion relaxation apply: pick ``fmax`` to suit
 the model's force range, and remember that the ``Forces`` head predicts forces
 directly rather than as :math:`-\partial E/\partial R`, so the field is not
 conservative and has no exact zero-force fixed point.
+
+Like ``predict``, ``relax`` accepts the grouped ``List[List[Atoms]]`` shape
+returned by :func:`~agedi.api.inpainting.inpaint` on a list of input
+structures — nesting is auto-detected, and the result is grouped the same
+way — so ``inpaint() -> relax() -> predict()`` chains without flattening at
+any step.
 
 Inspect run metadata
 --------------------
