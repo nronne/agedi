@@ -37,6 +37,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     other.
   - New public API in ``agedi.diffusion``: ``NoveltyGuidanceConfig``,
     ``FeatureArchive``, ``structure_features``, ``novelty_guidance_step``.
+- **Automatic calibration of the novelty guidance scale.**  Set
+  ``guidance=None`` and give ``target_displacement`` instead (default
+  ``0.2`` Å): how far novelty guidance should move a structure at typical
+  repulsion over the whole trajectory.  New ``NoveltyCalibrator`` measures the
+  gradient magnitude once, at the peak of the time window, and solves for the
+  scale that spends exactly that budget over the remaining schedule.
+  - ``guidance`` multiplies a raw backbone gradient, so its useful magnitude is
+    a property of the model's activations and changes with every retraining —
+    which in a global-optimisation loop is every iteration.  A displacement in
+    Ångström is a question that transfers; a hand-tuned scale is not.
+  - Measured at the window peak rather than the first step: at ``t -> 1`` the
+    samples are a noise gas whose gradient is both tiny and uninformative, and
+    dividing by it would produce a scale that saturates ``max_step_size`` for
+    the rest of the run.  Guidance is therefore zero on the rising edge, which
+    is the region where the kernel is dead anyway.
+  - The scale is then held fixed, so the per-structure spread survives:
+    structures repelled harder than typical still move further, and ones that
+    are already novel still barely move.
+  - One calibrator is built per ``sample()`` call and shared across batches, so
+    every sample in a run is driven at the same strength.  The result is
+    printed after sampling and left on ``diffusion.novelty_calibrator``
+    (``.guidance``, ``.gradient_scale``, ``.calibrated_at``) so it can be
+    pinned explicitly for a reproducible rerun.
+- Novelty guidance aborts with a clear ``RuntimeError`` when the feature
+  gradient is non-finite (typically two atoms driven onto each other, making
+  the interatomic unit vectors 0/0), and the resulting positions are checked
+  with the samplers' ``_check_finite`` before the neighbour-list kernel sees
+  them.
 - ``Translator.translate_input()`` accepts an optional ``positions`` override,
   applied before the input modules so that position-derived quantities are
   recomputed from it.  This allows a backbone pass that is differentiable with
@@ -127,6 +155,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was intermittently failing in CI.
 
 ### Changed
+- **Novelty guidance stability pass.**  Six changes to how the repulsion is
+  scaled and scheduled; all of them alter behaviour, so an existing
+  ``guidance`` value needs recalibrating (see the note below).
+  - The step is now scaled by ``dt``, so ``guidance`` is a property of the
+    trajectory rather than of its discretisation.  Previously the accumulated
+    bias grew linearly with ``steps``, and a value tuned at 200 steps was 2.5x
+    too strong at 500.
+  - ``schedule="gaussian"`` is the new default time weight,
+    ``exp(-(t - t_center)**2 / (2 * t_width**2))`` with ``t_center=0.5`` and
+    ``t_width=0.2``.  The old front-loaded ``t**zeta`` is still available as
+    ``schedule="power"``.  A bell is the right shape because the guidance is
+    only meaningful in a window: at ``t -> 1`` the samples are a noise gas
+    whose features sit far from every archive entry, so the kernel is dead and
+    the in-batch term merely amplifies noise, while at ``t -> 0`` the basin is
+    already committed and repulsion only distorts a finished geometry.
+  - ``sigma`` now defaults to ``None``, meaning *calibrate it against the
+    archive*: it is set to the ``sigma_quantile`` (default ``0.05``) quantile
+    of the archive's own pairwise feature distances.  A fixed bandwidth is a
+    guess in a feature space that is rebuilt on every retraining.  The resolved
+    value and the archive's 1/5/50% distance quantiles are printed in the
+    sampling-configuration panel.  New: ``FeatureArchive.distance_quantiles()``
+    and ``agedi.diffusion.resolve_novelty_config()``.
+  - ``max_step_size`` is applied as one rescaling per structure instead of a
+    per-atom clip.  The pooled-feature gradient is typically concentrated on a
+    handful of atoms, so per-atom clipping shortened only those and sheared the
+    structure; a single factor bounds the magnitude while keeping the step
+    parallel to the gradient.  Fixed template atoms are excluded from that
+    maximum — their displacement is discarded anyway, but they carry a
+    gradient and would otherwise shrink the step of the atoms that do move.
+  - ``normalize_density`` (new, on by default) divides each structure's
+    repulsion by its own kernel sum, clamped below at ``1.0``.  Without it the
+    gradient grows with the density of the archive, so the same ``guidance``
+    becomes steadily more aggressive as a global-optimisation campaign fills
+    the archive up.  The denominator is detached, and the clamp means a sample
+    far from everything is untouched.
+  - In-batch pairs are now counted once, like archive pairs.  The double sum
+    over the batch visits every pair twice, so ``include_batch=True`` silently
+    made in-batch repulsion twice as strong as the archive term and the two
+    could not be balanced.  New ``batch_weight`` sets their relative weight
+    explicitly.
 - Post-diffusion relaxation now evaluates the force field **once** per step
   instead of twice — the convergence check's forces are reused by the next
   step, halving the cost of relaxation.
@@ -138,6 +206,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Novelty guidance costs roughly one extra score-model forward *and* backward
   per reverse step (~2x measured), and is incompatible with ``compile=True``
   (a clear ``ValueError`` is raised).
+- Recalibrating ``guidance``: prefer not to.  Set ``guidance=None`` and pick a
+  ``target_displacement``, and the scale is derived per run.  If you do keep an
+  explicit number, the ``dt`` factor alone means the old value must be
+  multiplied by roughly ``steps``, and the density normalisation and halved
+  in-batch term reduce it further for dense archives.
 - Features live in the backbone's activation space and are only comparable
   within one model generation.  ``FeatureArchive`` must be rebuilt after every
   retraining; passing ``novelty_reference`` to ``sample()`` does this

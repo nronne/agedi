@@ -17,6 +17,7 @@ from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from agedi.data import Dataset
 from agedi.utils.loss_balance import LossBalanceSpec
 from agedi.data.callbacks import (
+    EMACallback,
     EpochProgressPrinter,
     GradNormLogger,
     HParamsMetricLogger,
@@ -82,6 +83,7 @@ _TRAINER_KEYS = frozenset(
         "log_dir",
         "project",
         "name",
+        "ema_decay",
         "log_interval",
         "gradient_clip_val",
         "progress_bar",
@@ -211,6 +213,7 @@ def create_trainer(
     repeat_epoch: Optional[int] = None,
     hparams: Optional[Dict] = None,
     extra_callbacks: Optional[List[Callback]] = None,
+    ema_decay: Optional[float] = None,
 ) -> Trainer:
     """Create a Lightning trainer configured for AGeDi.
 
@@ -267,6 +270,16 @@ def create_trainer(
     extra_callbacks:
         Extra Lightning callbacks to append to the default callback list.
         When ``None`` (default) only the built-in callbacks are used.
+    ema_decay:
+        When set, install an :class:`~agedi.data.callbacks.EMACallback`
+        with this decay rate. It maintains an exponential moving average of
+        every trainable parameter and copies it into the live model when
+        training stops, so sampling, checkpointing, and (deliberately) the
+        next call to ``fit()`` on this trainer all see the smoothed weights
+        rather than the last noisy gradient step. Particularly relevant for
+        GO-Diff-style loops that retrain the same trainer repeatedly on a
+        small, shifting replay buffer. ``None`` (default) disables it,
+        matching prior behaviour exactly.
 
     Returns
     -------
@@ -327,6 +340,9 @@ def create_trainer(
 
     if hparams is not None:
         callbacks.append(HParamsMetricLogger(hparams))
+
+    if ema_decay is not None:
+        callbacks.append(EMACallback(decay=ema_decay))
 
     if extra_callbacks is not None:
         callbacks.extend(extra_callbacks)

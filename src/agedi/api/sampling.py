@@ -90,7 +90,10 @@ def sample(
     novelty_guidance:
         Feature-space novelty guidance configuration, which repels samples
         away from structures that have already been found.  ``None`` (default)
-        disables it.  Incompatible with ``compile=True``.
+        disables it.  Incompatible with ``compile=True``.  When its ``sigma``
+        is ``None`` the kernel bandwidth is calibrated here against the
+        archive's own pairwise feature-distance distribution, and the resolved
+        value is printed alongside that distribution's quantiles.
     novelty_reference:
         Already-found structures to repel from.  Featurised here with the
         *current* score model — features are only comparable within one model
@@ -151,7 +154,20 @@ def sample(
             cutoff=cutoff,
             pool=novelty_guidance.pool if novelty_guidance is not None else "mean",
             n_template=0 if template is None else int(template.x.shape[0]),
+            fully_connected=getattr(diffusion, "fully_connected", False),
         )
+
+    # Resolve sigma against the archive here rather than inside the sampling
+    # loop, so the value actually used is the one printed below.
+    _novelty_quantiles = None
+    if novelty_guidance is not None and (
+        novelty_guidance.guidance is None or novelty_guidance.guidance != 0.0
+    ):
+        from agedi.diffusion.novelty import resolve_novelty_config as _resolve_novelty
+
+        novelty_guidance = _resolve_novelty(novelty_guidance, _archive)
+        if _archive is not None:
+            _novelty_quantiles = _archive.distance_quantiles()
 
     # Determine display name for the top-level sampler algorithm.
     if sampler is not None:
@@ -174,7 +190,16 @@ def sample(
         novelty_guidance=(
             novelty_guidance.guidance if novelty_guidance is not None else 0.0
         ),
+        novelty_target_displacement=(
+            novelty_guidance.target_displacement
+            if novelty_guidance is not None
+            else None
+        ),
         novelty_references=len(_archive) if _archive is not None else 0,
+        novelty_sigma=(
+            novelty_guidance.sigma if novelty_guidance is not None else None
+        ),
+        novelty_distance_quantiles=_novelty_quantiles,
         sampler=_sampler,
     )
 
@@ -212,6 +237,16 @@ def sample(
     elapsed = time.monotonic() - _start
     n_generated = len(sampled)
     Console().print(f"[green]✓[/green] Generated {n_generated} structure(s) in {elapsed:.1f}s")
+
+    # Report what auto-calibration settled on: the number is worth seeing, both
+    # to sanity-check it and to pin it explicitly for a reproducible rerun.
+    _calibrator = getattr(diffusion, "novelty_calibrator", None)
+    if _calibrator is not None and _calibrator.guidance is not None:
+        Console().print(
+            f"  novelty guidance calibrated to {_calibrator.guidance:.4g} "
+            f"at step {_calibrator.calibrated_at} "
+            f"(|grad| = {_calibrator.gradient_scale:.4g})"
+        )
 
     if not as_atoms:
         return sampled
