@@ -28,6 +28,14 @@ from .guidance import (
     force_field_guidance_step,
     post_diffusion_relaxation_step,
 )
+from .novelty import (
+    FeatureArchive,
+    NoveltyCalibrator,
+    NoveltyGuidanceConfig,
+    _time_factor as _novelty_time_factor,
+    novelty_guidance_step,
+    resolve_novelty_config,
+)
 
 
 @dataclasses.dataclass
@@ -40,6 +48,7 @@ class SamplingTimings:
     wrap_positions: float = 0.0
     neighbor_list: float = 0.0
     force_field_guidance: float = 0.0
+    novelty_guidance: float = 0.0
     guidance_wrap_positions: float = 0.0
     guidance_neighbor_list: float = 0.0
     post_diffusion_force_eval: float = 0.0
@@ -51,6 +60,7 @@ class SamplingTimings:
     reverse_step_calls: int = 0
     score_model_calls: int = 0
     force_field_calls: int = 0
+    novelty_guidance_calls: int = 0
     neighbor_list_calls: int = 0
     neighbor_list_rebuilds: int = 0
     guidance_neighbor_list_calls: int = 0
@@ -109,6 +119,7 @@ class Diffusion:
         self.eps = eps
         self.lbfgs_step_sizer: Optional[BatchedLBFGSStepSizer] = None
         self.zeta: float = 3.0
+        self.novelty_calibrator: Optional[NoveltyCalibrator] = None
 
         self.noiser_keys = [noiser.key for noiser in noisers]
         self.score_keys = [head.key for head in score_model.heads]
@@ -639,6 +650,14 @@ class Diffusion:
                     timings.guidance_neighbor_list_calls,
                 )
             )
+        if timings.novelty_guidance_calls > 0:
+            print(
+                self._format_timing_line(
+                    "novelty guidance",
+                    timings.novelty_guidance,
+                    timings.novelty_guidance_calls,
+                )
+            )
         if timings.post_diffusion_force_eval > 0:
             print(
                 self._format_timing_line(
@@ -731,6 +750,9 @@ class Diffusion:
         is_compiled: bool = False,
         sampler=None,
         sampler_kwargs=None,
+        novelty_guidance: Optional[NoveltyGuidanceConfig] = None,
+        novelty_archive: Optional[FeatureArchive] = None,
+        novelty_calibrator: Optional[NoveltyCalibrator] = None,
         save_corrector_frames: bool = False,
     ) -> List[AtomsGraph]:
         """Run the reverse-diffusion loop for a pre-built batch.
@@ -779,6 +801,19 @@ class Diffusion:
             Extra constructor arguments forwarded to the sampler when *sampler*
             is a string alias.  Keys override the defaults supplied by
             *corrector_steps* / *corrector_step_size*.
+        novelty_guidance : NoveltyGuidanceConfig, optional
+            Feature-space novelty guidance configuration.  ``None`` (default)
+            disables it.  Not supported on the compiled path.  A ``sigma`` of
+            ``None`` is resolved against *novelty_archive* once, before the
+            loop starts.
+        novelty_archive : FeatureArchive, optional
+            Features of already-found structures to repel from.  When ``None``,
+            only the in-batch repulsion term contributes.
+        novelty_calibrator : NoveltyCalibrator, optional
+            Supplies the guidance scale when ``novelty_guidance.guidance`` is
+            ``None``.  Pass the *same* calibrator for every batch of a run so
+            that all samples are driven at one strength; one is built here for
+            the schedule in use when none is given.
         save_corrector_frames : bool, optional
             Also record every Langevin corrector sub-step in the saved
             trajectory.  Only meaningful together with *save_trajectory* and a
@@ -793,6 +828,24 @@ class Diffusion:
         """
         if reverse_step_fn is None:
             reverse_step_fn = self.reverse_step
+
+        novelty_enabled = novelty_guidance is not None and (
+            novelty_guidance.guidance is None or novelty_guidance.guidance != 0.0
+        )
+        if novelty_enabled and is_compiled:
+            raise ValueError(
+                "Novelty guidance is not supported with compile=True. It "
+                "differentiates the backbone with respect to the atomic "
+                "positions, which the compiled reverse step does not expose. "
+                "Sample with compile=False to use novelty guidance."
+            )
+        if novelty_enabled:
+            # Resolve sigma against the archive once, not on every step: the
+            # calibration is an O(n^2) reduction over the archive features.
+            novelty_guidance = resolve_novelty_config(
+                novelty_guidance, novelty_archive
+            )
+            from agedi.diffusion.samplers import Sampler as _SamplerCls
 
         if steps < 2:
             return batch.to_data_list()
@@ -828,6 +881,15 @@ class Diffusion:
 
         ts = torch.linspace(1, eps, steps, device=self.device)
         dt = ts[0] - ts[1]
+
+        if novelty_enabled and novelty_guidance.guidance is None:
+            # Build the calibrator against the schedule actually being run, so
+            # the displacement budget is spread over this discretisation.
+            if novelty_calibrator is None:
+                novelty_calibrator = NoveltyCalibrator(
+                    novelty_guidance.target_displacement,
+                    dt * _novelty_time_factor(novelty_guidance, ts),
+                )
 
         # Inject call-counting wrappers so timings tracks actual score/ff invocations.
         _orig_score_fn = None
@@ -938,6 +1000,38 @@ class Diffusion:
                         )
                         batch.wrap_positions()
                         batch.update_graph()
+
+                # Feature-space novelty guidance, applied after the sampler
+                # step on the same footing as the force-field guidance above.
+                if novelty_enabled:
+                    if novelty_calibrator is not None:
+                        novelty_calibrator.begin_step(i)
+                    if timings is not None:
+                        batch = self._time_sampling_call(
+                            batch.pos.device,
+                            timings,
+                            "novelty_guidance",
+                            novelty_guidance_step,
+                            batch,
+                            self.score_model,
+                            novelty_archive,
+                            novelty_guidance,
+                            dt,
+                            novelty_calibrator,
+                        )
+                        timings.novelty_guidance_calls += 1
+                    else:
+                        batch = novelty_guidance_step(
+                            batch,
+                            self.score_model,
+                            novelty_archive,
+                            novelty_guidance,
+                            dt,
+                            novelty_calibrator,
+                        )
+                    _SamplerCls._check_finite(batch, "novelty guidance")
+                    batch.wrap_positions()
+                    batch.update_graph()
 
                 # Append sub-step frames produced inside sampler.step() —
                 # corrector steps when save_corrector_frames is set, and the
@@ -1071,6 +1165,9 @@ class Diffusion:
         compile: bool = False,
         sampler=None,
         sampler_kwargs=None,
+        novelty_guidance: Optional[NoveltyGuidanceConfig] = None,
+        novelty_archive: Optional[FeatureArchive] = None,
+        novelty_calibrator: Optional[NoveltyCalibrator] = None,
         save_corrector_frames: bool = False,
         **kwargs,
     ) -> List[AtomsGraph]:
@@ -1164,6 +1261,9 @@ class Diffusion:
             is_compiled=compile,
             sampler=sampler,
             sampler_kwargs=sampler_kwargs,
+            novelty_guidance=novelty_guidance,
+            novelty_archive=novelty_archive,
+            novelty_calibrator=novelty_calibrator,
             save_corrector_frames=save_corrector_frames,
         )
         self._sync_for_timing(batch.pos.device)
@@ -1193,6 +1293,9 @@ class Diffusion:
         confinement: Optional[Tuple[float, float]] = None,
         compile: bool = False,
         ff_guidance: Optional[ForcefieldGuidanceConfig] = None,
+        novelty_guidance: Optional[NoveltyGuidanceConfig] = None,
+        novelty_archive: Optional[FeatureArchive] = None,
+        novelty_calibrator: Optional[NoveltyCalibrator] = None,
         property: Optional[Dict] = None,
         progress_bar: Optional[bool] = False,
         save_trajectory: Optional[bool] = False,
@@ -1253,6 +1356,23 @@ class Diffusion:
             step for improved throughput on CUDA hardware.
         ff_guidance : ForcefieldGuidanceConfig, optional
             Force-field guidance configuration.
+        novelty_guidance : NoveltyGuidanceConfig, optional
+            Feature-space novelty guidance configuration, which repels samples
+            from already-found structures.  ``None`` (default) disables it.
+            Incompatible with ``compile=True``.
+        novelty_archive : FeatureArchive, optional
+            Features of the already-found structures to repel from, built with
+            :meth:`~agedi.diffusion.novelty.FeatureArchive.from_structures`.
+            Must be rebuilt whenever the score model is retrained, and — when
+            sampling on a *template* — built with ``n_template`` set to the
+            template's atom count, so the references are pooled over the same
+            atoms as the samples.  When ``None``, only the in-batch repulsion
+            term contributes.
+        novelty_calibrator : NoveltyCalibrator, optional
+            Supplies the guidance scale when ``novelty_guidance.guidance`` is
+            ``None``.  Built here for the schedule in use when not given, and
+            shared across every batch so that all samples are driven at one
+            strength.  Available afterwards as ``self.novelty_calibrator``.
         property : dict, optional
             Conditioning properties (key -> scalar tensor).
         progress_bar : bool, optional
@@ -1339,6 +1459,22 @@ class Diffusion:
         if template is not None and cell is None:
             cell = template.cell.detach().cpu().numpy()
 
+        # One calibrator for the whole run, not one per batch: every sample
+        # should be driven at the same strength, and the scale only needs
+        # measuring once.  Exposed afterwards as ``self.novelty_calibrator``
+        # so callers can report what it settled on.
+        if (
+            novelty_calibrator is None
+            and novelty_guidance is not None
+            and novelty_guidance.guidance is None
+        ):
+            _ts = torch.linspace(1, eps, steps, device=self.device)
+            novelty_calibrator = NoveltyCalibrator(
+                novelty_guidance.target_displacement,
+                (_ts[0] - _ts[1]) * _novelty_time_factor(novelty_guidance, _ts),
+            )
+        self.novelty_calibrator = novelty_calibrator
+
         kwargs: Dict = {}
         # Sampling-control parameters passed explicitly to _sample.
         sample_kwargs: Dict = {
@@ -1353,6 +1489,9 @@ class Diffusion:
             "compile": compile,
             "sampler": sampler,
             "sampler_kwargs": sampler_kwargs,
+            "novelty_guidance": novelty_guidance,
+            "novelty_archive": novelty_archive,
+            "novelty_calibrator": novelty_calibrator,
         }
         self.zeta = ff_guidance.zeta
 

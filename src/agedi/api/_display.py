@@ -346,6 +346,11 @@ def _print_sampling_config(
     confinement=None,
     property=None,
     force_field_guidance: float = 0.0,
+    novelty_guidance: Optional[float] = 0.0,
+    novelty_target_displacement: Optional[float] = None,
+    novelty_references: int = 0,
+    novelty_sigma: Optional[float] = None,
+    novelty_distance_quantiles=None,
     sampler: Optional[str] = None,
 ) -> None:
     """Print a Rich-formatted sampling configuration panel."""
@@ -373,6 +378,26 @@ def _print_sampling_config(
             table.add_row(f"  {k}", str(v))
     if force_field_guidance > 0.0:
         table.add_row("  ff_guidance", str(force_field_guidance))
+    if novelty_guidance is None or novelty_guidance != 0.0:
+        if novelty_guidance is None:
+            table.add_row(
+                "  novelty_guidance",
+                f"auto (target {novelty_target_displacement} Å)",
+            )
+        else:
+            table.add_row("  novelty_guidance", str(novelty_guidance))
+        table.add_row("  novelty_refs", str(novelty_references))
+        if novelty_sigma is not None:
+            table.add_row("  novelty_sigma", f"{novelty_sigma:.4f}")
+        if novelty_distance_quantiles is not None:
+            # The archive's own pairwise feature-distance spread: this is what
+            # novelty_sigma has to be read against, and it changes with every
+            # retraining of the score model.
+            q1, q5, q50 = (float(x) for x in novelty_distance_quantiles)
+            table.add_row(
+                "  archive d(1/5/50%)",
+                f"{q1:.4f} / {q5:.4f} / {q50:.4f}",
+            )
     if sampler is not None:
         table.add_row("  sampler", str(sampler))
 
