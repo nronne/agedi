@@ -83,7 +83,8 @@ default so you only need to set the values that differ from those defaults.
    reference_energies: auto
 
    # Loss for the forces head: huber (default) | mse | mae, and the Huber
-   # transition point in eV/Å.
+   # transition point in eV/Å. Applies to the derived forces too when
+   # conservative_forces is enabled.
    force_loss: huber
    huber_delta: 0.01
 
@@ -97,6 +98,11 @@ default so you only need to set the values that differ from those defaults.
    # regressor_loss_weight above.
    loss_balance: null
    loss_balance_momentum: 0.99
+
+   # Derive forces as -dE/dR by autograd through the energy head instead of a
+   # dedicated forces head (force_field only). Guarantees energy/force
+   # consistency at the cost of a backward pass on every regressor call.
+   conservative_forces: false
 
    # Number of element-type classes for the Types noiser (excluding the absorbing
    # state at index 0).  When null, all distinct element types in the training data

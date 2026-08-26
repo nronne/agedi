@@ -384,6 +384,25 @@ The equivalent keys in ``train.yaml`` are ``reference_energies``,
 ``force_loss``, ``huber_delta``, ``regressor_loss_weight``, and
 ``loss_balance``.
 
+**Conservative forces**
+
+By default the forces head is trained independently of the energy head, so
+the predicted forces are not guaranteed to be the gradient of the predicted
+energy. ``--conservative_forces`` drops the forces head and instead derives
+the forces as :math:`F = -\partial E/\partial R` by differentiating the
+predicted energy, guaranteeing energy/force consistency and letting the force
+labels also train the energy surface.
+
+.. code-block:: console
+
+   agedi train --force_field --conservative_forces training_data.traj
+
+This adds a backward pass to every regressor call, which roughly doubles the
+cost of force-field guided sampling (``--ff_guidance``) and post-diffusion
+relaxation; training and prediction cost increase similarly but are usually a
+minor fraction of total runtime. The equivalent key in ``train.yaml`` is
+``conservative_forces``.
+
 **Regressor-only dataset**
 
 You can optionally supply a second dataset that is used *exclusively* to train

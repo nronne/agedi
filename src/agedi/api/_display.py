@@ -273,6 +273,12 @@ def _print_training_config(hparams: dict) -> None:
         loss_weight = hparams.get("regressor_loss_weight")
         if loss_weight is not None:
             meta.add_row("  regressor_loss_weight", str(loss_weight))
+        meta.add_row(
+            "  forces",
+            "conservative (-dE/dR)"
+            if hparams.get("conservative_forces")
+            else "direct head",
+        )
 
     meta.add_row("", "")
     meta.add_row("[bold]Trainer[/bold]", "")

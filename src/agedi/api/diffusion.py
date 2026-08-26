@@ -34,6 +34,7 @@ def create_diffusion(
     regressor_loss_weight: float = 1.0,
     loss_balance: "LossBalanceSpec" = None,
     loss_balance_momentum: float = 0.99,
+    conservative_forces: bool = False,
     lr: float = 1e-4,
     lr_factor: float = 0.95,
     lr_patience: int = 100,
@@ -130,6 +131,12 @@ def create_diffusion(
     loss_balance_momentum : float, optional
         Momentum of the running loss-magnitude averages used by
         ``loss_balance``.  Defaults to ``0.99``.
+    conservative_forces : bool, optional
+        When ``True``, drop the forces head and instead compute forces as
+        ``-dE/dR`` by autograd through the energy head, guaranteeing
+        energy/force consistency at the cost of a backward pass on every
+        regressor call (this also slows down force-field guided sampling).
+        Only used when ``force_field=True``.  Defaults to ``False``.
     lr : float, optional
         Learning rate.  Defaults to ``1e-4``.
     lr_factor : float, optional
@@ -210,6 +217,7 @@ def create_diffusion(
             reference_energies=reference_energies,
             force_loss=force_loss,
             huber_delta=huber_delta,
+            conservative_forces=conservative_forces,
         )
 
     return Agedi(

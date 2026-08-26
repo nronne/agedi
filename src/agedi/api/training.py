@@ -54,6 +54,7 @@ _TRAIN_FROM_ATOMS_KEYS = frozenset(
         "regressor_loss_weight",
         "loss_balance",
         "loss_balance_momentum",
+        "conservative_forces",
         "batch_size",
         "train_split",
         "val_split",
@@ -164,8 +165,8 @@ def _forcefield_hparams(diffusion: "Agedi") -> Dict:
     dict
         Display metadata: ``force_field`` and, when a regressor is attached,
         ``reference_energies`` (keyed by chemical symbol), ``force_loss``,
-        ``huber_delta``, and whichever of ``loss_balance`` /
-        ``regressor_loss_weight`` is in effect.
+        ``huber_delta``, whichever of ``loss_balance`` /
+        ``regressor_loss_weight`` is in effect, and ``conservative_forces``.
     """
     from ase.data import chemical_symbols
 
@@ -191,6 +192,7 @@ def _forcefield_hparams(diffusion: "Agedi") -> Dict:
         config = regressor.get_config()
         info["force_loss"] = config["force_loss"]
         info["huber_delta"] = config["huber_delta"]
+        info["conservative_forces"] = config.get("conservative_forces", False)
     return info
 
 
@@ -434,6 +436,7 @@ def train_from_atoms(
     regressor_loss_weight: float = 1.0,
     loss_balance: "LossBalanceSpec" = None,
     loss_balance_momentum: float = 0.99,
+    conservative_forces: bool = False,
     batch_size: int = 64,
     train_split: Union[float, int] = 0.9,
     val_split: Union[float, int] = 0.1,
@@ -555,6 +558,11 @@ def train_from_atoms(
     loss_balance_momentum:
         Momentum of the running loss-magnitude averages used by
         *loss_balance*.  Default: ``0.99``.
+    conservative_forces:
+        When ``True``, drop the forces head and compute forces as ``-dE/dR``
+        by autograd through the energy head, guaranteeing energy/force
+        consistency at the cost of a backward pass on every regressor call.
+        Only used when ``force_field=True``.  Default: ``False``.
     batch_size:
         Mini-batch size used during training.  Default: ``64``.
     train_split:
@@ -691,6 +699,7 @@ def train_from_atoms(
             regressor_loss_weight=regressor_loss_weight,
             loss_balance=loss_balance,
             loss_balance_momentum=loss_balance_momentum,
+            conservative_forces=conservative_forces,
             lr=lr,
             lr_factor=lr_factor,
             lr_patience=lr_patience,

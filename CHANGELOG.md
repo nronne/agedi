@@ -147,6 +147,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `AtomsGraph.to_atoms()` writes the inpainting selection back as
   `atoms.arrays["inpaint_mask"]` when present, so a result can be re-fed as
   `from_atoms=True` input.
+- **Conservative forces for force-field training** — `conservative_forces=True`
+  on `create_diffusion()` / `train_from_atoms()` / the training config (or
+  `agedi train --conservative_forces`) derives forces as `F = -dE/dR` by
+  autograd through the energy head instead of using a dedicated forces head.
+  This guarantees energy/force consistency and lets force labels also train
+  the energy surface, at the cost of a backward pass on every regressor call
+  (this also slows down force-field guided sampling and post-diffusion
+  relaxation). Implemented in `agedi.models.regressor.RegressorModel`;
+  disabled by default, so existing checkpoints and behaviour are unchanged.
 
 ### Fixed
 - **Post-diffusion relaxation no longer breaks on periodic structures.**

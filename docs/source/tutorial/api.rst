@@ -572,6 +572,30 @@ Two consequences worth knowing:
   unbalanced run.  Treat the learning rate as needing a fresh look when
   switching a run over to ``loss_balance``.
 
+**Conservative forces**
+
+By default the forces are predicted by a dedicated head, independently of the
+energy — so they are not guaranteed to be the gradient of the predicted
+energy. Passing ``conservative_forces=True`` instead derives the forces as
+:math:`F = -\partial E/\partial R` by differentiating the energy prediction,
+which guarantees energy/force consistency and lets the force labels also
+train the energy surface. It drops the forces head entirely, so it cannot be
+combined with an explicit ``force_loss``/``huber_delta`` setup for a separate
+head — those options simply apply to the derived forces instead:
+
+.. code-block:: python
+
+   diffusion, dataset, trainer = train_from_atoms(
+       data,
+       force_field=True,
+       conservative_forces=True,
+   )
+
+Conservative forces require a backward pass through the energy head on every
+regressor call, which roughly doubles the cost of force-field guided sampling
+(``ff_guidance``) and post-diffusion relaxation. Prediction and training cost
+increase similarly but are usually a minor fraction of total runtime.
+
 Once trained, use :func:`~agedi.functional.predict` to run energy and force
 predictions on existing structures.  The results are returned as ASE
 :class:`~ase.Atoms` objects with a
