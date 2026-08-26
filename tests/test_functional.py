@@ -175,6 +175,82 @@ def test_load_diffusion_with_force_field_round_trip(tmp_path):
     assert loaded.regressor_model.translator is loaded.score_model.translator
     assert loaded.regressor_model.representation is loaded.score_model.representation
 
+def test_diffusion_get_hparams_with_conservative_forces():
+    """conservative_forces=True must build only an energy head and carry the
+    flag through regressor_kwargs so it survives the hparams round-trip."""
+    diffusion = create_diffusion(
+        noisers=("cell_positions",), force_field=True, conservative_forces=True
+    )
+    hparams = diffusion.get_hparams()
+
+    assert "regressor_heads" in hparams
+    assert len(hparams["regressor_heads"]) == 1, (
+        "conservative_forces=True must not build a separate forces head"
+    )
+    assert hparams["regressor_kwargs"]["conservative_forces"] is True
+
+
+def test_load_diffusion_with_conservative_forces_round_trip(tmp_path):
+    """load_diffusion should correctly restore a conservative-forces regressor."""
+    diffusion = create_diffusion(
+        noisers=("cell_positions",), force_field=True, conservative_forces=True
+    )
+    log_dir = tmp_path / "logs" / "version_0"
+    checkpoint_dir = log_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+
+    hparams = {"diffusion": diffusion.get_hparams()}
+    with open(log_dir / "hparams.yaml", "w") as f:
+        yaml.dump(hparams, f, default_flow_style=False)
+
+    torch.save({"state_dict": diffusion.state_dict()}, checkpoint_dir / "last_model.ckpt")
+
+    loaded = load_diffusion(log_dir)
+    assert isinstance(loaded, Agedi)
+    assert loaded.regressor_model is not None
+    assert loaded.regressor_model.conservative_forces is True
+    assert len(loaded.regressor_model.heads) == 1
+    assert loaded.regressor_model.translator is loaded.score_model.translator
+    assert loaded.regressor_model.representation is loaded.score_model.representation
+
+
+def test_old_style_hparams_without_conservative_forces_key_still_load(tmp_path):
+    """Checkpoints written before conservative_forces existed lack the key in
+    regressor_kwargs; they must still rebuild a (non-conservative) regressor."""
+    diffusion = create_diffusion(noisers=("cell_positions",), force_field=True)
+    hparams = diffusion.get_hparams()
+    del hparams["regressor_kwargs"]["conservative_forces"]
+
+    log_dir = tmp_path / "logs" / "version_0"
+    checkpoint_dir = log_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    with open(log_dir / "hparams.yaml", "w") as f:
+        yaml.dump({"diffusion": hparams}, f, default_flow_style=False)
+    torch.save({"state_dict": diffusion.state_dict()}, checkpoint_dir / "last_model.ckpt")
+
+    loaded = load_diffusion(log_dir)
+    assert loaded.regressor_model.conservative_forces is False
+    assert len(loaded.regressor_model.heads) == 2
+
+
+def test_predict_with_conservative_forces():
+    """predict() must return energy and force predictions with conservative_forces=True."""
+    diffusion = create_diffusion(
+        noisers=("cell_positions",), force_field=True, conservative_forces=True
+    )
+    structures = [_test_atoms(), _test_atoms()]
+    results = predict(diffusion, structures)
+
+    assert len(results) == len(structures)
+    for atoms in results:
+        assert atoms.calc is not None
+        energy = atoms.get_potential_energy()
+        forces = atoms.get_forces()
+        assert np.isfinite(energy)
+        assert forces.shape == (len(atoms), 3)
+        assert np.all(np.isfinite(forces))
+
+
 def test_diffusion_on_fit_start_writes_hparams(tmp_path):
     """Agedi.on_fit_start should write hparams.yaml to the log directory."""
     from unittest.mock import MagicMock

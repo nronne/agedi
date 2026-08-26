@@ -19,6 +19,7 @@ click.rich_click.OPTION_GROUPS.update(
                     "--reference_energies",
                     "--force_loss",
                     "--huber_delta",
+                    "--conservative_forces",
                 ],
             },
             {
@@ -180,6 +181,17 @@ _DEFAULT_NOISER = "CellPositions"
     default=0.01,
     show_default=True,
     help="Transition point (eV/Å) of the Huber force loss: quadratic below, linear above.",
+)
+@click.option(
+    "--conservative_forces",
+    is_flag=True,
+    default=False,
+    help=(
+        "Derive forces as -dE/dR by autograd through the energy head instead of "
+        "using a dedicated forces head. Guarantees energy/force consistency at the "
+        "cost of a backward pass on every regressor call (also slows down "
+        "force-field guided sampling). Only used when --force_field is set."
+    ),
 )
 @click.option(
     "--epochs",
@@ -411,6 +423,7 @@ def train(**params) -> None:
             reference_energies=_parse_reference_energies(params["reference_energies"]),
             force_loss=params["force_loss"],
             huber_delta=params["huber_delta"],
+            conservative_forces=params["conservative_forces"],
             mask=params["mask"],
             confinement=params["confinement"],
             batch_size=params["batch_size"],

@@ -49,6 +49,7 @@ _TRAIN_FROM_ATOMS_KEYS = frozenset(
         "reference_energies",
         "force_loss",
         "huber_delta",
+        "conservative_forces",
         "batch_size",
         "train_split",
         "val_split",
@@ -157,8 +158,8 @@ def _forcefield_hparams(diffusion: "Agedi") -> Dict:
     -------
     dict
         Display metadata: ``force_field`` and, when a regressor is attached,
-        ``reference_energies`` (keyed by chemical symbol), ``force_loss``, and
-        ``huber_delta``.
+        ``reference_energies`` (keyed by chemical symbol), ``force_loss``,
+        ``huber_delta``, and ``conservative_forces``.
     """
     from ase.data import chemical_symbols
 
@@ -177,6 +178,7 @@ def _forcefield_hparams(diffusion: "Agedi") -> Dict:
         config = regressor.get_config()
         info["force_loss"] = config["force_loss"]
         info["huber_delta"] = config["huber_delta"]
+        info["conservative_forces"] = config.get("conservative_forces", False)
     return info
 
 
@@ -403,6 +405,7 @@ def train_from_atoms(
     reference_energies: Union[str, Mapping[Union[int, str], float], None] = "auto",
     force_loss: str = "huber",
     huber_delta: float = 0.01,
+    conservative_forces: bool = False,
     batch_size: int = 64,
     train_split: Union[float, int] = 0.9,
     val_split: Union[float, int] = 0.1,
@@ -501,6 +504,11 @@ def train_from_atoms(
         gradient.
     huber_delta:
         Transition point of the Huber force loss in eV/Å.  Default: ``0.01``.
+    conservative_forces:
+        When ``True``, drop the forces head and compute forces as ``-dE/dR``
+        by autograd through the energy head, guaranteeing energy/force
+        consistency at the cost of a backward pass on every regressor call.
+        Only used when ``force_field=True``.  Default: ``False``.
     batch_size:
         Mini-batch size used during training.  Default: ``64``.
     train_split:
@@ -634,6 +642,7 @@ def train_from_atoms(
             reference_energies=resolved_reference_energies,
             force_loss=force_loss,
             huber_delta=huber_delta,
+            conservative_forces=conservative_forces,
             lr=lr,
             lr_factor=lr_factor,
             lr_patience=lr_patience,

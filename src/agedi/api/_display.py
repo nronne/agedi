@@ -265,6 +265,12 @@ def _print_training_config(hparams: dict) -> None:
                 else str(force_loss)
             )
             meta.add_row("  force_loss", detail)
+        meta.add_row(
+            "  forces",
+            "conservative (-dE/dR)"
+            if hparams.get("conservative_forces")
+            else "direct head",
+        )
 
     meta.add_row("", "")
     meta.add_row("[bold]Trainer[/bold]", "")
