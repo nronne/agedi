@@ -5,6 +5,19 @@ All notable changes to AGeDi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Conservative forces for force-field training** — `conservative_forces=True`
+  on `create_diffusion()` / `train_from_atoms()` / the training config (or
+  `agedi train --conservative_forces`) derives forces as `F = -dE/dR` by
+  autograd through the energy head instead of using a dedicated forces head.
+  This guarantees energy/force consistency and lets force labels also train
+  the energy surface, at the cost of a backward pass on every regressor call
+  (this also slows down force-field guided sampling and post-diffusion
+  relaxation). Implemented in `agedi.models.regressor.RegressorModel`;
+  disabled by default, so existing checkpoints and behaviour are unchanged.
+
 ## [1.4.0] - 2026-08-11
 
 ### Added

@@ -20,6 +20,24 @@ class RegressorModel(LightningModule):
     It is a combination of a translator, a representation
     and a list of heads.
 
+    Forces are predicted in one of two ways:
+
+    * **Direct** (default) — a dedicated ``forces`` head emits a vector per
+      atom.  Fast, but the forces are *not* the gradient of the predicted
+      energy, so the model is non-conservative.
+    * **Conservative** (``conservative_forces=True``) — no forces head is used;
+      instead the forces are obtained by differentiating the predicted energy
+      with respect to the atomic positions,
+
+      .. math::
+
+          F_i = -\\frac{\\partial E}{\\partial R_i}.
+
+      This guarantees energy/force consistency and lets force labels train the
+      energy surface itself, at the cost of a backward pass on every forward
+      call.  Requires an ``energy`` head and is incompatible with a ``forces``
+      head.
+
     Parameters
     ----------
     translator: Translator
@@ -44,6 +62,9 @@ class RegressorModel(LightningModule):
         data (eV/Å for ASE data).  Defaults to ``0.01``.
     energy_loss: str
         Point-wise loss used for the energy head.  Defaults to ``"mse"``.
+    conservative_forces: bool
+        When ``True``, compute forces as ``-dE/dR`` by autograd instead of from
+        a dedicated forces head.  Defaults to ``False``.
 
     """
 
@@ -58,6 +79,7 @@ class RegressorModel(LightningModule):
         force_loss: str = "huber",
         huber_delta: float = 0.01,
         energy_loss: str = "mse",
+        conservative_forces: bool = False,
         **kwargs
     ):
         """Constructor for the ScoreModel class."""
@@ -80,11 +102,32 @@ class RegressorModel(LightningModule):
         self.force_loss = force_loss
         self.huber_delta = float(huber_delta)
         self.energy_loss = energy_loss
+        self.conservative_forces = bool(conservative_forces)
 
         self.head_keys = [head.key for head in heads]
         for key in self.head_keys:
             if key not in ["energy", "forces"]:
                 raise ValueError(f"Head key {key} not recognized.")
+
+        if self.conservative_forces:
+            if "energy" not in self.head_keys:
+                raise ValueError(
+                    "conservative_forces=True requires an 'energy' head: the "
+                    "forces are computed as -dE/dR."
+                )
+            if "forces" in self.head_keys:
+                raise ValueError(
+                    "conservative_forces=True is incompatible with a 'forces' "
+                    "head; the forces are derived from the energy head, so the "
+                    "forces head must be removed."
+                )
+
+        # The keys that contribute to the loss.  With conservative forces the
+        # forces are predicted without a head, so this is decoupled from
+        # ``head_keys``.
+        self.loss_keys = list(self.head_keys)
+        if self.conservative_forces:
+            self.loss_keys.append("forces")
 
         self.heads = torch.nn.ModuleList(heads)
 
@@ -108,6 +151,7 @@ class RegressorModel(LightningModule):
             "force_loss": self.force_loss,
             "huber_delta": float(self.huber_delta),
             "energy_loss": self.energy_loss,
+            "conservative_forces": bool(self.conservative_forces),
         }
 
     def get_hparams(self) -> Dict:
@@ -127,6 +171,121 @@ class RegressorModel(LightningModule):
             **self.get_config(),
         }
 
+    def _mask_forces(self, batch: Batch, forces: torch.Tensor) -> torch.Tensor:
+        """Zero the forces on masked (fixed) atoms.
+
+        The masking is done out-of-place so that the result stays safe to
+        differentiate through a second time (needed when the forces come from
+        :func:`torch.autograd.grad` with ``create_graph=True``).
+
+        Parameters
+        ----------
+        batch: Batch
+            The batch the forces belong to.
+        forces: torch.Tensor
+            The predicted forces.
+
+        Returns
+        -------
+        torch.Tensor
+            The forces with masked atoms set to zero, or *forces* unchanged
+            when masking is disabled or the batch carries no mask.
+
+        """
+        if not self.mask_forces or not hasattr(batch, "mask"):
+            return forces
+        return torch.where(batch.positions_mask, torch.zeros_like(forces), forces)
+
+    def _forward_heads(self, batch: Batch) -> Batch:
+        """Run the backbone and every head, attaching their predictions.
+
+        Parameters
+        ----------
+        batch: Batch
+            The input batch.
+
+        Returns
+        -------
+        Batch
+            The batch with one ``<key>_prediction`` entry per head.
+
+        """
+        translated_batch = self.translator.translate_input(batch)
+
+        rep = self.representation(translated_batch)
+        batch = self.translator.add_representation(batch, rep)
+        translated_batch = self.translator.translate_with_representation(batch)
+
+        for head in self.heads:
+            predictions = {}
+            predictions[head.key] = head(translated_batch)
+
+            if head.key == "forces":
+                predictions[head.key] = self._mask_forces(
+                    batch, predictions[head.key]
+                )
+
+            if head.key == "energy":
+                type = "graph"
+            elif head.key == "forces":
+                type = "node"
+            else:
+                type = None
+            batch = self.translator.add_prediction(batch, predictions, type=type)
+
+        return batch
+
+    def _forward_conservative(self, batch: Batch) -> Batch:
+        """Run the heads and derive the forces as ``-dE/dR``.
+
+        The positions are temporarily replaced by a grad-tracking copy written
+        straight into the batch store.  Going through the ``pos`` setter would
+        invalidate the cached neighbour list (``clear_graph``) and apply the
+        in-place masked write, neither of which is wanted here.
+
+        Parameters
+        ----------
+        batch: Batch
+            The input batch.
+
+        Returns
+        -------
+        Batch
+            The batch with ``energy_prediction`` and ``forces_prediction`` set.
+
+        """
+        create_graph = self.training
+
+        original_pos = batch._store["pos"]
+        pos = original_pos.detach().requires_grad_(True)
+        batch._store["pos"] = pos
+        try:
+            with torch.enable_grad():
+                batch = self._forward_heads(batch)
+                grad = torch.autograd.grad(
+                    batch.energy_prediction.sum(),
+                    pos,
+                    create_graph=create_graph,
+                    allow_unused=True,
+                )[0]
+        finally:
+            batch._store["pos"] = original_pos
+
+        if grad is None:
+            raise RuntimeError(
+                "The predicted energy does not depend on the atomic positions, "
+                "so conservative forces cannot be computed. Check that the "
+                "translator passes the positions through to the representation."
+            )
+
+        forces = -grad
+        if not create_graph:
+            forces = forces.detach()
+            batch.energy_prediction = batch.energy_prediction.detach()
+
+        forces = self._mask_forces(batch, forces)
+        return self.translator.add_prediction(batch, {"forces": forces}, type="node")
+
     def forward(self, batch: Batch) -> Batch:
         """Forward pass of the model.
 
@@ -141,30 +300,9 @@ class RegressorModel(LightningModule):
             The output batch containing the scores.
 
         """
-        translated_batch = self.translator.translate_input(batch)
-        
-        rep = self.representation(translated_batch)
-        batch = self.translator.add_representation(batch, rep)
-        translated_batch = self.translator.translate_with_representation(batch)
-
-        for head in self.heads:
-            predictions = {}
-            predictions[head.key] = head(translated_batch)
-
-            if head.key == "forces":
-                if hasattr(batch, 'mask') and self.mask_forces:
-                    predictions[head.key][batch.positions_mask] = 0.0
-
-            if head.key == "energy":
-                type = "graph"
-            elif head.key == "forces":
-                type = "node"
-            else:
-                type = None
-            batch = self.translator.add_prediction(batch, predictions, type=type)
-
-
-        return batch
+        if self.conservative_forces:
+            return self._forward_conservative(batch)
+        return self._forward_heads(batch)
 
     def _pointwise_loss(
         self, key: str, prediction: torch.Tensor, target: torch.Tensor
@@ -214,7 +352,10 @@ class RegressorModel(LightningModule):
         batch = self(batch)
 
         loss = {"loss": 0.0}
-        for key in self.head_keys:
+        for key in self.loss_keys:
+            if key not in batch:
+                continue
+
             f = batch[key]
             f_pred = batch[f"{key}_prediction"]
 
@@ -240,8 +381,3 @@ class RegressorModel(LightningModule):
             loss[key + "_loss"] = head_loss
 
         return loss
-
-    
-
-
-

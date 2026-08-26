@@ -30,6 +30,7 @@ def create_diffusion(
     reference_energies: Optional[Mapping[Union[int, str], float]] = None,
     force_loss: str = "huber",
     huber_delta: float = 0.01,
+    conservative_forces: bool = False,
     lr: float = 1e-4,
     lr_factor: float = 0.95,
     lr_patience: int = 100,
@@ -108,6 +109,12 @@ def create_diffusion(
     huber_delta : float, optional
         Transition point of the Huber force loss in eV/Å — below it the loss is
         quadratic, above it linear.  Defaults to ``0.01``.
+    conservative_forces : bool, optional
+        When ``True``, drop the forces head and instead compute forces as
+        ``-dE/dR`` by autograd through the energy head, guaranteeing
+        energy/force consistency at the cost of a backward pass on every
+        regressor call (this also slows down force-field guided sampling).
+        Only used when ``force_field=True``.  Defaults to ``False``.
     lr : float, optional
         Learning rate.  Defaults to ``1e-4``.
     lr_factor : float, optional
@@ -188,6 +195,7 @@ def create_diffusion(
             reference_energies=reference_energies,
             force_loss=force_loss,
             huber_delta=huber_delta,
+            conservative_forces=conservative_forces,
         )
 
     return Agedi(

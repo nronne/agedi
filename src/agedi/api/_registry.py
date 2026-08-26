@@ -349,13 +349,19 @@ def _build_regressor(
     reference_energies: Optional[Dict[int, float]] = None,
     force_loss: str = "huber",
     huber_delta: float = 0.01,
+    conservative_forces: bool = False,
 ) -> "RegressorModel":
-    """Build a :class:`~agedi.models.regressor.RegressorModel` with an Energy and a Forces head.
+    """Build a :class:`~agedi.models.regressor.RegressorModel` with an Energy head
+    and, unless *conservative_forces* is set, a Forces head.
 
     The force field regressor **shares** the ``translator`` and ``representation``
     from the score model so that the atomic embeddings are learned jointly with
-    the diffusion score.  Only the :class:`~agedi.models.schnetpack.regressor_heads.Forces`
-    and :class:`~agedi.models.schnetpack.regressor_heads.Energy` heads are added on top of the shared representation.
+    the diffusion score. By default the
+    :class:`~agedi.models.schnetpack.regressor_heads.Forces` and
+    :class:`~agedi.models.schnetpack.regressor_heads.Energy` heads are added on
+    top of the shared representation. When *conservative_forces* is ``True``,
+    only the ``Energy`` head is built and :class:`~agedi.models.regressor.RegressorModel`
+    derives the forces as ``-dE/dR`` instead.
 
     The resulting model is attached to the :class:`~agedi.Agedi` object as
     ``regressor_model`` so that force-field guidance can be used during
@@ -378,6 +384,9 @@ def _build_regressor(
         or ``"mae"``.
     huber_delta : float, optional
         Transition point of the Huber force loss in eV/Å.  Defaults to ``0.01``.
+    conservative_forces : bool, optional
+        When ``True``, skip the ``Forces`` head and compute forces as ``-dE/dR``
+        by autograd through the ``Energy`` head instead.  Defaults to ``False``.
 
     Returns
     -------
@@ -390,11 +399,16 @@ def _build_regressor(
     energy_head = Energy(
         input_dim_scalar=feature_size, reference_energies=reference_energies
     )
-    forces_head = Forces(input_dim_scalar=feature_size, input_dim_vector=feature_size)
+    heads = [energy_head]
+    if not conservative_forces:
+        heads.append(
+            Forces(input_dim_scalar=feature_size, input_dim_vector=feature_size)
+        )
     return RegressorModel(
         translator=translator,
         representation=representation,
-        heads=[energy_head, forces_head],
+        heads=heads,
         force_loss=force_loss,
         huber_delta=huber_delta,
+        conservative_forces=conservative_forces,
     )
