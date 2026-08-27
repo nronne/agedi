@@ -192,6 +192,53 @@ class TestRelaxBatching:
             assert np.allclose(a.get_positions(), b.get_positions(), atol=1e-4)
 
 
+def _cramped_cluster(n, seed, spread=1.5):
+    """A cluster of *n* atoms crammed into a small sphere.
+
+    Deliberately starts with almost every pair inside a small cutoff, then
+    lets EMT forces push the atoms apart towards their equilibrium spacing —
+    so the cutoff-based neighbour count drops sharply over the relaxation,
+    which is what exposes the ``fully_connected`` regression below.
+    """
+    rng = np.random.default_rng(seed)
+    center = np.array([L / 2] * 3)
+    pos = center + rng.uniform(-spread / 2, spread / 2, size=(n, 3))
+    return Atoms("Cu" + str(n), positions=pos, cell=np.eye(3) * L, pbc=True)
+
+
+class TestRelaxFullyConnected:
+    def test_fully_connected_model_does_not_crash(self, model):
+        """Regression test: on a model trained with ``fully_connected=True``,
+        ``relax()`` must build its graphs with ``fully_connected=True`` too.
+
+        Otherwise ``AtomsGraph.update_graph()`` (called every step) silently
+        takes the cutoff-rebuild branch instead of the static fully-connected
+        one. As atoms move, per-graph edge counts drift away from what
+        ``Batch.from_data_list()`` recorded in ``_slice_dict``/``_inc_dict``,
+        and ``Batch.to_data_list()`` eventually slices ``edge_index`` with
+        stale offsets, raising e.g. "start (188) + length (240) exceeds
+        dimension size (342)". Confirmed to reproduce that crash with these
+        exact parameters when ``fully_connected`` is not threaded through
+        ``relax()``.
+        """
+        model.fully_connected = True
+        structures = [
+            _cramped_cluster(n, seed=i) for i, n in enumerate([8, 12, 16, 20])
+        ]
+
+        out = relax(
+            model,
+            structures,
+            fmax=0.0001,
+            steps=150,
+            cutoff=3.0,
+            batch_size=4,
+        )
+
+        assert len(out) == 4
+        assert all(isinstance(a, Atoms) for a in out)
+
+
 class TestRelaxTrajectory:
     def test_returns_a_trajectory_per_structure(self, model):
         structures = [_structure(seed=i) for i in range(2)]

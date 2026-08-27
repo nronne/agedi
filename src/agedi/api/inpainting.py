@@ -213,8 +213,15 @@ def inpaint(
         _as_bool_mask(freeze, len(a)) if freeze is not None else None
         for a in atoms_list
     ]
+    fully_connected = getattr(diffusion, "fully_connected", False)
     structures = [
-        AtomsGraph.from_atoms(a, cutoff=cutoff, initialize_mask=False, confinement=confinement)
+        AtomsGraph.from_atoms(
+            a,
+            cutoff=cutoff,
+            initialize_mask=False,
+            confinement=confinement,
+            fully_connected=fully_connected,
+        )
         for a in atoms_list
     ]
 

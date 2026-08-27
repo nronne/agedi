@@ -17,14 +17,26 @@ from agedi.diffusion.guidance import (
 from ._common import resolve_cutoff
 
 
-def _graph_from_atoms(atoms: Atoms, cutoff: float) -> AtomsGraph:
+def _graph_from_atoms(
+    atoms: Atoms, cutoff: float, fully_connected: bool = False
+) -> AtomsGraph:
     """Build a graph from *atoms*, carrying ``FixAtoms`` over to the mask.
 
     Masked atoms have their predicted forces zeroed by the regressor and their
     positions restored on assignment, so the mask is what makes ASE's
     ``FixAtoms`` constraint take effect during relaxation.
+
+    ``fully_connected`` must match the model's own setting: it is stored on
+    the graph and read by :meth:`~agedi.data.AtomsGraph.update_graph`, which
+    is called every relaxation step. Leaving it unset on a fully-connected
+    model makes ``update_graph`` rebuild a cutoff-based neighbour list
+    instead, silently changing the physics and, as the per-graph edge count
+    drifts, eventually breaking ``Batch.to_data_list()`` (whose slicing
+    metadata is fixed at ``Batch.from_data_list()`` time).
     """
-    graph = AtomsGraph.from_atoms(atoms, cutoff=cutoff, initialize_mask=True)
+    graph = AtomsGraph.from_atoms(
+        atoms, cutoff=cutoff, initialize_mask=True, fully_connected=fully_connected
+    )
     for constraint in atoms.constraints:
         if isinstance(constraint, FixAtoms):
             graph.mask[constraint.index] = True
@@ -128,9 +140,13 @@ def relax(
         flat_structures = list(structures)
 
     cutoff = resolve_cutoff(diffusion, cutoff)
+    fully_connected = getattr(diffusion, "fully_connected", False)
     device = next(diffusion.parameters()).device
 
-    graphs = [_graph_from_atoms(atoms, cutoff) for atoms in flat_structures]
+    graphs = [
+        _graph_from_atoms(atoms, cutoff, fully_connected=fully_connected)
+        for atoms in flat_structures
+    ]
     n_structures = len(graphs)
 
     console = Console()
