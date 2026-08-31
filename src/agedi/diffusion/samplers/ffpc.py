@@ -259,7 +259,9 @@ class ForcefieldCorrectorSampler(Sampler):
         self._capture_frame(batch)
 
         # Advance time to t_{i-1} for the corrector.
-        batch.time = (batch.time - dt).clamp(min=0.0)
+        batch.add_batch_attr(
+            "time", (batch.time - dt).clamp(min=0.0), type="node"
+        )
 
         # Lazily create corrector_dt tensor on the correct device/dtype.
         if (
