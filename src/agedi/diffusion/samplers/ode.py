@@ -229,7 +229,9 @@ class HeunODESampler(Sampler):
         batch.wrap_positions()
 
         # --- Step 3: Advance time to t-dt, rebuild graph ---
-        batch.time = (t_current - dt).clamp(min=0.0)
+        batch.add_batch_attr(
+            "time", (t_current - dt).clamp(min=0.0), type="node"
+        )
         self._check_finite(batch, "Heun ODE predictor step")
         batch.update_graph()
 
@@ -252,7 +254,7 @@ class HeunODESampler(Sampler):
                 batch.pos = original_states["pos"]
             else:
                 batch[n.key] = original_states[n.key]
-        batch.time = t_current
+        batch.add_batch_attr("time", t_current, type="node")
 
         # --- Step 6: ODE corrector with averaged scores ---
         for noiser in reversed(sde_noisers):
