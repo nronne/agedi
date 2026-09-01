@@ -180,6 +180,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   untouched instead of round-tripping them; caught by
   `TestPerStructureConvergence::test_inactive_structures_do_not_move`, which
   was intermittently failing in CI.
+- **`relax()` / `inpaint()` no longer crash on `fully_connected=True` models.**
+  Graph construction in `relaxation.py` and the initial graph in
+  `inpainting.py` never threaded `fully_connected` through, so
+  `AtomsGraph.update_graph()` took the cutoff-based neighbour-rebuild branch
+  instead of the static fully-connected one; as per-graph edge counts then
+  drifted from the batch's recorded slicing metadata,
+  `Batch.to_data_list()` eventually raised
+  `RuntimeError: start (...) + length (...) exceeds dimension size (...)`.
+  Both now read `fully_connected` off the model, mirroring the existing
+  pattern in `sample()`.
+- **Masked atoms no longer leak a stale `t=0` time into message passing
+  during multi-call samplers.** `PredictorCorrectorSampler`, `HeunSampler`,
+  `ForcefieldCorrectorSampler`, and `HeunODESampler` advanced `batch.time`
+  mid-step via the `.time` property setter, which forces every masked atom's
+  time to `0.0` via `apply_mask` instead of the real intermediate time the
+  rest of the batch sees at a corrector pass or a second score evaluation.
+  For a message-passing backbone this could leak a wrong time-embedding from
+  a masked neighbour into an unmasked atom's computed score — a correctness
+  risk for `MaskFixed` / `ConfinedCellPositions` systems. Fixed by using
+  `add_batch_attr("time", ..., type="node")` instead, matching the pattern
+  the main sampling loop already uses.
 
 ### Changed
 - **Novelty guidance stability pass.**  Six changes to how the repulsion is
