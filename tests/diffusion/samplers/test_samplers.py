@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from agedi.data import AtomsGraph
+from agedi.diffusion.noisers import CellPositions
 from agedi.diffusion.samplers import (
     EulerMaruyamaSampler,
     ForcefieldCorrectorSampler,
@@ -1188,3 +1189,121 @@ class TestTerminalConfinement:
         # -ceiling would make every terminal frame sit exactly at z_max.
         at_wall = sum(1 for z in terminal if abs(z - self.CONF[1]) < 1e-4)
         assert at_wall < len(terminal), "every terminal frame is pinned at the wall"
+
+
+# ---------------------------------------------------------------------------
+# Masked-atom time consistency (regression test)
+# ---------------------------------------------------------------------------
+
+
+def _make_time_recording_score_fn(record):
+    """Return a score_fn stub that logs every ``batch.time`` it is called with."""
+
+    def score_fn(batch):
+        record.append(batch.time.clone())
+        batch["pos_score"] = torch.zeros_like(batch.pos)
+        return batch
+
+    return score_fn
+
+
+def _make_zero_regressor():
+    def regressor_fn(batch):
+        batch["forces_prediction"] = torch.zeros_like(batch.pos)
+        return batch
+
+    return regressor_fn
+
+
+def _prep_masked_batch(batch, t_val, dtype=torch.float):
+    """Set a uniform starting time and build the graph.
+
+    Mirrors ``Diffusion._sample_batch``'s own main loop, which writes time via
+    ``add_batch_attr`` directly rather than the ``.time`` setter, so every atom
+    (masked or not) starts at the same global time.
+    """
+    t = torch.tensor(t_val, dtype=dtype)
+    batch.add_batch_attr("time", t.repeat(batch.x.shape[0], 1), type="node")
+    batch.update_graph()
+    return batch
+
+
+@pytest.mark.parametrize("batch", ["surface"], indirect=True)
+class TestMaskedAtomTimeConsistency:
+    """A masked atom must see the same intermediate diffusion time as every
+    unmasked atom at every score call within a single sampler step.
+
+    Regression test for a bug where samplers advanced ``batch.time`` mid-step
+    via the ``.time`` property setter, which zeroes masked atoms' time instead
+    of giving them the real global time (unlike the main sampling loop, which
+    writes time directly via ``add_batch_attr``).
+    """
+
+    dt = torch.tensor(0.1)
+    t_val = 0.8
+
+    def _assert_uniform_and_correct(self, times, expected_values):
+        assert len(times) == len(expected_values)
+        for t, expected in zip(times, expected_values):
+            assert t.min() == t.max(), (
+                f"batch.time is not uniform across atoms: {t.unique()}"
+            )
+            assert torch.allclose(t, torch.full_like(t, expected)), (
+                f"expected time {expected}, got {t.unique()}"
+            )
+
+    def test_pc_corrector_time_is_uniform(self, batch):
+        batch = _prep_masked_batch(batch, self.t_val)
+        record = []
+        sampler = PredictorCorrectorSampler(
+            _make_time_recording_score_fn(record),
+            [CellPositions()],
+            corrector_steps=1,
+        )
+        sampler.step(batch, self.dt, last=False)
+        self._assert_uniform_and_correct(
+            record, [self.t_val, self.t_val - self.dt.item()]
+        )
+
+    def test_heun_second_score_call_time_is_uniform(self, batch):
+        batch = _prep_masked_batch(batch, self.t_val)
+        record = []
+        sampler = HeunSampler(
+            _make_time_recording_score_fn(record),
+            [CellPositions()],
+        )
+        sampler.step(batch, self.dt, last=False)
+        self._assert_uniform_and_correct(
+            record, [self.t_val, self.t_val - self.dt.item()]
+        )
+        # After the step, batch.time must be restored to t_current, not 0.
+        assert batch.time.min() == batch.time.max() == self.t_val
+
+    def test_ffpc_corrector_time_is_uniform(self, batch):
+        batch = _prep_masked_batch(batch, self.t_val)
+        record = []
+        sampler = ForcefieldCorrectorSampler(
+            _make_time_recording_score_fn(record),
+            [CellPositions()],
+            regressor_fn=_make_zero_regressor(),
+            corrector_steps=1,
+            temperature=0.5,
+        )
+        sampler.step(batch, self.dt, last=False)
+        self._assert_uniform_and_correct(
+            record, [self.t_val, self.t_val - self.dt.item()]
+        )
+
+    def test_heun_ode_second_score_call_time_is_uniform(self, batch):
+        batch = _prep_masked_batch(batch, self.t_val)
+        record = []
+        sampler = HeunODESampler(
+            _make_time_recording_score_fn(record),
+            [CellPositions()],
+        )
+        sampler.step(batch, self.dt, last=False)
+        self._assert_uniform_and_correct(
+            record, [self.t_val, self.t_val - self.dt.item()]
+        )
+        # After the step, batch.time must be restored to t_current, not 0.
+        assert batch.time.min() == batch.time.max() == self.t_val
