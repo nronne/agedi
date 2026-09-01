@@ -434,6 +434,11 @@ class AtomsGraph(Data):
             pbc=self.pbc.detach().cpu().numpy(),
         )
 
+        if "inpaint_mask" in self._store:
+            atoms.arrays["inpaint_mask"] = (
+                self.inpaint_mask.detach().cpu().numpy()
+            )
+
         if "energy_prediction" in self._store:
             energy = self.energy_prediction.item()
             atoms.calc = SinglePointCalculator(atoms, energy=energy)
@@ -1197,8 +1202,19 @@ class AtomsGraph(Data):
         if representation.vector is not None:
             self.add_batch_attr("repr_vector", representation.vector, type="node")
 
-    def wrap_positions(self) -> None:
+    def wrap_positions(self, atom_mask: Optional[torch.Tensor] = None) -> None:
         """Wrap the positions of the atoms to the unit cell.
+
+        Parameters
+        ----------
+        atom_mask : torch.Tensor, optional
+            Boolean mask over atoms, shape ``(n_atoms,)``.  Atoms marked
+            ``False`` keep their exact input ``pos``, bypassing the
+            fractional round-trip entirely — the round-trip is not bit-exact
+            even for positions that are already inside the cell, so this
+            matters for atoms that must stay untouched (e.g. converged
+            structures in a batched relaxation).  Defaults to wrapping every
+            atom.
 
         Returns
         -------
@@ -1210,7 +1226,10 @@ class AtomsGraph(Data):
         pbc = torch.repeat_interleave(self.pbc.view(-1, 3), self.n_atoms.view(-1), dim=0)
         f = self.pos_to_frac(self.pos)
         f = torch.where(pbc, f % 1, f)
-        self.pos = self.frac_to_pos(f)
+        new_pos = self.frac_to_pos(f)
+        if atom_mask is not None:
+            new_pos = torch.where(atom_mask.view(-1, 1), new_pos, self.pos)
+        self.pos = new_pos
 
 
     def apply_mask(self, x: torch.Tensor, val: float = 0.0) -> torch.Tensor:

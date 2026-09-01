@@ -195,3 +195,180 @@ def test_regressor_mask_forces(batch):
         if hasattr(batch, 'mask'):
             assert torch.all(out.forces_prediction[batch.positions_mask] == 0.0)
 
+
+
+# ---------------------------------------------------------------------------
+# Conservative forces (F = -dE/dR)
+# ---------------------------------------------------------------------------
+
+
+class QuadraticEnergyHead(Head):
+    """Toy energy head with a known analytic gradient: E = sum_i |R_i|^2."""
+
+    _key = "energy"
+
+    def _score(self, translated_batch):
+        graph = translated_batch["batch"]
+        atomic = (graph.pos**2).sum(-1)
+        energy = torch.zeros(
+            graph.num_graphs, dtype=atomic.dtype, device=atomic.device
+        )
+        energy.scatter_add_(0, graph.batch, atomic)
+        return energy
+
+
+def test_conservative_forces_rejects_forces_head():
+    with pytest.raises(ValueError):
+        RegressorModel(
+            translator=DummyTranslator(),
+            representation=DummyRepresentation(),
+            heads=[QuadraticEnergyHead(), OffsetHead("forces", 1.0)],
+            conservative_forces=True,
+        )
+
+
+def test_conservative_forces_requires_energy_head():
+    with pytest.raises(ValueError):
+        RegressorModel(
+            translator=DummyTranslator(),
+            representation=DummyRepresentation(),
+            heads=[OffsetHead("forces", 1.0)],
+            conservative_forces=True,
+        )
+
+
+def test_conservative_forces_analytic_gradient(batch):
+    model = RegressorModel(
+        translator=DummyTranslator(),
+        representation=DummyRepresentation(),
+        heads=[QuadraticEnergyHead()],
+        conservative_forces=True,
+        mask_forces=False,
+    )
+    model.eval()
+
+    original_pos = batch._store["pos"]
+
+    out = model.forward(batch)
+
+    assert "forces_prediction" in out.keys()
+    assert torch.allclose(out.forces_prediction, -2.0 * original_pos, atol=1e-5)
+
+    # The batch must be restored exactly: no leftover grad tracking, and the
+    # cached neighbour list must survive (the swap must bypass the pos
+    # setter's clear_graph()).
+    assert out._store["pos"] is original_pos
+    assert not out.pos.requires_grad
+    assert "edge_index" in out._store
+    assert "shift_vectors" in out._store
+
+
+def test_conservative_forces_mask_forces(batch):
+    model = RegressorModel(
+        translator=DummyTranslator(),
+        representation=DummyRepresentation(),
+        heads=[QuadraticEnergyHead()],
+        conservative_forces=True,
+        mask_forces=True,
+    )
+    model.eval()
+
+    out = model.forward(batch)
+
+    if hasattr(batch, "mask"):
+        assert torch.all(out.forces_prediction[out.positions_mask] == 0.0)
+
+
+def test_conservative_forces_trains_energy_head(batch):
+    model = RegressorModel(
+        translator=DummyTranslator(),
+        representation=DummyRepresentation(),
+        heads=[QuadraticEnergyHead()],
+        conservative_forces=True,
+        mask_forces=False,
+    )
+    model.train()
+    batch.forces = torch.zeros_like(batch.pos)
+    batch.energy = torch.zeros(batch.num_graphs)
+
+    loss = model.loss(batch)["loss"]
+    loss.backward()
+
+    # No learnable parameters on the toy head/representation, but the
+    # gradient must flow through the double backward without erroring, and
+    # the "forces" loss term must actually be present.
+    assert "forces_loss" in model.loss(batch)
+
+
+def test_conservative_forces_get_config_round_trip():
+    model = RegressorModel(
+        translator=DummyTranslator(),
+        representation=DummyRepresentation(),
+        heads=[QuadraticEnergyHead()],
+        conservative_forces=True,
+    )
+    config = model.get_config()
+    assert config["conservative_forces"] is True
+
+    rebuilt = RegressorModel(
+        translator=DummyTranslator(),
+        representation=DummyRepresentation(),
+        heads=[QuadraticEnergyHead()],
+        **config,
+    )
+    assert rebuilt.get_config() == config
+
+
+def test_conservative_forces_matches_finite_difference(package, cutoff):
+    """End-to-end check against the real SchNetPack/PaiNN backend."""
+    from ase.build import molecule
+    from torch_geometric.data import Batch as PyGBatch
+
+    from agedi.data import AtomsGraph
+    from agedi.models.schnetpack.regressor_heads import Energy
+
+    torch.manual_seed(0)
+    translator, representation, _ = package
+
+    model = RegressorModel(
+        translator=translator,
+        representation=representation,
+        heads=[Energy(input_dim_scalar=64)],
+        conservative_forces=True,
+        mask_forces=False,
+    ).double()
+    model.eval()
+
+    a = molecule("H2O")
+    a.set_cell([10, 10, 10])
+    a.set_pbc(True)
+    a.center()
+    graph = AtomsGraph.from_atoms(a, cutoff=cutoff)
+    graph._store["pos"] = graph._store["pos"].double()
+    graph._store["cell"] = graph._store["cell"].double()
+    graph._store["shift_vectors"] = graph._store["shift_vectors"].double()
+    graph_batch = PyGBatch.from_data_list([graph])
+
+    with torch.no_grad():
+        analytic = model(graph_batch).forces_prediction.clone()
+
+    def energy_at(pos: torch.Tensor) -> float:
+        original = graph_batch._store["pos"]
+        graph_batch._store["pos"] = pos
+        with torch.no_grad():
+            energy = model._forward_heads(graph_batch).energy_prediction.item()
+        graph_batch._store["pos"] = original
+        return energy
+
+    delta = 1e-4
+    base_pos = graph_batch.pos
+    numeric = torch.zeros_like(base_pos)
+    for i in range(base_pos.shape[0]):
+        for d in range(3):
+            pos_p = base_pos.clone()
+            pos_p[i, d] += delta
+            pos_m = base_pos.clone()
+            pos_m[i, d] -= delta
+            numeric[i, d] = -(energy_at(pos_p) - energy_at(pos_m)) / (2 * delta)
+
+    assert torch.allclose(analytic, numeric, atol=1e-5)

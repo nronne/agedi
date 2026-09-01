@@ -6,17 +6,100 @@ This module provides:
 - :class:`BatchedLBFGSStepSizer` – batched wrapper around :class:`LBFGSStepSizer`.
 - :func:`force_field_guidance_step` – one guidance step (module-level).
 - :func:`post_diffusion_relaxation_step` – post-diffusion relaxation (module-level).
+- :func:`max_force_per_graph` – per-structure convergence measure.
 """
 
 from __future__ import annotations
 
 import dataclasses
 from collections import deque
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 
 from agedi.data import AtomsGraph
+
+
+def minimum_image(
+    d: torch.Tensor,
+    cell: Optional[torch.Tensor],
+    pbc: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Map displacement vectors to their shortest periodic image.
+
+    Positions are wrapped back into the unit cell after every step (see
+    :meth:`~agedi.data.AtomsGraph.wrap_positions`), so differencing two stored
+    position tensors reports a full lattice vector whenever an atom crossed a
+    cell face — even though the atom barely moved.  Feeding such a displacement
+    into the L-BFGS history destroys the curvature estimate, so every
+    displacement reconstructed from stored positions must pass through here
+    first.
+
+    Parameters
+    ----------
+    d : torch.Tensor
+        Displacement vectors, shape ``(n_atoms, 3)``.
+    cell : torch.Tensor or None
+        Unit cell of the structure, shape ``(3, 3)``, row-vector convention
+        (``r = f @ cell``).  ``None`` disables the correction.
+    pbc : torch.Tensor or None
+        Boolean periodicity flags, shape ``(3,)``.  Non-periodic directions are
+        left untouched.  ``None`` disables the correction.
+
+    Returns
+    -------
+    torch.Tensor
+        Displacements with any lattice-vector jumps removed.
+    """
+    if cell is None or pbc is None or not bool(pbc.any()):
+        return d
+
+    cell = cell.view(3, 3).to(d.dtype)
+    # Degenerate (zero) cells appear on non-periodic graphs; nothing to wrap.
+    if not bool(torch.linalg.det(cell).abs() > 1e-12):
+        return d
+
+    # r = f @ cell  =>  f = solve(cell.T, r.T).T   (matches AtomsGraph.pos_to_frac)
+    frac = torch.linalg.solve(cell.transpose(0, 1), d.transpose(0, 1)).transpose(0, 1)
+    shift = torch.round(frac) * pbc.to(frac.dtype)
+    return d - shift @ cell
+
+
+def max_force_per_graph(
+    forces: torch.Tensor, batch_idx: torch.Tensor, num_graphs: int
+) -> torch.Tensor:
+    """Return the maximum per-atom force magnitude of every graph in a batch.
+
+    Relaxation convergence is a per-structure property: taking the maximum over
+    the whole batch keeps every structure stepping until the worst one is done.
+
+    Parameters
+    ----------
+    forces : torch.Tensor
+        Per-atom forces, shape ``(n_atoms, 3)``.
+    batch_idx : torch.Tensor
+        Graph membership index (``batch.batch``), shape ``(n_atoms,)``.
+    num_graphs : int
+        Number of graphs in the batch.
+
+    Returns
+    -------
+    torch.Tensor
+        Maximum force magnitude per graph, shape ``(num_graphs,)``.
+    """
+    norms = torch.norm(forces, dim=1)
+    out = torch.zeros(num_graphs, dtype=norms.dtype, device=norms.device)
+    out.scatter_reduce_(0, batch_idx, norms, reduce="amax")
+    return out
+
+
+def _cell_and_pbc(batch: AtomsGraph) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """Extract per-graph ``(cell, pbc)`` tensors from *batch*, if available."""
+    cell = getattr(batch, "cell", None)
+    pbc = getattr(batch, "pbc", None)
+    if cell is None or pbc is None:
+        return None, None
+    return cell.view(-1, 3, 3), pbc.view(-1, 3)
 
 
 @dataclasses.dataclass
@@ -110,6 +193,8 @@ class LBFGSStepSizer:
         pos: torch.Tensor,
         forces: torch.Tensor,
         maxstep: Optional[float] = None,
+        cell: Optional[torch.Tensor] = None,
+        pbc: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute the L-BFGS displacement for one structure.
 
@@ -122,6 +207,15 @@ class LBFGSStepSizer:
             i.e. the *negative* gradient.
         maxstep : float, optional
             Overrides :attr:`maxstep` for this call.
+        cell : torch.Tensor, optional
+            Unit cell, shape ``(3, 3)``.  Required together with *pbc* for
+            periodic structures so that the displacement reconstructed from
+            stored positions is taken in the minimum-image convention; without
+            it, an atom that wrapped across a cell face injects a
+            lattice-vector-sized ``s0`` into the history and the search
+            direction stops following the forces.
+        pbc : torch.Tensor, optional
+            Boolean periodicity flags, shape ``(3,)``.
 
         Returns
         -------
@@ -130,7 +224,7 @@ class LBFGSStepSizer:
         """
         # --- Update history (ASE: LBFGS.update) ---
         if self.prev_pos is not None:
-            s0 = pos - self.prev_pos
+            s0 = minimum_image(pos - self.prev_pos, cell, pbc)
             # We use the gradient, which is minus the force.
             y0 = self.prev_forces - forces
             ys = torch.sum(y0 * s0)
@@ -237,6 +331,9 @@ class BatchedLBFGSStepSizer:
         forces: torch.Tensor,
         batch_idx: torch.Tensor,
         maxstep: Optional[float] = None,
+        cell: Optional[torch.Tensor] = None,
+        pbc: Optional[torch.Tensor] = None,
+        active: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute steps for batched data.
 
@@ -254,6 +351,17 @@ class BatchedLBFGSStepSizer:
             Index tensor mapping each atom to its graph in the batch.
         maxstep : float, optional
             Overrides the per-sizer step limit for this call.
+        cell : torch.Tensor, optional
+            Per-graph cells, shape ``(num_graphs, 3, 3)``.  Forwarded to
+            :meth:`LBFGSStepSizer.compute_step` for the minimum-image
+            correction.
+        pbc : torch.Tensor, optional
+            Per-graph periodicity flags, shape ``(num_graphs, 3)``.
+        active : torch.Tensor, optional
+            Boolean mask over graphs, shape ``(num_graphs,)``.  Graphs marked
+            ``False`` get a zero step and their L-BFGS history is left
+            untouched, so a structure that has already converged is not
+            disturbed while the rest of the batch keeps relaxing.
 
         Returns
         -------
@@ -266,10 +374,16 @@ class BatchedLBFGSStepSizer:
         # into a list and re-enumerating would misalign every graph after an
         # empty one, silently giving atoms another structure's step.
         for i, step_sizer in enumerate(self.step_sizers):
+            if active is not None and not bool(active[i]):
+                continue
             mask = batch_idx == i
             if torch.any(mask):
                 combined_step[mask] = step_sizer.compute_step(
-                    pos[mask], forces[mask], maxstep=maxstep
+                    pos[mask],
+                    forces[mask],
+                    maxstep=maxstep,
+                    cell=None if cell is None else cell[i],
+                    pbc=None if pbc is None else pbc[i],
                 )
 
         return combined_step
@@ -278,6 +392,55 @@ class BatchedLBFGSStepSizer:
         """Reset the L-BFGS memory for all step-sizers in the batch."""
         for step_sizer in self.step_sizers:
             step_sizer.reset()
+
+
+def _restrict_to_inpainted(batch: AtomsGraph, new_pos: torch.Tensor) -> torch.Tensor:
+    """Undo a guidance step's displacement of known (non-inpainted) atoms.
+
+    Force-field guidance and post-diffusion relaxation move every atom that
+    isn't hard-frozen via ``batch.mask`` -- they have no notion of the
+    "known vs. regenerated" split used by inpainting (``batch.inpaint_mask``),
+    so left alone they nudge known/context atoms off their reference
+    trajectory using predicted forces, up to and including the final step
+    where inpainting otherwise guarantees an exact reconstruction. When
+    ``batch.inpaint_mask`` is present, only the atoms it marks for
+    regeneration keep the guidance step; every other atom keeps its
+    pre-guidance position. A no-op for ordinary (non-inpainting) sampling,
+    where the attribute is absent.
+    """
+    if "inpaint_mask" not in batch:
+        return new_pos
+    select = batch.inpaint_mask.view(-1, *([1] * (new_pos.dim() - 1)))
+    return torch.where(select, new_pos, batch.pos)
+
+
+def reassert_known_positions(batch: AtomsGraph, pre_wrap_pos: torch.Tensor) -> None:
+    """Undo a periodic-image flip ``wrap_positions()`` may cause for known atoms.
+
+    ``AtomsGraph.wrap_positions()`` can flip an atom sitting near a
+    periodic-cell boundary to the adjacent image -- a jump by a full lattice
+    vector, not the small guidance/relaxation displacement it was meant to
+    represent. Callers that write ``batch.pos`` via :func:`_restrict_to_inpainted`
+    and then call ``wrap_positions()`` must call this immediately afterwards
+    (and before ``update_graph()``, so the returned neighbor list is built
+    from the final, exact positions) to restore known atoms to *pre_wrap_pos*
+    -- their value right after the restricted guidance write, before
+    wrapping. A no-op for ordinary (non-inpainting) sampling, where
+    ``inpaint_mask`` is absent.
+
+    Parameters
+    ----------
+    batch : AtomsGraph
+        The batch, already guidance-updated and wrapped.
+    pre_wrap_pos : torch.Tensor
+        ``batch.pos`` as returned by the guidance step, captured before
+        ``wrap_positions()`` was called.
+    """
+    if "inpaint_mask" not in batch:
+        return
+    known = ~batch.inpaint_mask
+    select = known.view(-1, *([1] * (batch.pos.dim() - 1)))
+    batch.pos = torch.where(select, pre_wrap_pos, batch.pos)
 
 
 def force_field_guidance_step(
@@ -335,8 +498,9 @@ def force_field_guidance_step(
     # Use L-BFGS to compute the step direction and magnitude.  The sizer caps
     # the displacement per structure, scaling the whole step uniformly so the
     # search direction is preserved; guidance strength is then applied on top.
+    cell, pbc = _cell_and_pbc(batch)
     lbfgs_step = lbfgs_step_sizer.compute_step(
-        positions, forces, batch_idx, maxstep=max_step_size
+        positions, forces, batch_idx, maxstep=max_step_size, cell=cell, pbc=pbc
     )
 
     step = scale * time_factor * lbfgs_step
@@ -358,7 +522,7 @@ def force_field_guidance_step(
             new_pos[:, 2], min=z_min_per_atom, max=z_max_per_atom
         )
 
-    batch.pos = new_pos
+    batch.pos = _restrict_to_inpainted(batch, new_pos)
     return batch
 
 
@@ -368,6 +532,8 @@ def post_diffusion_relaxation_step(
     lbfgs_step_sizer: Optional[BatchedLBFGSStepSizer],
     scale: float = 1.0,
     max_step_size: float = 0.2,
+    forces: Optional[torch.Tensor] = None,
+    active: Optional[torch.Tensor] = None,
 ) -> AtomsGraph:
     """Perform one L-BFGS relaxation step after diffusion is complete.
 
@@ -390,6 +556,14 @@ def post_diffusion_relaxation_step(
     max_step_size : float, optional
         Maximum single-atom displacement per step, in Å.  Defaults to ``0.2``
         (ASE's default).  Applied by scaling the whole step uniformly.
+    forces : torch.Tensor, optional
+        Forces at the current positions.  When given, *regressor_model* is not
+        called: the caller's convergence check already evaluated the forces at
+        exactly these positions, and re-evaluating them here would double the
+        cost of every relaxation step.
+    active : torch.Tensor, optional
+        Boolean mask over graphs, shape ``(num_graphs,)``.  Structures marked
+        ``False`` are left untouched.
 
     Returns
     -------
@@ -399,22 +573,30 @@ def post_diffusion_relaxation_step(
     if regressor_model is None:
         return batch
 
-    # Get forces from regressor model
-    batch = regressor_model(batch)
+    if forces is None:
+        # Get forces from regressor model
+        batch = regressor_model(batch)
 
-    if "forces_prediction" not in batch:
-        raise ValueError("Regressor model does not compute forces.")
+        if "forces_prediction" not in batch:
+            raise ValueError("Regressor model does not compute forces.")
+        forces = batch.forces_prediction
 
     positions = batch.pos
-    forces = batch.forces_prediction
     batch_idx = batch.batch
 
     if lbfgs_step_sizer is None:
         lbfgs_step_sizer = BatchedLBFGSStepSizer(batch_size=batch.batch_size)
 
     # The sizer already applies the maxstep limit, uniformly per structure.
+    cell, pbc = _cell_and_pbc(batch)
     step = scale * lbfgs_step_sizer.compute_step(
-        positions, forces, batch_idx, maxstep=max_step_size
+        positions,
+        forces,
+        batch_idx,
+        maxstep=max_step_size,
+        cell=cell,
+        pbc=pbc,
+        active=active,
     )
 
     new_pos = batch.pos + step
@@ -432,9 +614,12 @@ def post_diffusion_relaxation_step(
             new_pos[:, 2], min=z_min_per_atom, max=z_max_per_atom
         )
 
-    batch.pos = new_pos
+    restricted_pos = _restrict_to_inpainted(batch, new_pos)
+    batch.pos = restricted_pos
 
-    batch.wrap_positions()
+    atom_mask = None if active is None else active[batch.batch]
+    batch.wrap_positions(atom_mask=atom_mask)
+    reassert_known_positions(batch, restricted_pos)
     batch.update_graph()
 
     return batch

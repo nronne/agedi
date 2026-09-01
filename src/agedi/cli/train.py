@@ -19,6 +19,9 @@ click.rich_click.OPTION_GROUPS.update(
                     "--reference_energies",
                     "--force_loss",
                     "--huber_delta",
+                    "--regressor_loss_weight",
+                    "--loss_balance",
+                    "--conservative_forces",
                 ],
             },
             {
@@ -180,6 +183,40 @@ _DEFAULT_NOISER = "CellPositions"
     default=0.01,
     show_default=True,
     help="Transition point (eV/Å) of the Huber force loss: quadratic below, linear above.",
+)
+@click.option(
+    "--regressor_loss_weight",
+    type=float,
+    default=1.0,
+    show_default=True,
+    help=(
+        "Absolute weight of the force-field loss: "
+        "loss = diffusion_loss + weight * regressor_loss. Raise it to prioritise "
+        "energy/force accuracy, lower it to keep the force field from dominating "
+        "the score model. Ignored when --loss_balance is given."
+    ),
+)
+@click.option(
+    "--loss_balance",
+    type=str,
+    default=None,
+    help=(
+        "Relative split between the diffusion and force-field losses, e.g. "
+        "'50:50' or '80:20' (diffusion:regressor). Each term is normalised by a "
+        "running estimate of its own magnitude first, so the same split transfers "
+        "between systems — unlike --regressor_loss_weight. Not set by default."
+    ),
+)
+@click.option(
+    "--conservative_forces",
+    is_flag=True,
+    default=False,
+    help=(
+        "Derive forces as -dE/dR by autograd through the energy head instead of "
+        "using a dedicated forces head. Guarantees energy/force consistency at the "
+        "cost of a backward pass on every regressor call (also slows down "
+        "force-field guided sampling). Only used when --force_field is set."
+    ),
 )
 @click.option(
     "--epochs",
@@ -411,6 +448,9 @@ def train(**params) -> None:
             reference_energies=_parse_reference_energies(params["reference_energies"]),
             force_loss=params["force_loss"],
             huber_delta=params["huber_delta"],
+            regressor_loss_weight=params["regressor_loss_weight"],
+            loss_balance=params["loss_balance"],
+            conservative_forces=params["conservative_forces"],
             mask=params["mask"],
             confinement=params["confinement"],
             batch_size=params["batch_size"],

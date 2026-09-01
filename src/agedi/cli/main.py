@@ -2,8 +2,10 @@ import rich_click as click
 from agedi.cli.train import train
 from agedi.cli.train_hydra import train_hydra
 from agedi.cli.sample import sample
+from agedi.cli.inpaint import inpaint
 from agedi.cli.inspect import inspect
 from agedi.cli.predict import predict
+from agedi.cli.relax import relax
 
 @click.group()
 @click.version_option()
@@ -14,6 +16,8 @@ def cli() -> None:
 cli.add_command(train)
 cli.add_command(train_hydra)
 cli.add_command(sample)
+cli.add_command(inpaint)
 cli.add_command(inspect)
 cli.add_command(predict)
+cli.add_command(relax)
 

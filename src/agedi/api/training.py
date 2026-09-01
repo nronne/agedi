@@ -15,7 +15,9 @@ from lightning.pytorch.callbacks import Callback, LearningRateMonitor, ModelChec
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 
 from agedi.data import Dataset
+from agedi.utils.loss_balance import LossBalanceSpec
 from agedi.data.callbacks import (
+    EMACallback,
     EpochProgressPrinter,
     GradNormLogger,
     HParamsMetricLogger,
@@ -49,6 +51,10 @@ _TRAIN_FROM_ATOMS_KEYS = frozenset(
         "reference_energies",
         "force_loss",
         "huber_delta",
+        "regressor_loss_weight",
+        "loss_balance",
+        "loss_balance_momentum",
+        "conservative_forces",
         "batch_size",
         "train_split",
         "val_split",
@@ -78,6 +84,7 @@ _TRAINER_KEYS = frozenset(
         "log_dir",
         "project",
         "name",
+        "ema_decay",
         "log_interval",
         "gradient_clip_val",
         "progress_bar",
@@ -157,8 +164,9 @@ def _forcefield_hparams(diffusion: "Agedi") -> Dict:
     -------
     dict
         Display metadata: ``force_field`` and, when a regressor is attached,
-        ``reference_energies`` (keyed by chemical symbol), ``force_loss``, and
-        ``huber_delta``.
+        ``reference_energies`` (keyed by chemical symbol), ``force_loss``,
+        ``huber_delta``, whichever of ``loss_balance`` /
+        ``regressor_loss_weight`` is in effect, and ``conservative_forces``.
     """
     from ase.data import chemical_symbols
 
@@ -166,7 +174,14 @@ def _forcefield_hparams(diffusion: "Agedi") -> Dict:
     if regressor is None:
         return {"force_field": False}
 
+    balance = getattr(diffusion, "loss_balance", None)
     info: Dict = {"force_field": True}
+    if balance is None:
+        info["regressor_loss_weight"] = float(
+            getattr(diffusion, "regressor_loss_weight", 1.0)
+        )
+    else:
+        info["loss_balance"] = list(balance)
     for head in getattr(regressor, "heads", []):
         if getattr(head, "key", None) == "energy" and hasattr(head, "reference_energy_dict"):
             references = head.reference_energy_dict
@@ -177,6 +192,7 @@ def _forcefield_hparams(diffusion: "Agedi") -> Dict:
         config = regressor.get_config()
         info["force_loss"] = config["force_loss"]
         info["huber_delta"] = config["huber_delta"]
+        info["conservative_forces"] = config.get("conservative_forces", False)
     return info
 
 
@@ -199,6 +215,7 @@ def create_trainer(
     repeat_epoch: Optional[int] = None,
     hparams: Optional[Dict] = None,
     extra_callbacks: Optional[List[Callback]] = None,
+    ema_decay: Optional[float] = None,
 ) -> Trainer:
     """Create a Lightning trainer configured for AGeDi.
 
@@ -255,6 +272,16 @@ def create_trainer(
     extra_callbacks:
         Extra Lightning callbacks to append to the default callback list.
         When ``None`` (default) only the built-in callbacks are used.
+    ema_decay:
+        When set, install an :class:`~agedi.data.callbacks.EMACallback`
+        with this decay rate. It maintains an exponential moving average of
+        every trainable parameter and copies it into the live model when
+        training stops, so sampling, checkpointing, and (deliberately) the
+        next call to ``fit()`` on this trainer all see the smoothed weights
+        rather than the last noisy gradient step. Particularly relevant for
+        GO-Diff-style loops that retrain the same trainer repeatedly on a
+        small, shifting replay buffer. ``None`` (default) disables it,
+        matching prior behaviour exactly.
 
     Returns
     -------
@@ -315,6 +342,9 @@ def create_trainer(
 
     if hparams is not None:
         callbacks.append(HParamsMetricLogger(hparams))
+
+    if ema_decay is not None:
+        callbacks.append(EMACallback(decay=ema_decay))
 
     if extra_callbacks is not None:
         callbacks.extend(extra_callbacks)
@@ -403,6 +433,10 @@ def train_from_atoms(
     reference_energies: Union[str, Mapping[Union[int, str], float], None] = "auto",
     force_loss: str = "huber",
     huber_delta: float = 0.01,
+    regressor_loss_weight: float = 1.0,
+    loss_balance: "LossBalanceSpec" = None,
+    loss_balance_momentum: float = 0.99,
+    conservative_forces: bool = False,
     batch_size: int = 64,
     train_split: Union[float, int] = 0.9,
     val_split: Union[float, int] = 0.1,
@@ -501,6 +535,34 @@ def train_from_atoms(
         gradient.
     huber_delta:
         Transition point of the Huber force loss in eV/Å.  Default: ``0.01``.
+    regressor_loss_weight:
+        *Absolute* weight of the force-field loss:
+        ``loss = diffusion_loss + regressor_loss_weight * regressor_loss``.
+        Raise it to prioritise energy/force accuracy, lower it to keep the
+        force field from dominating the score model.  Both terms are logged
+        separately (``train/regressor_loss`` and the per-noiser losses), so the
+        balance can be checked during training.  Ignored when *loss_balance*
+        is given, when *force_field* is ``False``, or when a *checkpoint* is
+        given (the value is then restored from the checkpoint).
+        Default: ``1.0``.
+    loss_balance:
+        *Relative* split between the diffusion and force-field losses, as an
+        alternative to *regressor_loss_weight*.  Accepts ``"50:50"``,
+        ``"80:20"``, ``(0.8, 0.2)``, or a single number giving the regressor
+        fraction.  Each term is divided by a running estimate of its own
+        magnitude before the fractions are applied, so the same split transfers
+        between systems whose raw loss scales differ — which an absolute weight
+        does not.  The achieved fractions are logged as
+        ``train/diffusion_fraction`` and ``train/regressor_fraction``.
+        ``None`` (default) keeps the absolute weighting.
+    loss_balance_momentum:
+        Momentum of the running loss-magnitude averages used by
+        *loss_balance*.  Default: ``0.99``.
+    conservative_forces:
+        When ``True``, drop the forces head and compute forces as ``-dE/dR``
+        by autograd through the energy head, guaranteeing energy/force
+        consistency at the cost of a backward pass on every regressor call.
+        Only used when ``force_field=True``.  Default: ``False``.
     batch_size:
         Mini-batch size used during training.  Default: ``64``.
     train_split:
@@ -634,6 +696,10 @@ def train_from_atoms(
             reference_energies=resolved_reference_energies,
             force_loss=force_loss,
             huber_delta=huber_delta,
+            regressor_loss_weight=regressor_loss_weight,
+            loss_balance=loss_balance,
+            loss_balance_momentum=loss_balance_momentum,
+            conservative_forces=conservative_forces,
             lr=lr,
             lr_factor=lr_factor,
             lr_patience=lr_patience,

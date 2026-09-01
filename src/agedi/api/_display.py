@@ -265,6 +265,20 @@ def _print_training_config(hparams: dict) -> None:
                 else str(force_loss)
             )
             meta.add_row("  force_loss", detail)
+        balance = hparams.get("loss_balance")
+        if balance is not None:
+            from agedi.utils.loss_balance import format_loss_balance
+
+            meta.add_row("  loss_balance", format_loss_balance(tuple(balance)))
+        loss_weight = hparams.get("regressor_loss_weight")
+        if loss_weight is not None:
+            meta.add_row("  regressor_loss_weight", str(loss_weight))
+        meta.add_row(
+            "  forces",
+            "conservative (-dE/dR)"
+            if hparams.get("conservative_forces")
+            else "direct head",
+        )
 
     meta.add_row("", "")
     meta.add_row("[bold]Trainer[/bold]", "")
@@ -346,6 +360,11 @@ def _print_sampling_config(
     confinement=None,
     property=None,
     force_field_guidance: float = 0.0,
+    novelty_guidance: Optional[float] = 0.0,
+    novelty_target_displacement: Optional[float] = None,
+    novelty_references: int = 0,
+    novelty_sigma: Optional[float] = None,
+    novelty_distance_quantiles=None,
     sampler: Optional[str] = None,
 ) -> None:
     """Print a Rich-formatted sampling configuration panel."""
@@ -373,9 +392,85 @@ def _print_sampling_config(
             table.add_row(f"  {k}", str(v))
     if force_field_guidance > 0.0:
         table.add_row("  ff_guidance", str(force_field_guidance))
+    if novelty_guidance is None or novelty_guidance != 0.0:
+        if novelty_guidance is None:
+            table.add_row(
+                "  novelty_guidance",
+                f"auto (target {novelty_target_displacement} Å)",
+            )
+        else:
+            table.add_row("  novelty_guidance", str(novelty_guidance))
+        table.add_row("  novelty_refs", str(novelty_references))
+        if novelty_sigma is not None:
+            table.add_row("  novelty_sigma", f"{novelty_sigma:.4f}")
+        if novelty_distance_quantiles is not None:
+            # The archive's own pairwise feature-distance spread: this is what
+            # novelty_sigma has to be read against, and it changes with every
+            # retraining of the score model.
+            q1, q5, q50 = (float(x) for x in novelty_distance_quantiles)
+            table.add_row(
+                "  archive d(1/5/50%)",
+                f"{q1:.4f} / {q5:.4f} / {q50:.4f}",
+            )
     if sampler is not None:
         table.add_row("  sampler", str(sampler))
 
     console.print(
         Panel(table, title="[bold]AGeDi Sampling Configuration[/bold]", border_style="blue")
+    )
+
+
+def _print_inpainting_config(
+    n_samples: int,
+    n_selected: int,
+    n_atoms: int,
+    steps: int,
+    eps: float,
+    t_start: float,
+    batch_size: int,
+    n_resample: int = 1,
+    jump_length: int = 1,
+    n_frozen: int = 0,
+    property=None,
+    force_field_guidance: float = 0.0,
+    sampler: Optional[str] = None,
+    n_structures: int = 1,
+) -> None:
+    """Print a Rich-formatted inpainting configuration panel.
+
+    *n_selected*, *n_atoms*, and *n_frozen* are totals summed across all
+    input structures when *n_structures* > 1.
+    """
+    console = Console()
+    table = Table(show_header=False, box=box.SIMPLE, padding=(0, 1))
+    table.add_column("Key", style="bold cyan", min_width=14, no_wrap=True)
+    table.add_column("Value", style="white")
+
+    if n_structures > 1:
+        table.add_row("  structures", str(n_structures))
+        table.add_row("  samples/structure", str(n_samples))
+        table.add_row("  total samples", str(n_structures * n_samples))
+        table.add_row("  selected atoms", f"{n_selected} / {n_atoms} (total)")
+    else:
+        table.add_row("  n_samples", str(n_samples))
+        table.add_row("  selected atoms", f"{n_selected} / {n_atoms}")
+    if n_frozen:
+        table.add_row("  frozen atoms", str(n_frozen))
+    table.add_row("  steps", str(steps))
+    table.add_row("  eps", str(eps))
+    table.add_row("  t_start", str(t_start))
+    table.add_row("  batch_size", str(batch_size))
+    if n_resample > 1:
+        table.add_row("  n_resample", str(n_resample))
+        table.add_row("  jump_length", str(jump_length))
+    if property is not None:
+        for k, v in property.items():
+            table.add_row(f"  {k}", str(v))
+    if force_field_guidance > 0.0:
+        table.add_row("  ff_guidance", str(force_field_guidance))
+    if sampler is not None:
+        table.add_row("  sampler", str(sampler))
+
+    console.print(
+        Panel(table, title="[bold]AGeDi Inpainting Configuration[/bold]", border_style="blue")
     )

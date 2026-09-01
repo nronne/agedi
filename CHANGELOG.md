@@ -5,6 +5,265 @@ All notable changes to AGeDi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-08-24
+
+### Added
+- **Feature-space novelty guidance** — repels samples away from structures that
+  have already been found, for global-optimisation loops where the model is
+  retrained on its own discoveries and tends to re-propose the same minima.
+  Enabled via ``novelty_guidance=NoveltyGuidanceConfig(...)`` and
+  ``novelty_reference=[...]`` on ``sample()``.
+  - Each structure is summarised by its pooled (mobile-atom) backbone scalar
+    representation, and a sum-of-Gaussians potential is descended in that
+    feature space during the reverse trajectory — a metadynamics history bias
+    applied during denoising, equivalently
+    [Particle Guidance](https://arxiv.org/abs/2310.13102) (Corso et al.,
+    ICLR 2024) extended with a persistent archive term.
+  - Samples are repelled both from the archive and from each other within the
+    batch (``include_batch``, on by default), which prevents a whole batch from
+    collapsing into a single new basin.
+  - ``sigma`` sets the "too similar" radius: the force is zero at zero feature
+    distance, peaks at ``d = sigma``, and decays beyond, so structures that are
+    already novel are left alone.
+  - ``zeta`` weights the guidance by ``t**zeta`` — deliberately the opposite end
+    of the trajectory from ``ForcefieldGuidanceConfig``'s ``(1 - t)**zeta``,
+    since which basin a sample falls into is decided at high noise.
+  - When sampling on a template, the reference structures are featurised with
+    the template atoms excluded from the pooling, matching how the samples
+    themselves are pooled (``FeatureArchive.from_structures(n_template=...)``,
+    set automatically by ``sample()``).  Pooling over the template as well
+    would average in atoms that are identical across every structure, which
+    offsets the references from the samples and collapses them towards each
+    other.
+  - New public API in ``agedi.diffusion``: ``NoveltyGuidanceConfig``,
+    ``FeatureArchive``, ``structure_features``, ``novelty_guidance_step``.
+- **Automatic calibration of the novelty guidance scale.**  Set
+  ``guidance=None`` and give ``target_displacement`` instead (default
+  ``0.2`` Å): how far novelty guidance should move a structure at typical
+  repulsion over the whole trajectory.  New ``NoveltyCalibrator`` measures the
+  gradient magnitude once, at the peak of the time window, and solves for the
+  scale that spends exactly that budget over the remaining schedule.
+  - ``guidance`` multiplies a raw backbone gradient, so its useful magnitude is
+    a property of the model's activations and changes with every retraining —
+    which in a global-optimisation loop is every iteration.  A displacement in
+    Ångström is a question that transfers; a hand-tuned scale is not.
+  - Measured at the window peak rather than the first step: at ``t -> 1`` the
+    samples are a noise gas whose gradient is both tiny and uninformative, and
+    dividing by it would produce a scale that saturates ``max_step_size`` for
+    the rest of the run.  Guidance is therefore zero on the rising edge, which
+    is the region where the kernel is dead anyway.
+  - The scale is then held fixed, so the per-structure spread survives:
+    structures repelled harder than typical still move further, and ones that
+    are already novel still barely move.
+  - One calibrator is built per ``sample()`` call and shared across batches, so
+    every sample in a run is driven at the same strength.  The result is
+    printed after sampling and left on ``diffusion.novelty_calibrator``
+    (``.guidance``, ``.gradient_scale``, ``.calibrated_at``) so it can be
+    pinned explicitly for a reproducible rerun.
+- Novelty guidance aborts with a clear ``RuntimeError`` when the feature
+  gradient is non-finite (typically two atoms driven onto each other, making
+  the interatomic unit vectors 0/0), and the resulting positions are checked
+  with the samplers' ``_check_finite`` before the neighbour-list kernel sees
+  them.
+- ``Translator.translate_input()`` accepts an optional ``positions`` override,
+  applied before the input modules so that position-derived quantities are
+  recomputed from it.  This allows a backbone pass that is differentiable with
+  respect to the atomic positions while reusing the batch's existing neighbour
+  list.  Backends supply the position key via the new ``_set_positions()`` hook.
+- ``Translator.extract_representation()`` returns a representation from a
+  backbone output without storing it on the batch (unlike
+  ``add_representation()``).
+- ``sample()`` gained a ``cutoff`` parameter (default ``6.0``), now forwarded to
+  the sampling call and used when featurising ``novelty_reference``.
+- **`loss_balance` — relative weighting of the diffusion and force-field
+  losses.**  `regressor_loss_weight` is an absolute multiplier whose useful
+  value depends on the raw magnitude of the two losses, so it has to be
+  re-tuned per system.  `loss_balance` instead takes the split you want
+  (`"50:50"`, `"80:20"`, `(0.8, 0.2)`, or a bare number giving the regressor
+  fraction) and divides each term by a running estimate of its own magnitude
+  before applying the fractions:
+  `loss = w_d · L_diffusion/s_d + w_r · L_regressor/s_r`.  Each term then
+  contributes its requested share of the total regardless of scale, so the same
+  setting transfers between systems.  Available on `create_diffusion()`,
+  `train_from_atoms()`, the config, and `agedi train --loss_balance 80:20`.
+  Unset by default, which keeps the existing absolute weighting exactly.
+  - `s_d` / `s_r` are detached EMAs (`loss_balance_momentum`, default `0.99`)
+    updated only on training batches, so validation loss stays comparable
+    across epochs.
+  - The achieved split is logged as `train/diffusion_fraction` and
+    `train/regressor_fraction`.
+  - Note that balancing makes the total loss O(1) regardless of the raw scales,
+    which changes the effective learning rate and how `gradient_clip_val` bites
+    relative to an unbalanced run.
+- **`agedi.utils.loss_balance`** — `normalize_loss_balance()` accepting the
+  string/number/pair/mapping forms above, plus `format_loss_balance()`.
+- **`relax()` API and `agedi relax` command** — run the batched L-BFGS
+  relaxation on structures you supply, independently of diffusion sampling.
+  Each structure in a batch is optimised by its own L-BFGS instance and drops
+  out as soon as its own maximum force falls below `fmax`, and ASE `FixAtoms`
+  constraints on the input are honoured.  `trajectory=True` /
+  `--save_trajectory` returns every optimiser step.
+- **Inpainting-style diffusion** — `agedi.inpaint()` / `agedi inpaint` regenerate
+  a chosen subset of atoms in an existing structure instead of generating a new
+  one from scratch. Selected atoms are noised and denoised like a from-scratch
+  atom; every other ("known") atom is, at each reverse-diffusion step, replaced
+  by a fresh sample of the forward process `q(z_t | z_0)` of the input
+  structure, so the whole batch stays at a self-consistent noise level and
+  known atoms converge back onto their input positions (and species, for the
+  types noiser) exactly as `t -> eps`.
+  - Atom selection via `agedi.api.select_atoms()`: `indices`, `symbols`,
+    `z_range`, `sphere`, or `from_atoms`, combined by union; with none given, a
+    random `fraction` (default 0.25) of the non-fixed atoms is selected.
+    `contiguous=True` changes the `fraction` fallback to grow a single
+    spatially-connected cluster (a random seed atom, then repeatedly the
+    closest remaining candidate) instead of a scattered random subset.
+  - `t_start` below `1.0` starts from a partially-noised state for local
+    rattle-and-relax refinement instead of full regeneration.
+  - Optional RePaint-style resampling (`n_resample`, `jump_length`, off by
+    default) to better harmonize the regenerated region with its surroundings.
+  - `freeze` hard-freezes a subset of atoms in addition to the regenerated
+    selection.
+  - Implemented as `InpaintingSampler`, a wrapper around any existing sampler
+    (`em`, `pc`, `heun`, `ddim`, `heun_ode`, `ffpc`), so it composes with all
+    of them; not compatible with `compile=True`.
+  - `atoms` accepts a list of structures (need not share atom count,
+    composition, or cell) to batch several inpainting runs together for GPU
+    throughput; every selection argument stays a single spec, re-resolved
+    independently per structure, and `n_samples` becomes samples per
+    structure. Results are grouped one list per input structure. The CLI
+    picks this up automatically when the input file has more than one frame.
+- `agedi.predict()` accepts the grouped `List[List[Atoms]]` shape
+  `inpaint()` returns for a list of input structures (in addition to a flat
+  list, unchanged), and returns predictions grouped the same way — so a
+  multi-structure `inpaint(...)` result can be passed straight into
+  `predict(...)` without flattening it first.
+- `agedi.relax()` accepts the same grouped `List[List[Atoms]]` shape as
+  `predict()` — nesting is auto-detected and the result is grouped the same
+  way — so `inpaint() -> relax() -> predict()` chains without flattening at
+  any step.
+- `Noiser.forward_marginal()` / `Noiser.renoise()` hooks (implemented for the
+  SDE-based position noisers and the discrete `Types` noiser) powering
+  inpainting.
+- `AtomsGraph.to_atoms()` writes the inpainting selection back as
+  `atoms.arrays["inpaint_mask"]` when present, so a result can be re-fed as
+  `from_atoms=True` input.
+- **Conservative forces for force-field training** — `conservative_forces=True`
+  on `create_diffusion()` / `train_from_atoms()` / the training config (or
+  `agedi train --conservative_forces`) derives forces as `F = -dE/dR` by
+  autograd through the energy head instead of using a dedicated forces head.
+  This guarantees energy/force consistency and lets force labels also train
+  the energy surface, at the cost of a backward pass on every regressor call
+  (this also slows down force-field guided sampling and post-diffusion
+  relaxation). Implemented in `agedi.models.regressor.RegressorModel`;
+  disabled by default, so existing checkpoints and behaviour are unchanged.
+
+### Fixed
+- **Post-diffusion relaxation no longer breaks on periodic structures.**
+  Positions are wrapped back into the cell after every step, so an atom
+  crossing a cell face reappeared a full lattice vector away; the L-BFGS step
+  sizer reconstructed its displacement by differencing stored positions and so
+  recorded that jump as a history pair.  A single such pair sent the search
+  direction somewhere unrelated to the forces, and because the history holds
+  100 pairs it corrupted the rest of the run — the energy rose instead of
+  falling.  Displacements are now taken in the minimum-image convention.
+  Relaxing an 8-atom periodic Cu cell against exact EMT forces went from
+  10.53 → 15.35 eV (diverging) to 10.53 → 7.60 eV, matching
+  `ase.optimize.LBFGS` to within float32 precision.  Affects
+  `sample(max_extra_steps=...)` and force-field guidance; non-periodic systems
+  were never affected.
+- **`post_diffusion_relaxation_step` no longer perturbs converged structures.**
+  Wrapping positions into the cell round-trips through fractional coordinates,
+  which is not bit-exact even for a no-op wrap, so every already-converged
+  structure in a batch picked up ~1e-7 Å of numerical drift each relaxation
+  step it should have been skipping (`active=False`).  `AtomsGraph.wrap_positions()`
+  now takes an optional per-atom mask and leaves unmasked atoms' positions
+  untouched instead of round-tripping them; caught by
+  `TestPerStructureConvergence::test_inactive_structures_do_not_move`, which
+  was intermittently failing in CI.
+- **`relax()` / `inpaint()` no longer crash on `fully_connected=True` models.**
+  Graph construction in `relaxation.py` and the initial graph in
+  `inpainting.py` never threaded `fully_connected` through, so
+  `AtomsGraph.update_graph()` took the cutoff-based neighbour-rebuild branch
+  instead of the static fully-connected one; as per-graph edge counts then
+  drifted from the batch's recorded slicing metadata,
+  `Batch.to_data_list()` eventually raised
+  `RuntimeError: start (...) + length (...) exceeds dimension size (...)`.
+  Both now read `fully_connected` off the model, mirroring the existing
+  pattern in `sample()`.
+- **Masked atoms no longer leak a stale `t=0` time into message passing
+  during multi-call samplers.** `PredictorCorrectorSampler`, `HeunSampler`,
+  `ForcefieldCorrectorSampler`, and `HeunODESampler` advanced `batch.time`
+  mid-step via the `.time` property setter, which forces every masked atom's
+  time to `0.0` via `apply_mask` instead of the real intermediate time the
+  rest of the batch sees at a corrector pass or a second score evaluation.
+  For a message-passing backbone this could leak a wrong time-embedding from
+  a masked neighbour into an unmasked atom's computed score — a correctness
+  risk for `MaskFixed` / `ConfinedCellPositions` systems. Fixed by using
+  `add_batch_attr("time", ..., type="node")` instead, matching the pattern
+  the main sampling loop already uses.
+
+### Changed
+- **Novelty guidance stability pass.**  Six changes to how the repulsion is
+  scaled and scheduled; all of them alter behaviour, so an existing
+  ``guidance`` value needs recalibrating (see the note below).
+  - The step is now scaled by ``dt``, so ``guidance`` is a property of the
+    trajectory rather than of its discretisation.  Previously the accumulated
+    bias grew linearly with ``steps``, and a value tuned at 200 steps was 2.5x
+    too strong at 500.
+  - ``schedule="gaussian"`` is the new default time weight,
+    ``exp(-(t - t_center)**2 / (2 * t_width**2))`` with ``t_center=0.5`` and
+    ``t_width=0.2``.  The old front-loaded ``t**zeta`` is still available as
+    ``schedule="power"``.  A bell is the right shape because the guidance is
+    only meaningful in a window: at ``t -> 1`` the samples are a noise gas
+    whose features sit far from every archive entry, so the kernel is dead and
+    the in-batch term merely amplifies noise, while at ``t -> 0`` the basin is
+    already committed and repulsion only distorts a finished geometry.
+  - ``sigma`` now defaults to ``None``, meaning *calibrate it against the
+    archive*: it is set to the ``sigma_quantile`` (default ``0.05``) quantile
+    of the archive's own pairwise feature distances.  A fixed bandwidth is a
+    guess in a feature space that is rebuilt on every retraining.  The resolved
+    value and the archive's 1/5/50% distance quantiles are printed in the
+    sampling-configuration panel.  New: ``FeatureArchive.distance_quantiles()``
+    and ``agedi.diffusion.resolve_novelty_config()``.
+  - ``max_step_size`` is applied as one rescaling per structure instead of a
+    per-atom clip.  The pooled-feature gradient is typically concentrated on a
+    handful of atoms, so per-atom clipping shortened only those and sheared the
+    structure; a single factor bounds the magnitude while keeping the step
+    parallel to the gradient.  Fixed template atoms are excluded from that
+    maximum — their displacement is discarded anyway, but they carry a
+    gradient and would otherwise shrink the step of the atoms that do move.
+  - ``normalize_density`` (new, on by default) divides each structure's
+    repulsion by its own kernel sum, clamped below at ``1.0``.  Without it the
+    gradient grows with the density of the archive, so the same ``guidance``
+    becomes steadily more aggressive as a global-optimisation campaign fills
+    the archive up.  The denominator is detached, and the clamp means a sample
+    far from everything is untouched.
+  - In-batch pairs are now counted once, like archive pairs.  The double sum
+    over the batch visits every pair twice, so ``include_batch=True`` silently
+    made in-batch repulsion twice as strong as the archive term and the two
+    could not be balanced.  New ``batch_weight`` sets their relative weight
+    explicitly.
+- Post-diffusion relaxation now evaluates the force field **once** per step
+  instead of twice — the convergence check's forces are reused by the next
+  step, halving the cost of relaxation.
+- Relaxation convergence is tracked **per structure** rather than across the
+  whole batch: a structure that reaches `force_threshold` stops being stepped
+  instead of continuing until the worst structure in the batch converges.
+
+### Notes
+- Novelty guidance costs roughly one extra score-model forward *and* backward
+  per reverse step (~2x measured), and is incompatible with ``compile=True``
+  (a clear ``ValueError`` is raised).
+- Recalibrating ``guidance``: prefer not to.  Set ``guidance=None`` and pick a
+  ``target_displacement``, and the scale is derived per run.  If you do keep an
+  explicit number, the ``dt`` factor alone means the old value must be
+  multiplied by roughly ``steps``, and the density normalisation and halved
+  in-batch term reduce it further for dense archives.
+- Features live in the backbone's activation space and are only comparable
+  within one model generation.  ``FeatureArchive`` must be rebuilt after every
+  retraining; passing ``novelty_reference`` to ``sample()`` does this
+  automatically.
+
 ## [1.4.0] - 2026-08-11
 
 ### Added
@@ -22,8 +281,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agedi train --reference_energies` (`auto` | `none` | `Cu:-3.72,O:-4.95`).
 - **`agedi.utils.reference_energies`** — `fit_reference_energies()`,
   `normalize_reference_energies()`, and helpers for the reference-energy table.
-- Force-field settings (reference energies, force loss) are shown in the
-  training run-configuration panel and stored in `hparams.yaml`.
+- **`regressor_loss_weight` is now reachable from the public API** — the weight
+  balancing the force-field loss against the diffusion loss
+  (`loss = diffusion_loss + regressor_loss_weight · regressor_loss`) existed on
+  `Agedi` but could only be set by constructing the model by hand.  It is now a
+  parameter of `create_diffusion()` and `train_from_atoms()`, a
+  `regressor_loss_weight` config key, and `agedi train --regressor_loss_weight`.
+  Default `1.0` (unchanged behaviour).
+- Force-field settings (reference energies, force loss, regressor loss weight)
+  are shown in the training run-configuration panel and stored in
+  `hparams.yaml`.
 
 ### Changed
 - **The force-field forces head is now trained with a Huber loss by default**

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import time
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -26,7 +26,17 @@ from .guidance import (
     BatchedLBFGSStepSizer,
     ForcefieldGuidanceConfig,
     force_field_guidance_step,
+    max_force_per_graph,
     post_diffusion_relaxation_step,
+    reassert_known_positions,
+)
+from .novelty import (
+    FeatureArchive,
+    NoveltyCalibrator,
+    NoveltyGuidanceConfig,
+    _time_factor as _novelty_time_factor,
+    novelty_guidance_step,
+    resolve_novelty_config,
 )
 
 
@@ -40,6 +50,7 @@ class SamplingTimings:
     wrap_positions: float = 0.0
     neighbor_list: float = 0.0
     force_field_guidance: float = 0.0
+    novelty_guidance: float = 0.0
     guidance_wrap_positions: float = 0.0
     guidance_neighbor_list: float = 0.0
     post_diffusion_force_eval: float = 0.0
@@ -51,6 +62,7 @@ class SamplingTimings:
     reverse_step_calls: int = 0
     score_model_calls: int = 0
     force_field_calls: int = 0
+    novelty_guidance_calls: int = 0
     neighbor_list_calls: int = 0
     neighbor_list_rebuilds: int = 0
     guidance_neighbor_list_calls: int = 0
@@ -109,6 +121,7 @@ class Diffusion:
         self.eps = eps
         self.lbfgs_step_sizer: Optional[BatchedLBFGSStepSizer] = None
         self.zeta: float = 3.0
+        self.novelty_calibrator: Optional[NoveltyCalibrator] = None
 
         self.noiser_keys = [noiser.key for noiser in noisers]
         self.score_keys = [head.key for head in score_model.heads]
@@ -440,6 +453,8 @@ class Diffusion:
         batch: AtomsGraph,
         scale: float = 1.0,
         max_step_size: float = 0.2,
+        forces: Optional[torch.Tensor] = None,
+        active: Optional[torch.Tensor] = None,
     ) -> AtomsGraph:
         """Perform one L-BFGS relaxation step, as ``ase.optimize.LBFGS`` would.
 
@@ -453,6 +468,12 @@ class Diffusion:
         max_step_size : float, optional
             Maximum single-atom displacement per step, in Å.  Defaults to
             ``0.2``, matching ASE.
+        forces : torch.Tensor, optional
+            Forces at the current positions.  Supplying them skips the
+            regressor call inside the step.
+        active : torch.Tensor, optional
+            Boolean mask over graphs; structures marked ``False`` are left
+            untouched.
 
         Returns
         -------
@@ -465,6 +486,8 @@ class Diffusion:
             self.lbfgs_step_sizer,
             scale=scale,
             max_step_size=max_step_size,
+            forces=forces,
+            active=active,
         )
 
     # ------------------------------------------------------------------
@@ -547,6 +570,88 @@ class Diffusion:
                 setattr(new_graph, "pbc", pbc)
 
         return new_graph
+
+    @staticmethod
+    def _expand_mask_like(mask: torch.Tensor, tensor: torch.Tensor) -> torch.Tensor:
+        """Broadcast a per-atom bool mask to the trailing shape of *tensor*."""
+        if tensor.dim() > mask.dim():
+            shape = [mask.shape[0]] + [1] * (tensor.dim() - 1)
+            return mask.view(*shape)
+        return mask
+
+    def _initialize_inpaint_graph(
+        self,
+        source: AtomsGraph,
+        inpaint_mask: torch.Tensor,
+        freeze_mask: Optional[torch.Tensor],
+        t_start: float,
+    ) -> AtomsGraph:
+        """Build one inpainting starting graph from an existing structure.
+
+        Clones *source*, records its clean state as the ``{key}0`` reference
+        for every noiser (used by :meth:`~agedi.diffusion.noisers.Noiser.forward_marginal`
+        throughout sampling), then draws the initial noised state:
+
+        * ``t_start == 1.0``: atoms selected by *inpaint_mask* are drawn from
+          each noiser's prior (matching ordinary from-scratch sampling);
+          atoms not selected are drawn from the forward marginal
+          ``q(z_1 | z_0)`` instead of the prior, since their identity is known.
+        * ``t_start < 1.0``: every atom (selected or not) is drawn from the
+          forward marginal ``q(z_{t_start} | z_0)``. The distinction between
+          selected and known atoms only takes effect once reverse diffusion
+          starts regenerating the selected ones.
+
+        Parameters
+        ----------
+        source : AtomsGraph
+            The input structure (unbatched), already carrying ``cutoff``.
+        inpaint_mask : torch.Tensor
+            Bool tensor, ``True`` for atoms to regenerate.
+        freeze_mask : torch.Tensor, optional
+            Bool tensor, ``True`` for atoms to hard-freeze (never move),
+            stored as ``mask``. Must be disjoint from *inpaint_mask*.
+        t_start : float
+            Starting diffusion time.
+
+        Returns
+        -------
+        AtomsGraph
+            The initialised graph, not yet batched or graph-built.
+
+        """
+        graph = source.clone()
+        device = graph.pos.device
+
+        inpaint_mask = inpaint_mask.to(device=device, dtype=torch.bool)
+        if freeze_mask is None:
+            freeze_mask = torch.zeros_like(inpaint_mask)
+        else:
+            freeze_mask = freeze_mask.to(device=device, dtype=torch.bool)
+
+        setattr(graph, "inpaint_mask", inpaint_mask)
+        setattr(graph, "mask", freeze_mask)
+
+        t = torch.full(
+            (graph.pos.shape[0], 1), float(t_start), device=device, dtype=graph.pos.dtype
+        )
+        graph.time = t
+
+        for noiser in self.noisers:
+            key = noiser.key
+            ref = graph[key].clone()
+            graph.add_batch_attr(key + "0", ref, type="node")
+
+            marginal = noiser.forward_marginal(graph, ref)
+            if t_start >= 1.0:
+                prior = noiser.prior.get_callable(graph)()
+                select = self._expand_mask_like(inpaint_mask, prior)
+                new_val = torch.where(select, prior, marginal)
+            else:
+                new_val = marginal
+
+            setattr(graph, key, new_val)
+
+        return graph
 
     # ------------------------------------------------------------------
     # Timing helpers
@@ -637,6 +742,14 @@ class Diffusion:
                     "guidance neighbor list updates",
                     timings.guidance_neighbor_list,
                     timings.guidance_neighbor_list_calls,
+                )
+            )
+        if timings.novelty_guidance_calls > 0:
+            print(
+                self._format_timing_line(
+                    "novelty guidance",
+                    timings.novelty_guidance,
+                    timings.novelty_guidance_calls,
                 )
             )
         if timings.post_diffusion_force_eval > 0:
@@ -731,7 +844,11 @@ class Diffusion:
         is_compiled: bool = False,
         sampler=None,
         sampler_kwargs=None,
+        novelty_guidance: Optional[NoveltyGuidanceConfig] = None,
+        novelty_archive: Optional[FeatureArchive] = None,
+        novelty_calibrator: Optional[NoveltyCalibrator] = None,
         save_corrector_frames: bool = False,
+        t_start: float = 1.0,
     ) -> List[AtomsGraph]:
         """Run the reverse-diffusion loop for a pre-built batch.
 
@@ -779,11 +896,29 @@ class Diffusion:
             Extra constructor arguments forwarded to the sampler when *sampler*
             is a string alias.  Keys override the defaults supplied by
             *corrector_steps* / *corrector_step_size*.
+        novelty_guidance : NoveltyGuidanceConfig, optional
+            Feature-space novelty guidance configuration.  ``None`` (default)
+            disables it.  Not supported on the compiled path.  A ``sigma`` of
+            ``None`` is resolved against *novelty_archive* once, before the
+            loop starts.
+        novelty_archive : FeatureArchive, optional
+            Features of already-found structures to repel from.  When ``None``,
+            only the in-batch repulsion term contributes.
+        novelty_calibrator : NoveltyCalibrator, optional
+            Supplies the guidance scale when ``novelty_guidance.guidance`` is
+            ``None``.  Pass the *same* calibrator for every batch of a run so
+            that all samples are driven at one strength; one is built here for
+            the schedule in use when none is given.
         save_corrector_frames : bool, optional
             Also record every Langevin corrector sub-step in the saved
             trajectory.  Only meaningful together with *save_trajectory* and a
             sampler that runs correctors (``"pc"`` / ``"ffpc"``).  ``False``
             (default) records one frame per outer diffusion step.
+        t_start : float, optional
+            Starting diffusion time.  ``1.0`` (default) runs the full reverse
+            trajectory.  Values below ``1.0`` start from a partially-noised
+            state, e.g. for inpainting-style local refinement via
+            :meth:`inpaint`.
 
         Returns
         -------
@@ -793,6 +928,24 @@ class Diffusion:
         """
         if reverse_step_fn is None:
             reverse_step_fn = self.reverse_step
+
+        novelty_enabled = novelty_guidance is not None and (
+            novelty_guidance.guidance is None or novelty_guidance.guidance != 0.0
+        )
+        if novelty_enabled and is_compiled:
+            raise ValueError(
+                "Novelty guidance is not supported with compile=True. It "
+                "differentiates the backbone with respect to the atomic "
+                "positions, which the compiled reverse step does not expose. "
+                "Sample with compile=False to use novelty guidance."
+            )
+        if novelty_enabled:
+            # Resolve sigma against the archive once, not on every step: the
+            # calibration is an O(n^2) reduction over the archive features.
+            novelty_guidance = resolve_novelty_config(
+                novelty_guidance, novelty_archive
+            )
+            from agedi.diffusion.samplers import Sampler as _SamplerCls
 
         if steps < 2:
             return batch.to_data_list()
@@ -826,8 +979,17 @@ class Diffusion:
                 batch_size=batch.batch_size
             )
 
-        ts = torch.linspace(1, eps, steps, device=self.device)
+        ts = torch.linspace(t_start, eps, steps, device=self.device)
         dt = ts[0] - ts[1]
+
+        if novelty_enabled and novelty_guidance.guidance is None:
+            # Build the calibrator against the schedule actually being run, so
+            # the displacement budget is spread over this discretisation.
+            if novelty_calibrator is None:
+                novelty_calibrator = NoveltyCalibrator(
+                    novelty_guidance.target_displacement,
+                    dt * _novelty_time_factor(novelty_guidance, ts),
+                )
 
         # Inject call-counting wrappers so timings tracks actual score/ff invocations.
         _orig_score_fn = None
@@ -917,12 +1079,18 @@ class Diffusion:
                             force_field_guidance * dt,
                         )
                         timings.force_field_calls += 1
+                        pre_wrap_pos = batch.pos.clone()
                         self._time_sampling_call(
                             batch.pos.device,
                             timings,
                             "guidance_wrap_positions",
                             batch.wrap_positions,
                         )
+                        # wrap_positions() can flip a known (non-inpainted)
+                        # atom sitting near a periodic-cell boundary to the
+                        # adjacent image; restore it before rebuilding the
+                        # neighbor list. No-op outside inpainting.
+                        reassert_known_positions(batch, pre_wrap_pos)
                         guidance_rebuilt = self._time_sampling_call(
                             batch.pos.device,
                             timings,
@@ -936,8 +1104,42 @@ class Diffusion:
                         batch = self.force_field_guidance_step(
                             batch, force_field_guidance * dt
                         )
+                        pre_wrap_pos = batch.pos.clone()
                         batch.wrap_positions()
+                        reassert_known_positions(batch, pre_wrap_pos)
                         batch.update_graph()
+
+                # Feature-space novelty guidance, applied after the sampler
+                # step on the same footing as the force-field guidance above.
+                if novelty_enabled:
+                    if novelty_calibrator is not None:
+                        novelty_calibrator.begin_step(i)
+                    if timings is not None:
+                        batch = self._time_sampling_call(
+                            batch.pos.device,
+                            timings,
+                            "novelty_guidance",
+                            novelty_guidance_step,
+                            batch,
+                            self.score_model,
+                            novelty_archive,
+                            novelty_guidance,
+                            dt,
+                            novelty_calibrator,
+                        )
+                        timings.novelty_guidance_calls += 1
+                    else:
+                        batch = novelty_guidance_step(
+                            batch,
+                            self.score_model,
+                            novelty_archive,
+                            novelty_guidance,
+                            dt,
+                            novelty_calibrator,
+                        )
+                    _SamplerCls._check_finite(batch, "novelty guidance")
+                    batch.wrap_positions()
+                    batch.update_graph()
 
                 # Append sub-step frames produced inside sampler.step() —
                 # corrector steps when save_corrector_frames is set, and the
@@ -981,7 +1183,13 @@ class Diffusion:
                     self.regressor_model,
                     batch,
                 )
-            max_forces = torch.norm(batch.forces_prediction, dim=1).max(dim=0)[0]
+            # Convergence is tracked per structure: a batch-wide maximum keeps
+            # every structure stepping until the worst one is done, jostling
+            # the ones that already converged.
+            per_graph_forces = max_force_per_graph(
+                batch.forces_prediction, batch.batch, batch.num_graphs
+            )
+            max_forces = per_graph_forces.max()
 
             if max_forces > force_threshold and max_extra_steps > 0:
                 if progress_bar:
@@ -1000,11 +1208,21 @@ class Diffusion:
                 )
 
                 for i in extra_iterator:
+                    # Structures already below the threshold sit out the rest
+                    # of the relaxation instead of being stepped further.
+                    active = per_graph_forces > force_threshold
+                    # The forces were evaluated at exactly these positions by
+                    # the convergence check (or the initial eval above), so
+                    # they are passed in rather than recomputed.
+                    forces = batch.forces_prediction
+
                     # Full L-BFGS step (ASE damping=1.0).  Scaling the step
                     # down here would slow convergence without improving
                     # stability — the maxstep limit is what bounds the step.
                     if timings is None:
-                        batch = self.post_diffusion_relaxation_step(batch)
+                        batch = self.post_diffusion_relaxation_step(
+                            batch, forces=forces, active=active
+                        )
                     else:
                         batch = self._time_sampling_call(
                             batch.pos.device,
@@ -1012,6 +1230,8 @@ class Diffusion:
                             "post_diffusion_relaxation",
                             self.post_diffusion_relaxation_step,
                             batch,
+                            forces=forces,
+                            active=active,
                         )
                         timings.post_diffusion_relaxation_steps += 1
 
@@ -1025,9 +1245,10 @@ class Diffusion:
                             self.regressor_model,
                             batch,
                         )
-                    max_forces = torch.norm(batch.forces_prediction, dim=1).max(
-                        dim=0
-                    )[0]
+                    per_graph_forces = max_force_per_graph(
+                        batch.forces_prediction, batch.batch, batch.num_graphs
+                    )
+                    max_forces = per_graph_forces.max()
 
                     if save_trajectory:
                         path.append(batch.to_data_list())
@@ -1071,7 +1292,12 @@ class Diffusion:
         compile: bool = False,
         sampler=None,
         sampler_kwargs=None,
+        novelty_guidance: Optional[NoveltyGuidanceConfig] = None,
+        novelty_archive: Optional[FeatureArchive] = None,
+        novelty_calibrator: Optional[NoveltyCalibrator] = None,
         save_corrector_frames: bool = False,
+        t_start: float = 1.0,
+        graph_factory: Optional[Callable[[], AtomsGraph]] = None,
         **kwargs,
     ) -> List[AtomsGraph]:
         """Build *N* graphs from priors and run the sampling loop.
@@ -1107,8 +1333,18 @@ class Diffusion:
         sampler_kwargs : dict, optional
             Extra keyword arguments forwarded to the sampler constructor when
             *sampler* is a string alias.
+        t_start : float, optional
+            Starting diffusion time, forwarded to :meth:`_sample_batch`.
+            Defaults to ``1.0`` (full reverse trajectory).
+        graph_factory : callable, optional
+            When given, called with no arguments once per structure instead
+            of ``self._initialize_graph(cutoff, **kwargs)`` to build the
+            initial (unbatched) graph.  Used by :meth:`inpaint` to build
+            graphs from an existing structure rather than from noiser priors;
+            *kwargs* is ignored when this is provided.
         **kwargs
-            Keyword arguments forwarded to :meth:`_initialize_graph`.
+            Keyword arguments forwarded to :meth:`_initialize_graph`.  Ignored
+            when *graph_factory* is given.
 
         Returns
         -------
@@ -1122,7 +1358,10 @@ class Diffusion:
         data = []
         init_start = time.perf_counter()
         for _ in range(N):
-            data.append(self._initialize_graph(cutoff, **kwargs))
+            if graph_factory is not None:
+                data.append(graph_factory())
+            else:
+                data.append(self._initialize_graph(cutoff, **kwargs))
         timings.initialization += time.perf_counter() - init_start
 
         batch_setup_start = time.perf_counter()
@@ -1164,7 +1403,11 @@ class Diffusion:
             is_compiled=compile,
             sampler=sampler,
             sampler_kwargs=sampler_kwargs,
+            novelty_guidance=novelty_guidance,
+            novelty_archive=novelty_archive,
+            novelty_calibrator=novelty_calibrator,
             save_corrector_frames=save_corrector_frames,
+            t_start=t_start,
         )
         self._sync_for_timing(batch.pos.device)
         timings.total_wall = time.perf_counter() - total_start
@@ -1193,6 +1436,9 @@ class Diffusion:
         confinement: Optional[Tuple[float, float]] = None,
         compile: bool = False,
         ff_guidance: Optional[ForcefieldGuidanceConfig] = None,
+        novelty_guidance: Optional[NoveltyGuidanceConfig] = None,
+        novelty_archive: Optional[FeatureArchive] = None,
+        novelty_calibrator: Optional[NoveltyCalibrator] = None,
         property: Optional[Dict] = None,
         progress_bar: Optional[bool] = False,
         save_trajectory: Optional[bool] = False,
@@ -1253,6 +1499,23 @@ class Diffusion:
             step for improved throughput on CUDA hardware.
         ff_guidance : ForcefieldGuidanceConfig, optional
             Force-field guidance configuration.
+        novelty_guidance : NoveltyGuidanceConfig, optional
+            Feature-space novelty guidance configuration, which repels samples
+            from already-found structures.  ``None`` (default) disables it.
+            Incompatible with ``compile=True``.
+        novelty_archive : FeatureArchive, optional
+            Features of the already-found structures to repel from, built with
+            :meth:`~agedi.diffusion.novelty.FeatureArchive.from_structures`.
+            Must be rebuilt whenever the score model is retrained, and — when
+            sampling on a *template* — built with ``n_template`` set to the
+            template's atom count, so the references are pooled over the same
+            atoms as the samples.  When ``None``, only the in-batch repulsion
+            term contributes.
+        novelty_calibrator : NoveltyCalibrator, optional
+            Supplies the guidance scale when ``novelty_guidance.guidance`` is
+            ``None``.  Built here for the schedule in use when not given, and
+            shared across every batch so that all samples are driven at one
+            strength.  Available afterwards as ``self.novelty_calibrator``.
         property : dict, optional
             Conditioning properties (key -> scalar tensor).
         progress_bar : bool, optional
@@ -1339,6 +1602,22 @@ class Diffusion:
         if template is not None and cell is None:
             cell = template.cell.detach().cpu().numpy()
 
+        # One calibrator for the whole run, not one per batch: every sample
+        # should be driven at the same strength, and the scale only needs
+        # measuring once.  Exposed afterwards as ``self.novelty_calibrator``
+        # so callers can report what it settled on.
+        if (
+            novelty_calibrator is None
+            and novelty_guidance is not None
+            and novelty_guidance.guidance is None
+        ):
+            _ts = torch.linspace(1, eps, steps, device=self.device)
+            novelty_calibrator = NoveltyCalibrator(
+                novelty_guidance.target_displacement,
+                (_ts[0] - _ts[1]) * _novelty_time_factor(novelty_guidance, _ts),
+            )
+        self.novelty_calibrator = novelty_calibrator
+
         kwargs: Dict = {}
         # Sampling-control parameters passed explicitly to _sample.
         sample_kwargs: Dict = {
@@ -1353,6 +1632,9 @@ class Diffusion:
             "compile": compile,
             "sampler": sampler,
             "sampler_kwargs": sampler_kwargs,
+            "novelty_guidance": novelty_guidance,
+            "novelty_archive": novelty_archive,
+            "novelty_calibrator": novelty_calibrator,
         }
         self.zeta = ff_guidance.zeta
 
@@ -1434,4 +1716,268 @@ class Diffusion:
             return self._sample(
                 N, steps, cutoff, eps, ff_guidance.guidance,
                 **sample_kwargs, **kwargs,
+            )
+
+    # ------------------------------------------------------------------
+    # Public inpainting API
+    # ------------------------------------------------------------------
+
+    def inpaint(
+        self,
+        structure: Union[AtomsGraph, List[AtomsGraph]],
+        inpaint_mask,
+        N: int = 1,
+        batch_size: int = 64,
+        steps: int = 500,
+        eps: float = 1e-3,
+        t_start: float = 1.0,
+        freeze=None,
+        n_resample: int = 1,
+        jump_length: int = 1,
+        compile: bool = False,
+        ff_guidance: Optional[ForcefieldGuidanceConfig] = None,
+        property: Optional[Dict] = None,
+        progress_bar: bool = False,
+        save_trajectory: bool = False,
+        save_corrector_frames: bool = False,
+        print_timings: bool = False,
+        sampler=None,
+        sampler_kwargs=None,
+    ) -> List[AtomsGraph]:
+        """Regenerate a chosen subset of atoms in one or more structures.
+
+        Runs masked reverse diffusion ("inpainting"): atoms selected by
+        *inpaint_mask* are regenerated from noise (or from a partially-noised
+        state when *t_start* < 1), while every other atom is, at each reverse
+        step, replaced by a fresh sample of the forward process ``q(z_t |
+        z_0)`` of *structure* — so the whole batch always sits at a
+        self-consistent noise level for the score model, and the non-selected
+        atoms converge back onto their input positions (and, for the
+        atomic-type noiser, their input species) exactly.
+
+        Parameters
+        ----------
+        structure : AtomsGraph or list of AtomsGraph
+            The input structure (unbatched), e.g. from
+            :meth:`~agedi.data.AtomsGraph.from_atoms`. Passing a list batches
+            multiple, independent structures together — they need not share
+            atom count, composition, or cell — for GPU throughput; *N*
+            samples are then generated per structure (not in total), and the
+            result is a flat list of length ``len(structure) * N`` in
+            structure-major order (all *N* samples of ``structure[0]``, then
+            all *N* of ``structure[1]``, ...). *inpaint_mask* (and *freeze*,
+            if given) must then also be a list of the same length, one entry
+            already resolved against the matching structure — this method
+            does no per-structure re-resolution of selection criteria itself.
+        inpaint_mask : array-like of bool, shape (n_atoms,), or list thereof
+            ``True`` for atoms to regenerate. A list when *structure* is a
+            list (see above).
+        N : int, optional
+            Number of independent inpainted samples to generate *per input
+            structure*. Defaults to ``1``.
+        batch_size : int, optional
+            Maximum number of structures sampled in one batch; the total
+            ``len(structure) * N`` (or just ``N`` for a single structure) is
+            chunked when larger. Defaults to ``64``.
+        steps : int, optional
+            Number of reverse-diffusion steps. Defaults to ``500``.
+        eps : float, optional
+            Minimum time value (end of trajectory). Defaults to ``1e-3``.
+        t_start : float, optional
+            Starting diffusion time. ``1.0`` (default) fully re-noises the
+            selected atoms (de-novo generation of that region). Values below
+            ``1.0`` start from a partially-noised state for a local
+            rattle-and-relax refinement instead.
+        freeze : array-like of bool, shape (n_atoms,), or list thereof, optional
+            ``True`` for atoms to hard-freeze: they never move and are
+            excluded from the forward-marginal replacement applied to the
+            other known atoms. Must be disjoint from *inpaint_mask*. A list
+            (or a list containing ``None`` entries) when *structure* is a
+            list; ``None`` overall or per-entry means "freeze nothing" for
+            that structure.
+        n_resample : int, optional
+            Number of RePaint-style resampling passes per reverse step.
+            ``1`` (default) disables resampling.
+        jump_length : int, optional
+            Sub-steps per resampling pass before jumping back; see
+            :class:`~agedi.diffusion.samplers.InpaintingSampler`. Only
+            meaningful when *n_resample* > 1. Defaults to ``1``.
+        compile : bool, optional
+            Not supported for inpainting (the compiled path bypasses
+            samplers). Must be ``False``.
+        ff_guidance : ForcefieldGuidanceConfig, optional
+            Force-field guidance configuration.
+        property : dict, optional
+            Conditioning property values, e.g. ``{"energy": -3.5}``.
+        progress_bar : bool, optional
+            Show a tqdm progress bar.
+        save_trajectory : bool, optional
+            Return one trajectory per structure instead of final structures.
+        save_corrector_frames : bool, optional
+            Also record every corrector/resampling sub-step.
+        print_timings : bool, optional
+            Print a timing breakdown after sampling.
+        sampler : str, Sampler, or None, optional
+            The *inner* reverse-diffusion algorithm wrapped by the inpainting
+            logic, e.g. ``"em"``, ``"pc"``, ``"heun"``. Defaults to Euler-Maruyama.
+        sampler_kwargs : dict, optional
+            Extra keyword arguments forwarded to the inner sampler.
+
+        Returns
+        -------
+        List[AtomsGraph]
+            Inpainted structures (or trajectories when *save_trajectory* is
+            ``True``), as a flat list of length ``N`` for a single input
+            structure, or ``len(structure) * N`` in structure-major order
+            when *structure* is a list.
+
+        """
+        if compile:
+            raise ValueError(
+                "compile=True is not supported for inpaint(): the compiled "
+                "reverse step bypasses samplers entirely, and inpainting is "
+                "implemented as a sampler. Use compile=False."
+            )
+        if not (0.0 < t_start <= 1.0):
+            raise ValueError(f"t_start must be in (0, 1], got {t_start}")
+
+        if ff_guidance is None:
+            ff_guidance = ForcefieldGuidanceConfig()
+
+        self.score_model.sample_mode()
+
+        is_multi = isinstance(structure, (list, tuple))
+        structures = list(structure) if is_multi else [structure]
+
+        if is_multi:
+            if not isinstance(inpaint_mask, (list, tuple)) or len(inpaint_mask) != len(structures):
+                raise ValueError(
+                    "structure is a list, so inpaint_mask must also be a list "
+                    f"of the same length ({len(structures)}); got "
+                    f"{inpaint_mask if isinstance(inpaint_mask, (list, tuple)) else type(inpaint_mask).__name__}."
+                )
+            masks_raw = list(inpaint_mask)
+            if freeze is not None:
+                if not isinstance(freeze, (list, tuple)) or len(freeze) != len(structures):
+                    raise ValueError(
+                        "structure is a list, so freeze must also be a list of "
+                        f"the same length ({len(structures)}) (entries may be "
+                        "None), or None overall."
+                    )
+                freezes_raw = list(freeze)
+            else:
+                freezes_raw = [None] * len(structures)
+        else:
+            masks_raw = [inpaint_mask]
+            freezes_raw = [freeze]
+
+        inpaint_masks: List[torch.Tensor] = []
+        freeze_masks: List[Optional[torch.Tensor]] = []
+        for i, (struct_i, mask_i, freeze_i) in enumerate(zip(structures, masks_raw, freezes_raw)):
+            device = struct_i.pos.device
+            n_atoms_i = struct_i.pos.shape[0]
+            prefix = f"structure[{i}]: " if is_multi else ""
+
+            mask_t = torch.as_tensor(np.asarray(mask_i), dtype=torch.bool, device=device)
+            if mask_t.shape[0] != n_atoms_i:
+                raise ValueError(
+                    f"{prefix}inpaint_mask has {mask_t.shape[0]} entries but "
+                    f"the structure has {n_atoms_i} atoms."
+                )
+            if not mask_t.any():
+                raise ValueError(f"{prefix}inpaint_mask selects no atoms; nothing to inpaint.")
+
+            freeze_t = None
+            if freeze_i is not None:
+                freeze_t = torch.as_tensor(np.asarray(freeze_i), dtype=torch.bool, device=device)
+                if freeze_t.shape[0] != n_atoms_i:
+                    raise ValueError(
+                        f"{prefix}freeze has {freeze_t.shape[0]} entries but "
+                        f"the structure has {n_atoms_i} atoms."
+                    )
+                if (freeze_t & mask_t).any():
+                    raise ValueError(
+                        f"{prefix}freeze and inpaint_mask must be disjoint: an "
+                        "atom cannot be both frozen and selected for regeneration."
+                    )
+
+            inpaint_masks.append(mask_t)
+            freeze_masks.append(freeze_t)
+
+        if property is not None:
+            for struct_i in structures:
+                for k, v in property.items():
+                    setattr(struct_i, k, torch.tensor(v, dtype=torch.float))
+
+        # Only used by _sample() for torch.compile buffer sizing, which is
+        # disallowed above; extracted defensively either way.
+        _cutoff = getattr(structures[0], "cutoff", 6.0)
+        cutoff = float(_cutoff.reshape(-1)[0].item()) if torch.is_tensor(_cutoff) else float(_cutoff)
+
+        base_sampler = self._resolve_sampler(sampler, 0, 1e-3, sampler_kwargs)
+        from agedi.diffusion.samplers import InpaintingSampler
+
+        inpainting_sampler = InpaintingSampler(
+            base_sampler, self.noisers, n_resample=n_resample, jump_length=jump_length
+        )
+
+        # Structure-major order: N samples of structures[0], then N of
+        # structures[1], etc. A stateful iterator-backed closure lets this
+        # reuse _sample()'s existing "for _ in range(total): graph_factory()"
+        # loop, and the existing N > batch_size chunking below, unchanged --
+        # each chunk's call to _sample() just keeps consuming from the same
+        # shared iterator where the previous chunk left off.
+        _init = self._initialize_inpaint_graph
+        _calls = iter(
+            (s, m, f)
+            for s, m, f in zip(structures, inpaint_masks, freeze_masks)
+            for _ in range(N)
+        )
+
+        def graph_factory() -> AtomsGraph:
+            s, m, f = next(_calls)
+            return _init(s, m, f, t_start)
+
+        total = len(structures) * N
+        self.zeta = ff_guidance.zeta
+
+        sample_kwargs: Dict = {
+            "progress_bar": progress_bar,
+            "save_trajectory": save_trajectory,
+            "save_corrector_frames": save_corrector_frames,
+            "force_threshold": ff_guidance.force_threshold,
+            "max_extra_steps": ff_guidance.max_extra_steps,
+            "print_timings": print_timings,
+            "compile": False,
+            "sampler": inpainting_sampler,
+            "sampler_kwargs": None,
+            "t_start": t_start,
+            "graph_factory": graph_factory,
+        }
+
+        if total > batch_size:
+            from rich.console import Console as _Console
+
+            _console = _Console()
+            n_full = total // batch_size
+            n_remainder = total % batch_size
+            n_batches = n_full + (1 if n_remainder > 0 else 0)
+            out = []
+            for i in range(n_full):
+                _console.print(f"Inpainting batch {i + 1}/{n_batches}...")
+                out += self._sample(
+                    batch_size, steps, cutoff, eps, ff_guidance.guidance,
+                    **sample_kwargs,
+                )
+            if n_remainder > 0:
+                _console.print(f"Inpainting batch {n_batches}/{n_batches}...")
+                out += self._sample(
+                    n_remainder, steps, cutoff, eps, ff_guidance.guidance,
+                    **sample_kwargs,
+                )
+            return out
+        else:
+            return self._sample(
+                total, steps, cutoff, eps, ff_guidance.guidance,
+                **sample_kwargs,
             )

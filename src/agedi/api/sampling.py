@@ -1,7 +1,7 @@
 """Sampling from a trained diffusion model."""
 
 import time
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -28,8 +28,11 @@ def sample(
     compile: bool = False,
     steps: int = 500,
     eps: float = 1e-3,
+    cutoff: float = 6.0,
     batch_size: int = 64,
     ff_guidance: Optional["ForcefieldGuidanceConfig"] = None,
+    novelty_guidance: Optional["NoveltyGuidanceConfig"] = None,
+    novelty_reference: Optional[Sequence[Atoms]] = None,
     property: Optional[Dict[str, float]] = None,
     progress_bar: bool = False,
     save_trajectory: bool = False,
@@ -76,10 +79,30 @@ def sample(
         to an :class:`~agedi.AtomsGraph` (with ``confinement`` applied when
         provided).  When given, ``cell`` and ``pbc`` are taken from the
         template unless explicitly provided.
+    cutoff:
+        Neighbour-list cutoff radius in Ångström, used both for the sampled
+        graphs and for featurising *novelty_reference*.  Should match the
+        cutoff the model was trained with.  Defaults to ``6.0``.
     ff_guidance:
         Force-field guidance configuration.  When ``None`` (default) a
         :class:`~agedi.diffusion.ForcefieldGuidanceConfig` with default
         values is used (i.e. guidance is disabled).
+    novelty_guidance:
+        Feature-space novelty guidance configuration, which repels samples
+        away from structures that have already been found.  ``None`` (default)
+        disables it.  Incompatible with ``compile=True``.  When its ``sigma``
+        is ``None`` the kernel bandwidth is calibrated here against the
+        archive's own pairwise feature-distance distribution, and the resolved
+        value is printed alongside that distribution's quantiles.
+    novelty_reference:
+        Already-found structures to repel from.  Featurised here with the
+        *current* score model — features are only comparable within one model
+        generation, so pass the reference set afresh after every retraining.
+        When *template* is given, each reference structure must start with the
+        same template atoms (as the sampled structures do); they are excluded
+        from the pooling on both sides so the features stay comparable.
+        When ``None`` (and *novelty_guidance* is enabled), samples are only
+        repelled from each other within the batch.
     compile:
         When ``True``, use ``torch.compile`` on the reverse diffusion step
         for faster sampling.  Before the sampling loop starts, the maximum
@@ -108,9 +131,43 @@ def sample(
 
     # Convert an ASE Atoms template to AtomsGraph if needed.
     if template is not None and isinstance(template, Atoms):
-        template = AtomsGraph.from_atoms(template, confinement=confinement)
+        template = AtomsGraph.from_atoms(
+            template, cutoff=cutoff, confinement=confinement
+        )
 
     _ff = ff_guidance if ff_guidance is not None else ForcefieldGuidanceConfig()
+
+    # Featurise the reference structures with the current score model.  The
+    # archive is deliberately rebuilt on every call: features live in the
+    # backbone's activation space and are meaningless across retrainings.
+    #
+    # n_template matters: sampled structures put the template first and mask it
+    # out of the pooling, so the references must exclude the same leading atoms
+    # or the two sides of the comparison are not the same quantity.
+    _archive = None
+    if novelty_reference is not None and len(novelty_reference) > 0:
+        from agedi.diffusion.novelty import FeatureArchive
+
+        _archive = FeatureArchive.from_structures(
+            diffusion.score_model,
+            novelty_reference,
+            cutoff=cutoff,
+            pool=novelty_guidance.pool if novelty_guidance is not None else "mean",
+            n_template=0 if template is None else int(template.x.shape[0]),
+            fully_connected=getattr(diffusion, "fully_connected", False),
+        )
+
+    # Resolve sigma against the archive here rather than inside the sampling
+    # loop, so the value actually used is the one printed below.
+    _novelty_quantiles = None
+    if novelty_guidance is not None and (
+        novelty_guidance.guidance is None or novelty_guidance.guidance != 0.0
+    ):
+        from agedi.diffusion.novelty import resolve_novelty_config as _resolve_novelty
+
+        novelty_guidance = _resolve_novelty(novelty_guidance, _archive)
+        if _archive is not None:
+            _novelty_quantiles = _archive.distance_quantiles()
 
     # Determine display name for the top-level sampler algorithm.
     if sampler is not None:
@@ -130,6 +187,19 @@ def sample(
         confinement=confinement,
         property=property,
         force_field_guidance=_ff.guidance,
+        novelty_guidance=(
+            novelty_guidance.guidance if novelty_guidance is not None else 0.0
+        ),
+        novelty_target_displacement=(
+            novelty_guidance.target_displacement
+            if novelty_guidance is not None
+            else None
+        ),
+        novelty_references=len(_archive) if _archive is not None else 0,
+        novelty_sigma=(
+            novelty_guidance.sigma if novelty_guidance is not None else None
+        ),
+        novelty_distance_quantiles=_novelty_quantiles,
         sampler=_sampler,
     )
 
@@ -143,6 +213,7 @@ def sample(
             batch_size=batch_size,
             steps=steps,
             eps=eps,
+            cutoff=cutoff,
             n_atoms=n_atoms,
             atomic_numbers=atomic_numbers,
             formula=formula,
@@ -152,6 +223,8 @@ def sample(
             confinement=confinement,
             compile=compile,
             ff_guidance=_ff,
+            novelty_guidance=novelty_guidance,
+            novelty_archive=_archive,
             property=property,
             progress_bar=progress_bar,
             save_trajectory=save_trajectory,
@@ -164,6 +237,16 @@ def sample(
     elapsed = time.monotonic() - _start
     n_generated = len(sampled)
     Console().print(f"[green]✓[/green] Generated {n_generated} structure(s) in {elapsed:.1f}s")
+
+    # Report what auto-calibration settled on: the number is worth seeing, both
+    # to sanity-check it and to pin it explicitly for a reproducible rerun.
+    _calibrator = getattr(diffusion, "novelty_calibrator", None)
+    if _calibrator is not None and _calibrator.guidance is not None:
+        Console().print(
+            f"  novelty guidance calibrated to {_calibrator.guidance:.4g} "
+            f"at step {_calibrator.calibrated_at} "
+            f"(|grad| = {_calibrator.gradient_scale:.4g})"
+        )
 
     if not as_atoms:
         return sampled

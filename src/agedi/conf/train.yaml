@@ -87,6 +87,21 @@ reference_energies: auto
 force_loss: huber
 huber_delta: 0.01
 
+# Absolute weight of the force-field loss:
+#   loss = diffusion_loss + regressor_loss_weight * regressor_loss
+# Raise it to prioritise energy/force accuracy, lower it to keep the force field
+# from dominating the score model.  Ignored when loss_balance is set.
+regressor_loss_weight: 1.0
+
+# Relative split between the diffusion and force-field losses, as an alternative
+# to the absolute weight above.  Each term is divided by a running estimate of
+# its own magnitude first, so the same split transfers between systems whose raw
+# loss scales differ.  Accepts "50:50" / "80:20" (diffusion:regressor), a
+# [0.8, 0.2] pair, or a single number giving the regressor fraction.
+# Set to null (default) to use regressor_loss_weight instead.
+loss_balance: null
+loss_balance_momentum: 0.99  # averaging window of the loss-magnitude estimates
+
 # ---------------------------------------------------------------------------
 # Dataset splits and augmentation
 # ---------------------------------------------------------------------------

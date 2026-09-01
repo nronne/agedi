@@ -149,7 +149,12 @@ class TruncatedNormal(Distribution):
 
         """
 
-        self.confinement = batch.confinement[batch.batch]
+        if batch.batch is not None:
+            self.confinement = batch.confinement[batch.batch]
+        else:
+            # Single un-batched graph: broadcast the one confinement row.
+            n_atoms = int(batch.n_atoms.sum().item())
+            self.confinement = batch.confinement.expand(n_atoms, -1)
         self.mask = batch.mask
 
     def _sample(self, mu: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
@@ -213,7 +218,12 @@ class ZeroComNormal(Normal):
     """
 
     def _setup(self, batch: AtomsGraph) -> None:
-        self.batch_idx = batch.batch
+        if batch.batch is not None:
+            self.batch_idx = batch.batch
+        else:
+            # Single un-batched graph: all atoms belong to graph 0.
+            n_atoms = int(batch.n_atoms.sum().item())
+            self.batch_idx = torch.zeros(n_atoms, dtype=torch.long)
 
     def _sample(self, mu: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
         raw = super()._sample(mu, sigma, **kwargs)
